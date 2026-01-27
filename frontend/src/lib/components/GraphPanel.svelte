@@ -1,5 +1,7 @@
 <script lang="ts">
 	import Place from './Place.svelte';
+	import PlaceCircle from './PlaceCircle.svelte';
+	import PlaceText from './PlaceText.svelte';
 	import Transition from './Transition.svelte';
 	import Edge from './Edge.svelte';
 	import Token from './Token.svelte';
@@ -173,21 +175,14 @@
 				{/each}
 			</g>
 
-			<!-- Places layer -->
-			<g class="places">
+			<!-- Place circles layer (background) -->
+			<g class="place-circles">
 				{#each graphState.places as place (place.id)}
-					<Place {...place} />
+					<PlaceCircle {...place} />
 				{/each}
 			</g>
 
-			<!-- Transitions layer -->
-			<g class="transitions">
-				{#each graphState.transitions as transition (transition.id)}
-					<Transition {...transition} isFiring={transition.id === firingTransitionId} />
-				{/each}
-			</g>
-
-			<!-- Tokens layer -->
+			<!-- Tokens layer (on top of place circles, below place text) -->
 			<g class="tokens">
 				{#if animationStage === 'idle'}
 					<!-- Normal state: show all tokens -->
@@ -241,6 +236,20 @@
 						/>
 					{/each}
 				{/if}
+			</g>
+
+			<!-- Place text layer (rendered after tokens so text appears on top) -->
+			<g class="place-texts">
+				{#each graphState.places as place (place.id)}
+					<PlaceText {...place} />
+				{/each}
+			</g>
+
+			<!-- Transitions layer -->
+			<g class="transitions">
+				{#each graphState.transitions as transition (transition.id)}
+					<Transition {...transition} isFiring={transition.id === firingTransitionId} />
+				{/each}
 			</g>
 		{/if}
 	</svg>

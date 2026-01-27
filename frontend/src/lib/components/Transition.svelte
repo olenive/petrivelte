@@ -6,8 +6,8 @@
 	export let function_name: string;
 	export let isFiring: boolean = false;
 
-	const width = 60;
-	const height = 12;
+	const width = 80;
+	const height = 50;
 </script>
 
 <g class="transition" class:firing={isFiring} data-transition-id={id}>
@@ -21,10 +21,18 @@
 		stroke-width="3"
 		class:firing-rect={isFiring}
 	/>
-	<text x={x} y={y - height / 2 - 8} text-anchor="middle" font-size="12" font-weight="bold" fill="var(--transition-text)">
+	<!-- Title with stroke outline -->
+	<text x={x} y={y - 10} text-anchor="middle" font-size="12" font-weight="bold" stroke="var(--transition-fill)" stroke-width="3" fill="none">
 		{name}
 	</text>
-	<text x={x} y={y + height / 2 + 18} text-anchor="middle" font-size="9" fill="var(--text-secondary)">
+	<text x={x} y={y - 10} text-anchor="middle" font-size="12" font-weight="bold" fill="var(--transition-text)">
+		{name}
+	</text>
+	<!-- Function name with stroke outline -->
+	<text x={x} y={y + 12} text-anchor="middle" font-size="9" stroke="var(--transition-fill)" stroke-width="3" fill="none">
+		{function_name}
+	</text>
+	<text x={x} y={y + 12} text-anchor="middle" font-size="9" fill="var(--text-secondary)">
 		{function_name}
 	</text>
 </g>

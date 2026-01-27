@@ -4,12 +4,9 @@
 	export let x: number;
 	export let y: number;
 	export let type_name: string;
-
-	const radius = 30;
 </script>
 
-<g class="place" data-place-id={id}>
-	<circle cx={x} cy={y} r={radius} fill="var(--place-fill)" stroke="var(--place-stroke)" stroke-width="2" />
+<g class="place-text" data-place-id={id}>
 	<!-- Title with stroke outline - inside upper portion of circle -->
 	<text x={x} y={y - 15} text-anchor="middle" font-size="12" font-weight="bold" stroke="var(--place-fill)" stroke-width="3" fill="none">
 		{name}
@@ -27,12 +24,7 @@
 </g>
 
 <style>
-	.place {
-		cursor: pointer;
-	}
-
-	.place:hover circle {
-		stroke: var(--button-border);
-		stroke-width: 3;
+	.place-text {
+		pointer-events: none; /* Let clicks pass through to circle below */
 	}
 </style>

@@ -823,10 +823,10 @@
 		--graph-bg: #1a1a1a;
 		--place-fill: #1a1a1a;
 		--place-stroke: #5cb85c;
-		--place-text: #ffffff;
+		--place-text: #fffacd;
 		--transition-stroke: #5cb85c;
 		--transition-fill: #1a1a1a;
-		--transition-text: #ffffff;
+		--transition-text: #fffacd;
 		--edge-input: #5cb85c;
 		--edge-output: #5cb85c;
 		--token-stroke: #ffffff;

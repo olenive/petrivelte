@@ -9,8 +9,8 @@
 
 	// Node dimensions (must match Place.svelte and Transition.svelte)
 	const PLACE_RADIUS = 30;
-	const TRANSITION_WIDTH = 60;
-	const TRANSITION_HEIGHT = 12;
+	const TRANSITION_WIDTH = 80;
+	const TRANSITION_HEIGHT = 50;
 
 	// Find nodes and determine their types
 	$: sourcePlace = graphState.places.find((p) => p.id === source);
