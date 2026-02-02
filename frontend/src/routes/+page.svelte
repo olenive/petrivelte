@@ -1,11 +1,14 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { env } from '$env/dynamic/public';
 	import { webSocketStore } from '$lib/stores/webSocket';
 	import { selectedTokenId } from '$lib/stores/tokenSelection';
 	import GraphPanel from '$lib/components/GraphPanel.svelte';
 	import ExecutionLog from '$lib/components/ExecutionLog.svelte';
 	import TokenInspector from '$lib/components/TokenInspector.svelte';
 	import type { GraphState, Token, LogEntry } from '$lib/types';
+
+	const apiUrl = env.PUBLIC_API_URL || 'http://localhost:8000';
 
 	let graphState: GraphState | null = null;
 	let tokens: Token[] = [];
@@ -187,7 +190,7 @@
 
 	async function fetchGraphs() {
 		try {
-			const response = await fetch('http://localhost:8000/graphs');
+			const response = await fetch(`${apiUrl}/graphs`);
 			const data = await response.json();
 			availableGraphs = data.graphs.map((g: any) => ({
 				graph_id: g.graph_id,
@@ -207,7 +210,7 @@
 	async function handleStep() {
 		if (!selectedGraphId) return;
 		try {
-			await fetch(`http://localhost:8000/graphs/${selectedGraphId}/step`, {
+			await fetch(`${apiUrl}/graphs/${selectedGraphId}/step`, {
 				method: 'POST'
 			});
 		} catch (error) {
@@ -219,7 +222,7 @@
 		if (!selectedGraphId) return;
 		try {
 			const endpoint = isRunning ? 'stop' : 'start';
-			await fetch(`http://localhost:8000/graphs/${selectedGraphId}/${endpoint}`, {
+			await fetch(`${apiUrl}/graphs/${selectedGraphId}/${endpoint}`, {
 				method: 'POST'
 			});
 			isRunning = !isRunning;
@@ -246,7 +249,7 @@
 		while (isAutoStepping) {
 			try {
 				// Call step endpoint
-				const response = await fetch(`http://localhost:8000/graphs/${selectedGraphId}/step`, {
+				const response = await fetch(`${apiUrl}/graphs/${selectedGraphId}/step`, {
 					method: 'POST'
 				});
 				const result = await response.json();
@@ -276,7 +279,7 @@
 		console.log('🔄 RESET: Button clicked, current tokens count:', tokens.length);
 		try {
 			console.log('🔄 RESET: Calling backend reset endpoint...');
-			await fetch(`http://localhost:8000/graphs/${selectedGraphId}/reset`, {
+			await fetch(`${apiUrl}/graphs/${selectedGraphId}/reset`, {
 				method: 'POST'
 			});
 			console.log('🔄 RESET: Backend responded');
@@ -299,7 +302,7 @@
 		}
 	}
 
-	function handleGraphSelect(event: Event) {
+	async function handleGraphSelect(event: Event) {
 		const target = event.target as HTMLSelectElement;
 		selectedGraphId = target.value;
 		const graph = availableGraphs.find(g => g.graph_id === selectedGraphId);
@@ -310,6 +313,34 @@
 		graphState = null;
 		tokens = [];
 		logEntries = [];
+
+		// Fetch the selected graph's state
+		if (selectedGraphId) {
+			try {
+				const response = await fetch(`${apiUrl}/graphs/${selectedGraphId}/state`);
+				const data = await response.json();
+				graphState = data;
+
+				// Extract tokens from places
+				const tokensData: Array<{id: string, place_id: string, data: any}> = [];
+				if (graphState?.places) {
+					for (const place of graphState.places) {
+						if (place.tokens && place.tokens.length > 0) {
+							for (const token of place.tokens) {
+								tokensData.push({
+									id: token.id,
+									place_id: place.id,
+									data: token.data
+								});
+							}
+						}
+					}
+				}
+				tokens = calculateTokenPositions(tokensData, graphState!);
+			} catch (error) {
+				console.error('Failed to fetch graph state:', error);
+			}
+		}
 	}
 
 	function calculateTokenPositions(tokensData: Array<{id: string, place_id: string, data: any}>, state: GraphState): Token[] {

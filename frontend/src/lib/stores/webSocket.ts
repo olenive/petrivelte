@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import { env } from '$env/dynamic/public';
 import type { WebSocketMessage } from '$lib/types';
 
 function createWebSocketStore() {
@@ -6,7 +7,9 @@ function createWebSocketStore() {
 	let ws: WebSocket | null = null;
 
 	function connect() {
-		ws = new WebSocket('ws://localhost:8000/ws');
+		const apiUrl = env.PUBLIC_API_URL || 'http://localhost:8000';
+		const wsUrl = apiUrl.replace(/^http/, 'ws') + '/ws';
+		ws = new WebSocket(wsUrl);
 
 		ws.onopen = () => {
 			console.log('WebSocket connected');
