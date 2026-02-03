@@ -201,6 +201,32 @@
 			if (availableGraphs.length > 0 && !selectedGraphId) {
 				selectedGraphId = availableGraphs[0].graph_id;
 				isRunning = availableGraphs[0].is_running;
+
+				// Fetch the selected graph's state to ensure it matches the dropdown
+				try {
+					const stateResponse = await fetch(`${apiUrl}/graphs/${selectedGraphId}/state`);
+					const stateData = await stateResponse.json();
+					graphState = stateData;
+
+					// Extract tokens from places
+					const tokensData: Array<{id: string, place_id: string, data: any}> = [];
+					if (graphState?.places) {
+						for (const place of graphState.places) {
+							if (place.tokens && place.tokens.length > 0) {
+								for (const token of place.tokens) {
+									tokensData.push({
+										id: token.id,
+										place_id: place.id,
+										data: token.data
+									});
+								}
+							}
+						}
+					}
+					tokens = calculateTokenPositions(tokensData, graphState!);
+				} catch (error) {
+					console.error('Failed to fetch initial graph state:', error);
+				}
 			}
 		} catch (error) {
 			console.error('Failed to fetch graphs:', error);
@@ -525,13 +551,21 @@
 		const unsubscribe = webSocketStore.subscribe((message) => {
 			if (!message) return;
 
-			console.log('📨 WebSocket message received:', message.type);
+			console.log('📨 WebSocket message received:', message.type, 'graph_id:', message.graph_id);
+
+			// Mark connection as established
+			connectionStatus = 'Connected ✓';
+
+			// Filter messages by selected graph
+			if (message.graph_id !== selectedGraphId) {
+				console.log(`📨 Ignoring message for graph ${message.graph_id}, selected: ${selectedGraphId}`);
+				return;
+			}
 
 			if (message.type === 'graph_state') {
 				console.log('📊 GRAPH_STATE: Processing graph state message...');
 				console.log('📊 GRAPH_STATE: Places count:', message.data.places?.length);
 				graphState = message.data;
-				connectionStatus = 'Connected ✓';
 
 				// Extract tokens from places and calculate x/y positions
 				const tokensData = [];

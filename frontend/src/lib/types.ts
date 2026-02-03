@@ -57,6 +57,7 @@ export interface LogEntry {
 
 export interface TransitionFiredMessage {
 	type: 'transition_fired';
+	graph_id: string;
 	transition_name: string;
 	tokens_moved: TokenMovement[];
 	log_entry: LogEntry;
@@ -65,6 +66,7 @@ export interface TransitionFiredMessage {
 
 export interface GraphStateMessage {
 	type: 'graph_state';
+	graph_id: string;
 	data: GraphState;
 }
 
