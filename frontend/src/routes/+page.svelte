@@ -1,14 +1,17 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { env } from '$env/dynamic/public';
+	import { goto } from '$app/navigation';
 	import { webSocketStore } from '$lib/stores/webSocket';
 	import { selectedTokenId } from '$lib/stores/tokenSelection';
+	import {
+		getMe, logout,
+		listNets, getExecutionState, executionStep, executionStart, executionStop, executionReset,
+		type Net,
+	} from '$lib/api';
 	import GraphPanel from '$lib/components/GraphPanel.svelte';
 	import ExecutionLog from '$lib/components/ExecutionLog.svelte';
 	import TokenInspector from '$lib/components/TokenInspector.svelte';
 	import type { GraphState, Token, LogEntry } from '$lib/types';
-
-	const apiUrl = env.PUBLIC_API_URL || 'http://localhost:8000';
 
 	let graphState: GraphState | null = null;
 	let tokens: Token[] = [];
@@ -34,9 +37,12 @@
 	let animationQueue: QueuedAnimation[] = [];
 	let isAnimating = false;
 
-	// Graph selection and execution state
-	let availableGraphs: Array<{ graph_id: string; is_running: boolean }> = [];
-	let selectedGraphId: string | null = null;
+	// Auth state
+	let userEmail = '';
+
+	// Net selection and execution state
+	let availableNets: Net[] = [];
+	let selectedNetId: string | null = null;
 	let isRunning = false;
 	let isAutoStepping = false;
 
@@ -188,127 +194,113 @@
 		$selectedTokenId = tokenId;
 	}
 
-	async function fetchGraphs() {
+	async function fetchNets() {
 		try {
-			const response = await fetch(`${apiUrl}/graphs`);
-			const data = await response.json();
-			availableGraphs = data.graphs.map((g: any) => ({
-				graph_id: g.graph_id,
-				is_running: g.is_running
-			}));
+			availableNets = await listNets();
 
-			// Auto-select first graph if none selected
-			if (availableGraphs.length > 0 && !selectedGraphId) {
-				selectedGraphId = availableGraphs[0].graph_id;
-				isRunning = availableGraphs[0].is_running;
-
-				// Fetch the selected graph's state to ensure it matches the dropdown
-				try {
-					const stateResponse = await fetch(`${apiUrl}/graphs/${selectedGraphId}/state`);
-					const stateData = await stateResponse.json();
-					graphState = stateData;
-
-					// Extract tokens from places
-					const tokensData: Array<{id: string, place_id: string, data: any}> = [];
-					if (graphState?.places) {
-						for (const place of graphState.places) {
-							if (place.tokens && place.tokens.length > 0) {
-								for (const token of place.tokens) {
-									tokensData.push({
-										id: token.id,
-										place_id: place.id,
-										data: token.data
-									});
-								}
-							}
-						}
-					}
-					tokens = calculateTokenPositions(tokensData, graphState!);
-				} catch (error) {
-					console.error('Failed to fetch initial graph state:', error);
-				}
+			// Auto-select first net if none selected
+			if (availableNets.length > 0 && !selectedNetId) {
+				await selectNet(availableNets[0].id);
 			}
 		} catch (error) {
-			console.error('Failed to fetch graphs:', error);
+			console.error('Failed to fetch nets:', error);
+		}
+	}
+
+	async function selectNet(netId: string) {
+		selectedNetId = netId;
+		isRunning = false;
+
+		// Connect WebSocket to this net
+		webSocketStore.connectToNet(netId);
+
+		// Fetch execution state
+		try {
+			const stateData = await getExecutionState(netId);
+			graphState = stateData;
+
+			const tokensData: Array<{id: string, place_id: string, data: any}> = [];
+			if (graphState?.places) {
+				for (const place of graphState.places) {
+					if (place.tokens && place.tokens.length > 0) {
+						for (const token of place.tokens) {
+							tokensData.push({
+								id: token.id,
+								place_id: place.id,
+								data: token.data
+							});
+						}
+					}
+				}
+			}
+			tokens = calculateTokenPositions(tokensData, graphState!);
+		} catch (error) {
+			console.error('Failed to fetch execution state:', error);
+			// Net might not be loaded on worker yet — that's ok, WebSocket will send state
 		}
 	}
 
 	async function handleStep() {
-		if (!selectedGraphId) return;
+		if (!selectedNetId) return;
 		try {
-			await fetch(`${apiUrl}/graphs/${selectedGraphId}/step`, {
-				method: 'POST'
-			});
+			await executionStep(selectedNetId);
 		} catch (error) {
 			console.error('Step failed:', error);
 		}
 	}
 
 	async function handleActivateDeactivate() {
-		if (!selectedGraphId) return;
+		if (!selectedNetId) return;
 		try {
-			const endpoint = isRunning ? 'stop' : 'start';
-			await fetch(`${apiUrl}/graphs/${selectedGraphId}/${endpoint}`, {
-				method: 'POST'
-			});
+			if (isRunning) {
+				await executionStop(selectedNetId);
+			} else {
+				await executionStart(selectedNetId);
+			}
 			isRunning = !isRunning;
-			await fetchGraphs(); // Refresh graph state
 		} catch (error) {
 			console.error('Activate/Deactivate failed:', error);
 		}
 	}
 
 	async function handleAutoStep() {
-		if (!selectedGraphId) return;
+		if (!selectedNetId) return;
 
 		if (isAutoStepping) {
-			// Stop auto-stepping
 			isAutoStepping = false;
-			console.log('🔁 AUTO STEP: Stopped by user');
+			console.log('AUTO STEP: Stopped by user');
 			return;
 		}
 
-		// Start auto-stepping
 		isAutoStepping = true;
-		console.log('🔁 AUTO STEP: Starting...');
+		console.log('AUTO STEP: Starting...');
 
 		while (isAutoStepping) {
 			try {
-				// Call step endpoint
-				const response = await fetch(`${apiUrl}/graphs/${selectedGraphId}/step`, {
-					method: 'POST'
-				});
-				const result = await response.json();
+				const result = await executionStep(selectedNetId);
 
-				// Check if any transition fired
 				if (result.fired === 0) {
-					console.log('🔁 AUTO STEP: No more transitions can fire, stopping');
+					console.log('AUTO STEP: No more transitions can fire, stopping');
 					isAutoStepping = false;
 					break;
 				}
 
 				// Wait for animation to complete (600ms total)
 				await new Promise(resolve => setTimeout(resolve, 650));
-
 			} catch (error) {
-				console.error('🔁 AUTO STEP: Step failed:', error);
+				console.error('AUTO STEP: Step failed:', error);
 				isAutoStepping = false;
 				break;
 			}
 		}
 
-		console.log('🔁 AUTO STEP: Completed');
+		console.log('AUTO STEP: Completed');
 	}
 
 	async function handleReset() {
-		if (!selectedGraphId) return;
-		console.log('🔄 RESET: Button clicked, current tokens count:', tokens.length);
+		if (!selectedNetId) return;
 		try {
-			console.log('🔄 RESET: Calling backend reset endpoint...');
-			await fetch(`${apiUrl}/graphs/${selectedGraphId}/reset`, {
-				method: 'POST'
-			});
-			console.log('🔄 RESET: Backend responded');
+			await executionReset(selectedNetId);
 			// Clear execution log and animation state (tokens will be updated by WebSocket graph_state message)
 			logEntries = [];
 			animationQueue = [];
@@ -321,51 +313,22 @@
 			firingTransitionId = null;
 			activeEdgeIds = new Set();
 			isAnimating = false;
-			console.log('🔄 RESET: Cleared log entries and animation state, waiting for WebSocket to update tokens...');
-			await fetchGraphs(); // Refresh graph state
 		} catch (error) {
-			console.error('🔄 RESET: Failed with error:', error);
+			console.error('Reset failed:', error);
 		}
 	}
 
-	async function handleGraphSelect(event: Event) {
+	async function handleNetSelect(event: Event) {
 		const target = event.target as HTMLSelectElement;
-		selectedGraphId = target.value;
-		const graph = availableGraphs.find(g => g.graph_id === selectedGraphId);
-		if (graph) {
-			isRunning = graph.is_running;
-		}
-		// Clear current state when switching graphs
+		const netId = target.value;
+
+		// Clear current state when switching nets
 		graphState = null;
 		tokens = [];
 		logEntries = [];
 
-		// Fetch the selected graph's state
-		if (selectedGraphId) {
-			try {
-				const response = await fetch(`${apiUrl}/graphs/${selectedGraphId}/state`);
-				const data = await response.json();
-				graphState = data;
-
-				// Extract tokens from places
-				const tokensData: Array<{id: string, place_id: string, data: any}> = [];
-				if (graphState?.places) {
-					for (const place of graphState.places) {
-						if (place.tokens && place.tokens.length > 0) {
-							for (const token of place.tokens) {
-								tokensData.push({
-									id: token.id,
-									place_id: place.id,
-									data: token.data
-								});
-							}
-						}
-					}
-				}
-				tokens = calculateTokenPositions(tokensData, graphState!);
-			} catch (error) {
-				console.error('Failed to fetch graph state:', error);
-			}
+		if (netId) {
+			await selectNet(netId);
 		}
 	}
 
@@ -535,6 +498,11 @@
 		animationTimeouts = [timeout1];
 	}
 
+	async function handleLogout() {
+		await logout();
+		goto('/login');
+	}
+
 	onMount(() => {
 		// Load theme preference
 		loadTheme();
@@ -542,37 +510,33 @@
 		// Load saved panel layout
 		loadPanelLayout();
 
-		// Fetch available graphs on mount
-		fetchGraphs();
-
-		// Poll for graph list updates every 2 seconds
-		const pollInterval = setInterval(fetchGraphs, 2000);
+		// Check auth and load nets
+		(async () => {
+			const user = await getMe();
+			if (!user) {
+				goto('/login');
+				return;
+			}
+			userEmail = user.email;
+			await fetchNets();
+		})();
 
 		const unsubscribe = webSocketStore.subscribe((message) => {
 			if (!message) return;
 
-			console.log('📨 WebSocket message received:', message.type, 'graph_id:', message.graph_id);
-
 			// Mark connection as established
-			connectionStatus = 'Connected ✓';
+			connectionStatus = 'Connected';
 
-			// Filter messages by selected graph
-			if (message.graph_id !== selectedGraphId) {
-				console.log(`📨 Ignoring message for graph ${message.graph_id}, selected: ${selectedGraphId}`);
-				return;
-			}
+			// Filter messages by selected net
+			if (message.graph_id !== selectedNetId) return;
 
 			if (message.type === 'graph_state') {
-				console.log('📊 GRAPH_STATE: Processing graph state message...');
-				console.log('📊 GRAPH_STATE: Places count:', message.data.places?.length);
 				graphState = message.data;
 
-				// Extract tokens from places and calculate x/y positions
-				const tokensData = [];
+				const tokensData: Array<{id: string, place_id: string, data: any}> = [];
 				if (graphState.places) {
 					for (const place of graphState.places) {
 						if (place.tokens && place.tokens.length > 0) {
-							console.log(`📊 GRAPH_STATE: Place "${place.name}" has ${place.tokens.length} tokens`);
 							for (const token of place.tokens) {
 								tokensData.push({
 									id: token.id,
@@ -583,46 +547,30 @@
 						}
 					}
 				}
-				console.log('📊 GRAPH_STATE: Total tokens data extracted:', tokensData.length);
-				const oldTokensCount = tokens.length;
 				tokens = calculateTokenPositions(tokensData, graphState);
-				console.log(`📊 GRAPH_STATE: Tokens updated from ${oldTokensCount} to ${tokens.length}`);
-				console.log('📊 GRAPH_STATE: Sample token positions:', tokens.slice(0, 2));
 			}
 
 			if (message.type === 'transition_fired') {
-				console.log('⚡ TRANSITION_FIRED: Processing transition fired message...');
 				logEntries = [message.log_entry, ...logEntries];
 
-				if (!graphState) {
-					console.warn('⚡ TRANSITION_FIRED: No graphState available, cannot animate!');
-					return;
-				}
+				if (!graphState) return;
 
-				// Calculate new token positions
 				const newTokens = calculateTokenPositions(message.new_token_positions, graphState);
 
-				// Find the transition that fired
 				const transition = graphState.transitions.find(t => t.name === message.transition_name);
 				if (!transition) {
-					console.warn('⚡ TRANSITION_FIRED: Transition not found, skipping animation');
 					tokens = newTokens;
 					return;
 				}
 
-				// Queue this animation
 				animationQueue.push({
 					transitionName: transition.name,
 					transitionPosition: { x: transition.x, y: transition.y },
 					newTokens
 				});
 
-				console.log(`⚡ TRANSITION_FIRED: Queued animation for ${transition.name}, queue length: ${animationQueue.length}`);
-
-				// If queue is getting too long (more than 3), skip to catch up
+				// If queue is getting too long, skip to catch up
 				if (animationQueue.length > 3) {
-					console.log('⚡ TRANSITION_FIRED: Queue too long, skipping to latest state');
-					// Apply all queued states immediately
 					const lastAnimation = animationQueue[animationQueue.length - 1];
 					tokens = lastAnimation.newTokens;
 					animationQueue = [];
@@ -631,13 +579,11 @@
 					producingTokens = [];
 					transitionPosition = null;
 					isAnimating = false;
-					// Cancel any running animation
 					animationTimeouts.forEach(t => clearTimeout(t));
 					animationTimeouts = [];
 					return;
 				}
 
-				// Start processing queue if not already animating
 				if (!isAnimating) {
 					processAnimationQueue();
 				}
@@ -646,7 +592,7 @@
 
 		return () => {
 			unsubscribe();
-			clearInterval(pollInterval);
+			webSocketStore.disconnect();
 		};
 	});
 </script>
@@ -656,8 +602,8 @@
 <div class="app">
 	<header>
 		<div class="header-left">
-			<h1>Petrivelt</h1>
-			<span class="status" class:connected={connectionStatus.includes('✓')}>
+			<h1>Petritype</h1>
+			<span class="status" class:connected={connectionStatus === 'Connected'}>
 				{connectionStatus}
 			</span>
 			<button class="theme-toggle" on:click={toggleTheme} title="Toggle light/dark mode">
@@ -666,59 +612,64 @@
 		</div>
 
 		<div class="controls">
-			{#if availableGraphs.length > 0}
+			{#if availableNets.length > 0}
 				<div class="control-group">
-					<label for="graph-select">Graph:</label>
-					<select id="graph-select" bind:value={selectedGraphId} on:change={handleGraphSelect}>
-						{#each availableGraphs as graph}
-							<option value={graph.graph_id}>{graph.graph_id}</option>
+					<label for="net-select">Net:</label>
+					<select id="net-select" bind:value={selectedNetId} on:change={handleNetSelect}>
+						{#each availableNets as net}
+							<option value={net.id}>{net.name}</option>
 						{/each}
 					</select>
 				</div>
 
 				<div class="control-group">
 					<span class="execution-state" class:running={isRunning} class:auto-stepping={isAutoStepping}>
-						{isRunning ? '▶ Active' : isAutoStepping ? '🔁 Auto Stepping' : '⏸ Idle'}
+						{isRunning ? 'Active' : isAutoStepping ? 'Auto Stepping' : 'Idle'}
 					</span>
 				</div>
 
 				<div class="control-group">
 					<button
 						on:click={handleStep}
-						disabled={isRunning || isAutoStepping || !selectedGraphId}
-						title="Fire a single transition manually. Use this to step through execution one transition at a time."
+						disabled={isRunning || isAutoStepping || !selectedNetId}
+						title="Fire a single transition manually."
 					>
 						Step
 					</button>
 					<button
 						on:click={handleAutoStep}
-						disabled={isRunning || !selectedGraphId}
+						disabled={isRunning || !selectedNetId}
 						class:stop={isAutoStepping}
 						title={isAutoStepping
 							? "Stop automatic stepping."
-							: "Automatically fire transitions one at a time with animations. Continues until no more transitions can fire, or click Stop to pause early."}
+							: "Automatically fire transitions one at a time with animations."}
 					>
 						{isAutoStepping ? 'Stop' : 'Auto Step'}
 					</button>
 					<button
 						on:click={handleActivateDeactivate}
-						disabled={isAutoStepping || !selectedGraphId}
+						disabled={isAutoStepping || !selectedNetId}
 						class:stop={isRunning}
 						title={isRunning
 							? "Stop continuous execution."
-							: "Start continuous execution controlled by the Petri net's internal timing. Transitions fire based on backend logic. Animations play when possible, or skip to latest state if firing too rapidly."}
+							: "Start continuous execution."}
 					>
 						{isRunning ? 'Deactivate' : 'Activate'}
 					</button>
 					<button
 						on:click={handleReset}
-						disabled={isRunning || isAutoStepping || !selectedGraphId}
-						title="Reset the Petri net to its initial state with all original tokens restored."
+						disabled={isRunning || isAutoStepping || !selectedNetId}
+						title="Reset the Petri net to its initial state."
 					>
 						Reset
 					</button>
 				</div>
 			{/if}
+
+			<div class="control-group user-info">
+				<span class="user-email">{userEmail}</span>
+				<button on:click={handleLogout} title="Sign out">Logout</button>
+			</div>
 		</div>
 	</header>
 
@@ -828,11 +779,11 @@
 		</main>
 	{:else}
 		<div class="loading">
-			<p>Waiting for graph data from petritype-server...</p>
+			<p>No graph data yet.</p>
 			<p class="hint">
-				Make sure petritype-server is running and a graph is loaded.
+				Create a net, assign it to a worker, and load it.
 				<br />
-				See GETTING_STARTED.md for setup instructions.
+				The graph will appear once the net is loaded on a running worker.
 			</p>
 		</div>
 	{/if}
@@ -1026,6 +977,15 @@
 		cursor: not-allowed;
 		border-color: var(--border-color);
 		color: var(--text-tertiary);
+	}
+
+	.user-info {
+		margin-left: auto;
+	}
+
+	.user-email {
+		font-size: 0.85em;
+		color: var(--text-secondary);
 	}
 
 	.execution-state {
