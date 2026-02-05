@@ -5,8 +5,9 @@
 	import { selectedTokenId } from '$lib/stores/tokenSelection';
 	import {
 		getMe, logout,
-		listNets, getExecutionState, executionStep, executionStart, executionStop, executionReset,
-		type Net,
+		listNets, listWorkers, patchNet, loadNet, unloadNet,
+		getExecutionState, executionStep, executionStart, executionStop, executionReset,
+		type Net, type Worker,
 	} from '$lib/api';
 	import GraphPanel from '$lib/components/GraphPanel.svelte';
 	import ExecutionLog from '$lib/components/ExecutionLog.svelte';
@@ -45,6 +46,10 @@
 	let selectedNetId: string | null = null;
 	let isRunning = false;
 	let isAutoStepping = false;
+
+	// Worker state
+	let workers: Worker[] = [];
+	let workerActionInProgress = false;
 
 	// Theme state
 	const THEME_STORAGE_KEY = 'petrivelte-theme';
@@ -498,6 +503,67 @@
 		animationTimeouts = [timeout1];
 	}
 
+	function selectedNet(): Net | undefined {
+		return availableNets.find(n => n.id === selectedNetId);
+	}
+
+	function selectedNetWorker(): Worker | undefined {
+		const net = selectedNet();
+		if (!net?.worker_id) return undefined;
+		return workers.find(w => w.id === net.worker_id);
+	}
+
+	async function handleWorkerAssign(event: Event) {
+		const target = event.target as HTMLSelectElement;
+		const workerId = target.value;
+		if (!selectedNetId) return;
+		workerActionInProgress = true;
+		try {
+			if (workerId) {
+				await patchNet(selectedNetId, { worker_id: workerId });
+			} else {
+				// Unassign — send explicit null via raw fetch
+				const { API_URL } = await import('$lib/api');
+				const res = await fetch(`${API_URL}/api/nets/${selectedNetId}`, {
+					method: 'PATCH',
+					credentials: 'include',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ worker_id: null }),
+				});
+				if (!res.ok) throw new Error('Failed to unassign worker');
+			}
+			await fetchNets();
+		} catch (error) {
+			console.error('Worker assignment failed:', error);
+		} finally {
+			workerActionInProgress = false;
+		}
+	}
+
+	async function handleLoadNet() {
+		if (!selectedNetId) return;
+		workerActionInProgress = true;
+		try {
+			await loadNet(selectedNetId);
+		} catch (error) {
+			console.error('Load failed:', error);
+		} finally {
+			workerActionInProgress = false;
+		}
+	}
+
+	async function handleUnloadNet() {
+		if (!selectedNetId) return;
+		workerActionInProgress = true;
+		try {
+			await unloadNet(selectedNetId);
+		} catch (error) {
+			console.error('Unload failed:', error);
+		} finally {
+			workerActionInProgress = false;
+		}
+	}
+
 	async function handleLogout() {
 		await logout();
 		goto('/login');
@@ -518,7 +584,7 @@
 				return;
 			}
 			userEmail = user.email;
-			await fetchNets();
+			await Promise.all([fetchNets(), listWorkers().then(w => workers = w).catch(() => {})]);
 		})();
 
 		const unsubscribe = webSocketStore.subscribe((message) => {
@@ -609,6 +675,7 @@
 			<button class="theme-toggle" on:click={toggleTheme} title="Toggle light/dark mode">
 				{theme === 'light' ? 'dark' : 'light'}
 			</button>
+			<a href="/workers" class="nav-link">Workers</a>
 		</div>
 
 		<div class="controls">
@@ -621,6 +688,23 @@
 						{/each}
 					</select>
 				</div>
+
+				<!-- Worker assignment -->
+				{#if selectedNetId}
+					<div class="control-group">
+						<label for="worker-select">Worker:</label>
+						<select id="worker-select" value={selectedNet()?.worker_id ?? ''} on:change={handleWorkerAssign} disabled={workerActionInProgress}>
+							<option value="">No worker</option>
+							{#each workers as w}
+								<option value={w.id}>{w.name} ({w.worker_type === 'fly_machine' ? 'Fly' : 'Sprite'} - {w.status})</option>
+							{/each}
+						</select>
+						{#if selectedNet()?.worker_id && selectedNetWorker()?.status === 'ready'}
+							<button class="small-btn" on:click={handleLoadNet} disabled={workerActionInProgress}>Load</button>
+							<button class="small-btn" on:click={handleUnloadNet} disabled={workerActionInProgress}>Unload</button>
+						{/if}
+					</div>
+				{/if}
 
 				<div class="control-group">
 					<span class="execution-state" class:running={isRunning} class:auto-stepping={isAutoStepping}>
@@ -790,70 +874,6 @@
 </div>
 
 <style>
-	:global(body) {
-		margin: 0;
-		padding: 0;
-		font-family: system-ui, -apple-system, sans-serif;
-	}
-
-	/* Light theme */
-	:global(body.light-theme) {
-		--bg-primary: #f5f5f5;
-		--bg-secondary: white;
-		--bg-tertiary: #f8f9fa;
-		--bg-hover: #f5f5f5;
-		--text-primary: #333;
-		--text-secondary: #666;
-		--text-tertiary: #999;
-		--border-color: #ddd;
-		--border-light: #eee;
-		--graph-bg: #f0f0f0;
-		--place-fill: white;
-		--place-stroke: #0066cc;
-		--place-text: #333;
-		--transition-stroke: #0066cc;
-		--transition-fill: white;
-		--transition-text: #333;
-		--edge-input: #0066cc;
-		--edge-output: #0066cc;
-		--token-stroke: #333;
-		--button-border: #0066cc;
-		--button-text: #0066cc;
-		--button-hover-bg: #0066cc;
-		--button-hover-text: white;
-		--token-selection-color: #0066cc;
-		--token-selection-glow: rgba(0, 102, 204, 0.5);
-	}
-
-	/* Dark theme */
-	:global(body.dark-theme) {
-		--bg-primary: #0f0f0f;
-		--bg-secondary: #1a1a1a;
-		--bg-tertiary: #2d2d2d;
-		--bg-hover: #333333;
-		--text-primary: #ffffff;
-		--text-secondary: #b0b0b0;
-		--text-tertiary: #808080;
-		--border-color: #333;
-		--border-light: #444;
-		--graph-bg: #1a1a1a;
-		--place-fill: #1a1a1a;
-		--place-stroke: #5cb85c;
-		--place-text: #fffacd;
-		--transition-stroke: #5cb85c;
-		--transition-fill: #1a1a1a;
-		--transition-text: #fffacd;
-		--edge-input: #5cb85c;
-		--edge-output: #5cb85c;
-		--token-stroke: #ffffff;
-		--button-border: #4d9fff;
-		--button-text: #4d9fff;
-		--button-hover-bg: #4d9fff;
-		--button-hover-text: #0f0f0f;
-		--token-selection-color: #4d9fff;
-		--token-selection-glow: rgba(77, 159, 255, 0.6);
-	}
-
 	.app {
 		display: flex;
 		flex-direction: column;
@@ -1177,5 +1197,26 @@
 		color: var(--text-secondary);
 		font-size: 0.9em;
 		max-width: 500px;
+	}
+
+	.nav-link {
+		color: var(--button-text);
+		font-size: 0.9em;
+		font-weight: 500;
+		text-decoration: none;
+		padding: 0.5rem 0.75rem;
+		border: 1px solid var(--button-border);
+		border-radius: 4px;
+		transition: all 0.2s;
+	}
+
+	.nav-link:hover {
+		background: var(--button-hover-bg);
+		color: var(--button-hover-text);
+	}
+
+	.small-btn {
+		padding: 0.35rem 0.7rem;
+		font-size: 0.85em;
 	}
 </style>

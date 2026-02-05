@@ -164,18 +164,17 @@ export async function executionReset(netId: string): Promise<void> {
 export interface Worker {
 	id: string;
 	name: string;
-	cpu_kind: string;
-	cpus: number;
-	memory_mb: number;
+	worker_type: string;
+	sprite_name: string | null;
 	fly_machine_id: string | null;
-	machine_status: string;
-	private_ip: string | null;
+	status: string;
+	url: string | null;
 	created_at: string;
 	updated_at: string;
 }
 
 export interface WorkerDetail extends Worker {
-	assigned_nets: Array<{ id: string; name: string }>;
+	assigned_nets: Array<{ id: string; name: string; entry_module: string; entry_function: string }>;
 }
 
 export async function listWorkers(): Promise<Worker[]> {
@@ -192,9 +191,7 @@ export async function getWorker(workerId: string): Promise<WorkerDetail> {
 
 export async function createWorker(body: {
 	name: string;
-	cpu_kind?: string;
-	cpus?: number;
-	memory_mb?: number;
+	worker_type?: string;
 }): Promise<Worker> {
 	const res = await post('/api/workers', body);
 	if (!res.ok) throw new Error((await res.json()).detail ?? 'Failed to create worker');
@@ -206,12 +203,23 @@ export async function deleteWorker(workerId: string): Promise<void> {
 	if (!res.ok) throw new Error('Failed to delete worker');
 }
 
-export async function startFlyMachine(workerId: string): Promise<void> {
-	const res = await post(`/api/workers/${workerId}/fly_machine/start`);
-	if (!res.ok) throw new Error((await res.json()).detail ?? 'Failed to start machine');
+export async function provisionWorker(workerId: string): Promise<{ status: string; url: string }> {
+	const res = await post(`/api/workers/${workerId}/provision`);
+	if (!res.ok) throw new Error((await res.json()).detail ?? 'Failed to provision worker');
+	return res.json();
 }
 
-export async function stopFlyMachine(workerId: string): Promise<void> {
-	const res = await post(`/api/workers/${workerId}/fly_machine/stop`);
-	if (!res.ok) throw new Error((await res.json()).detail ?? 'Failed to stop machine');
+export async function destroyWorkerResource(workerId: string): Promise<void> {
+	const res = await post(`/api/workers/${workerId}/destroy`);
+	if (!res.ok) throw new Error((await res.json()).detail ?? 'Failed to destroy resource');
+}
+
+export async function startWorker(workerId: string): Promise<void> {
+	const res = await post(`/api/workers/${workerId}/start`);
+	if (!res.ok) throw new Error((await res.json()).detail ?? 'Failed to start worker');
+}
+
+export async function stopWorker(workerId: string): Promise<void> {
+	const res = await post(`/api/workers/${workerId}/stop`);
+	if (!res.ok) throw new Error((await res.json()).detail ?? 'Failed to stop worker');
 }

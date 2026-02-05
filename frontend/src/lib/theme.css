@@ -1,0 +1,74 @@
+/* Global reset and theme variables */
+body {
+	margin: 0;
+	padding: 0;
+	font-family: system-ui, -apple-system, sans-serif;
+}
+
+/* Light theme */
+body.light-theme {
+	--bg-primary: #f5f5f5;
+	--bg-secondary: white;
+	--bg-tertiary: #f8f9fa;
+	--bg-hover: #f5f5f5;
+	--text-primary: #333;
+	--text-secondary: #666;
+	--text-tertiary: #999;
+	--border-color: #ddd;
+	--border-light: #eee;
+	--graph-bg: #f0f0f0;
+	--place-fill: white;
+	--place-stroke: #0066cc;
+	--place-text: #333;
+	--transition-stroke: #0066cc;
+	--transition-fill: white;
+	--transition-text: #333;
+	--edge-input: #0066cc;
+	--edge-output: #0066cc;
+	--token-stroke: #333;
+	--button-border: #0066cc;
+	--button-text: #0066cc;
+	--button-hover-bg: #0066cc;
+	--button-hover-text: white;
+	--token-selection-color: #0066cc;
+	--token-selection-glow: rgba(0, 102, 204, 0.5);
+	--status-ready: #28a745;
+	--status-stopped: #6c757d;
+	--status-error: #dc3545;
+	--status-provisioning: #fd7e14;
+	--status-pending: #6c757d;
+}
+
+/* Dark theme */
+body.dark-theme {
+	--bg-primary: #0f0f0f;
+	--bg-secondary: #1a1a1a;
+	--bg-tertiary: #2d2d2d;
+	--bg-hover: #333333;
+	--text-primary: #ffffff;
+	--text-secondary: #b0b0b0;
+	--text-tertiary: #808080;
+	--border-color: #333;
+	--border-light: #444;
+	--graph-bg: #1a1a1a;
+	--place-fill: #1a1a1a;
+	--place-stroke: #5cb85c;
+	--place-text: #fffacd;
+	--transition-stroke: #5cb85c;
+	--transition-fill: #1a1a1a;
+	--transition-text: #fffacd;
+	--edge-input: #5cb85c;
+	--edge-output: #5cb85c;
+	--token-stroke: #ffffff;
+	--button-border: #4d9fff;
+	--button-text: #4d9fff;
+	--button-hover-bg: #4d9fff;
+	--button-hover-text: #0f0f0f;
+	--token-selection-color: #4d9fff;
+	--token-selection-glow: rgba(77, 159, 255, 0.6);
+	--status-ready: #28a745;
+	--status-stopped: #6c757d;
+	--status-error: #dc3545;
+	--status-provisioning: #fd7e14;
+	--status-pending: #6c757d;
+}
