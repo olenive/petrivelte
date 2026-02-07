@@ -1,4 +1,72 @@
-/* Global reset and theme variables */
+@import "tailwindcss";
+
+/* ============================================
+   Custom dark variant for .dark-theme class
+   (use dark: prefix when needed beyond CSS vars)
+   ============================================ */
+@custom-variant dark (&:where(.dark-theme, .dark-theme *));
+
+/* ============================================
+   Tailwind theme tokens mapped to CSS variables
+   ============================================ */
+@theme {
+	/* Backgrounds */
+	--color-surface: var(--bg-primary);
+	--color-card: var(--bg-secondary);
+	--color-muted: var(--bg-tertiary);
+	--color-hover: var(--bg-hover);
+
+	/* Text */
+	--color-foreground: var(--text-primary);
+	--color-foreground-muted: var(--text-secondary);
+	--color-foreground-faint: var(--text-tertiary);
+
+	/* Borders */
+	--color-border: var(--border-color);
+	--color-border-light: var(--border-light);
+
+	/* Accent (primary action color - buttons, links) */
+	--color-accent: var(--button-border);
+	--color-accent-foreground: var(--button-hover-text);
+
+	/* Semantic: destructive / danger */
+	--color-destructive: var(--danger);
+	--color-destructive-hover: var(--danger-hover);
+
+	/* Semantic: error alerts */
+	--color-error: var(--error-text);
+	--color-error-bg: var(--error-bg);
+
+	/* Semantic: success alerts */
+	--color-success: var(--success-text);
+	--color-success-bg: var(--success-bg);
+
+	/* Status badges */
+	--color-status-warning: var(--status-text-warning);
+	--color-status-warning-bg: var(--status-bg-warning);
+	--color-status-success: var(--status-text-success);
+	--color-status-success-bg: var(--status-bg-success);
+	--color-status-info: var(--status-text-info);
+	--color-status-info-bg: var(--status-bg-info);
+
+	/* Graph-specific (used by Petri net SVG components) */
+	--color-graph-bg: var(--graph-bg);
+	--color-place-fill: var(--place-fill);
+	--color-place-stroke: var(--place-stroke);
+	--color-place-text: var(--place-text);
+	--color-transition-stroke: var(--transition-stroke);
+	--color-transition-fill: var(--transition-fill);
+	--color-transition-text: var(--transition-text);
+	--color-edge-input: var(--edge-input);
+	--color-edge-output: var(--edge-output);
+	--color-token-stroke: var(--token-stroke);
+}
+
+/* ============================================
+   Theme CSS variables (light / dark)
+   ============================================ */
+
+/* Global reset */
 body {
 	margin: 0;
 	padding: 0;
@@ -104,164 +172,3 @@ body.dark-theme {
 	--status-text-info: #67e8f9;
 }
 
-/* ============================================
-   Shared form & auth page styles
-   ============================================ */
-
-/* Centered page wrapper for auth/form pages */
-.auth-page {
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	min-height: 100vh;
-	background: var(--bg-primary);
-}
-
-/* Card container for auth/form pages */
-.auth-card {
-	background: var(--bg-secondary);
-	border: 1px solid var(--border-color);
-	border-radius: 8px;
-	padding: 2rem;
-	width: 100%;
-	max-width: 380px;
-}
-
-.auth-card.wide {
-	max-width: 480px;
-}
-
-.auth-card .card-header {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	margin-bottom: 0.25rem;
-}
-
-.auth-card h1 {
-	margin: 0;
-	font-size: 1.5rem;
-	color: var(--text-primary);
-}
-
-.auth-card h2 {
-	margin: 0 0 1.5rem;
-	font-size: 1.1rem;
-	font-weight: 400;
-	color: var(--text-secondary);
-}
-
-/* Form elements */
-.auth-card form {
-	display: flex;
-	flex-direction: column;
-	gap: 1rem;
-}
-
-.auth-card label {
-	display: flex;
-	flex-direction: column;
-	gap: 0.3rem;
-	font-size: 0.85rem;
-	color: var(--text-secondary);
-}
-
-.auth-card input[type="text"],
-.auth-card input[type="email"],
-.auth-card input[type="password"] {
-	padding: 0.6rem 0.75rem;
-	border: 1px solid var(--border-color);
-	border-radius: 6px;
-	background: var(--bg-primary);
-	color: var(--text-primary);
-	font-size: 0.95rem;
-}
-
-.auth-card input:focus {
-	outline: none;
-	border-color: var(--button-border);
-}
-
-/* Primary submit button */
-.auth-card button[type="submit"],
-.auth-card .primary-btn {
-	margin-top: 0.5rem;
-	padding: 0.65rem;
-	border: 1px solid var(--button-border);
-	border-radius: 6px;
-	background: var(--button-border);
-	color: var(--bg-primary);
-	font-size: 0.95rem;
-	font-weight: 600;
-	cursor: pointer;
-	transition: opacity 0.2s;
-}
-
-.auth-card button[type="submit"]:hover:not(:disabled),
-.auth-card .primary-btn:hover {
-	opacity: 0.9;
-}
-
-.auth-card button[type="submit"]:disabled,
-.auth-card .primary-btn:disabled {
-	opacity: 0.5;
-	cursor: not-allowed;
-}
-
-/* Error & success alerts */
-.alert-error {
-	margin-bottom: 1rem;
-	padding: 0.6rem 0.75rem;
-	border-radius: 6px;
-	background: var(--error-bg);
-	color: var(--error-text);
-	font-size: 0.85rem;
-}
-
-.alert-success {
-	margin-bottom: 1rem;
-	padding: 0.75rem;
-	border-radius: 6px;
-	background: var(--success-bg);
-	color: var(--success-text);
-	font-size: 0.9rem;
-	line-height: 1.5;
-}
-
-.alert-success p {
-	margin: 0 0 0.5rem;
-}
-
-.alert-success p:last-child {
-	margin-bottom: 0;
-}
-
-/* Text links */
-.text-link {
-	background: none;
-	border: none;
-	color: var(--button-text);
-	cursor: pointer;
-	font-size: 0.85rem;
-	padding: 0;
-	text-decoration: none;
-}
-
-.text-link:hover {
-	text-decoration: underline;
-}
-
-/* Loading spinner */
-.loading-spinner {
-	width: 32px;
-	height: 32px;
-	margin: 1rem auto;
-	border: 3px solid var(--border-color);
-	border-top-color: var(--button-border);
-	border-radius: 50%;
-	animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-	to { transform: rotate(360deg); }
-}

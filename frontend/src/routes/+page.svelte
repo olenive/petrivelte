@@ -15,19 +15,19 @@
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 	import type { GraphState, Token, LogEntry } from '$lib/types';
 
-	let graphState: GraphState | null = null;
-	let tokens: Token[] = [];
-	let logEntries: LogEntry[] = [];
-	let connectionStatus = 'Connecting...';
+	let graphState = $state<GraphState | null>(null);
+	let tokens = $state<Token[]>([]);
+	let logEntries = $state<LogEntry[]>([]);
+	let connectionStatus = $state('Connecting...');
 
 	// Animation state
 	type AnimationStage = 'idle' | 'consuming' | 'producing';
-	let animationStage: AnimationStage = 'idle';
-	let consumingTokens: Token[] = [];
-	let producingTokens: Token[] = [];
-	let transitionPosition: { x: number; y: number } | null = null;
-	let firingTransitionId: string | null = null;
-	let activeEdgeIds: Set<string> = new Set();
+	let animationStage = $state<AnimationStage>('idle');
+	let consumingTokens = $state<Token[]>([]);
+	let producingTokens = $state<Token[]>([]);
+	let transitionPosition = $state<{ x: number; y: number } | null>(null);
+	let firingTransitionId = $state<string | null>(null);
+	let activeEdgeIds = $state<Set<string>>(new Set());
 	let animationTimeouts: number[] = [];
 
 	// Animation queue for handling rapid-fire transitions
@@ -40,19 +40,17 @@
 	let isAnimating = false;
 
 	// Auth state
-	let userEmail = '';
+	let userEmail = $state('');
 
 	// Net selection and execution state
-	let availableNets: Net[] = [];
-	let selectedNetId: string | null = null;
-	let isRunning = false;
-	let isAutoStepping = false;
+	let availableNets = $state<Net[]>([]);
+	let selectedNetId = $state<string | null>(null);
+	let isRunning = $state(false);
+	let isAutoStepping = $state(false);
 
 	// Worker state
-	let workers: Worker[] = [];
-	let workerActionInProgress = false;
-
-	// Theme state
+	let workers = $state<Worker[]>([]);
+	let workerActionInProgress = $state(false);
 
 	// Panel layout state
 	const PANEL_STORAGE_KEY = 'petrivelte-panel-layout';
@@ -62,14 +60,14 @@
 	const DEFAULT_SIDEBAR_WIDTH = 350;
 	const DEFAULT_PANEL_RATIO = 0.5;
 
-	let execLogCollapsed = false;
-	let tokenInspectorCollapsed = false;
-	let sidebarWidth = DEFAULT_SIDEBAR_WIDTH;
-	let execLogRatio = DEFAULT_PANEL_RATIO; // Ratio of exec log height to total sidebar height
+	let execLogCollapsed = $state(false);
+	let tokenInspectorCollapsed = $state(false);
+	let sidebarWidth = $state(DEFAULT_SIDEBAR_WIDTH);
+	let execLogRatio = $state(DEFAULT_PANEL_RATIO);
 
 	// Drag state for resizing
-	let isDraggingSidebar = false;
-	let isDraggingPanelDivider = false;
+	let isDraggingSidebar = $state(false);
+	let isDraggingPanelDivider = $state(false);
 	let dragStartX = 0;
 	let dragStartY = 0;
 	let dragStartWidth = 0;
@@ -154,7 +152,7 @@
 	}
 
 	// Computed: is entire sidebar collapsed?
-	$: sidebarCollapsed = execLogCollapsed && tokenInspectorCollapsed;
+	let sidebarCollapsed = $derived(execLogCollapsed && tokenInspectorCollapsed);
 
 	// Token selection handler
 	function handleTokenSelect(tokenId: string | null) {
@@ -620,26 +618,33 @@
 			webSocketStore.disconnect();
 		};
 	});
+
+	// Button class helpers
+	const btnBase = 'px-5 py-2 rounded text-sm font-medium cursor-pointer transition-all disabled:opacity-50 disabled:cursor-not-allowed';
+	const btnDefault = `${btnBase} border border-accent bg-card text-accent hover:bg-accent hover:text-accent-foreground disabled:border-border disabled:text-foreground-faint`;
+	const btnDanger = `${btnBase} border border-destructive bg-card text-destructive hover:bg-destructive-hover hover:text-white`;
+	const btnSmall = 'px-2.5 py-1.5 border border-accent rounded bg-card text-accent text-sm font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed';
 </script>
 
-<svelte:window on:mousemove={handleMouseMove} on:mouseup={handleMouseUp} />
+<svelte:window onmousemove={handleMouseMove} onmouseup={handleMouseUp} />
 
-<div class="app">
-	<header>
-		<div class="header-left">
-			<h1>Petritype</h1>
-			<span class="status" class:connected={connectionStatus === 'Connected'}>
+<div class="flex flex-col h-screen bg-surface">
+	<header class="flex items-center justify-between px-8 py-4 bg-card border-b border-border gap-8 flex-wrap">
+		<div class="flex items-center gap-4">
+			<h1 class="text-2xl font-bold text-foreground">Petrify</h1>
+			<span class="px-4 py-2 rounded text-sm {connectionStatus === 'Connected' ? 'bg-status-success-bg text-status-success' : 'bg-status-warning-bg text-status-warning'}">
 				{connectionStatus}
 			</span>
 			<ThemeToggle />
-			<a href="/workers" class="nav-link">Workers</a>
+			<a href="/workers" class="text-accent text-sm font-medium no-underline px-3 py-2 border border-accent rounded transition-all hover:bg-accent hover:text-accent-foreground">Workers</a>
 		</div>
 
-		<div class="controls">
+		<div class="flex items-center gap-6 flex-wrap">
 			{#if availableNets.length > 0}
-				<div class="control-group">
-					<label for="net-select">Net:</label>
-					<select id="net-select" bind:value={selectedNetId} on:change={handleNetSelect}>
+				<div class="flex items-center gap-2">
+					<label for="net-select" class="text-sm font-medium text-foreground">Net:</label>
+					<select id="net-select" bind:value={selectedNetId} onchange={handleNetSelect}
+						class="px-4 py-2 border border-border rounded bg-card text-foreground text-sm cursor-pointer hover:border-accent">
 						{#each availableNets as net}
 							<option value={net.id}>{net.name}</option>
 						{/each}
@@ -648,39 +653,41 @@
 
 				<!-- Worker assignment -->
 				{#if selectedNetId}
-					<div class="control-group">
-						<label for="worker-select">Worker:</label>
-						<select id="worker-select" value={selectedNet()?.worker_id ?? ''} on:change={handleWorkerAssign} disabled={workerActionInProgress}>
+					<div class="flex items-center gap-2">
+						<label for="worker-select" class="text-sm font-medium text-foreground">Worker:</label>
+						<select id="worker-select" value={selectedNet()?.worker_id ?? ''} onchange={handleWorkerAssign} disabled={workerActionInProgress}
+							class="px-4 py-2 border border-border rounded bg-card text-foreground text-sm cursor-pointer hover:border-accent">
 							<option value="">No worker</option>
 							{#each workers as w}
 								<option value={w.id}>{w.name} ({w.worker_type === 'fly_machine' ? 'Fly' : 'Sprite'} - {w.status})</option>
 							{/each}
 						</select>
 						{#if selectedNet()?.worker_id && selectedNetWorker()?.status === 'ready'}
-							<button class="small-btn" on:click={handleLoadNet} disabled={workerActionInProgress}>Load</button>
-							<button class="small-btn" on:click={handleUnloadNet} disabled={workerActionInProgress}>Unload</button>
+							<button class={btnSmall} onclick={handleLoadNet} disabled={workerActionInProgress}>Load</button>
+							<button class={btnSmall} onclick={handleUnloadNet} disabled={workerActionInProgress}>Unload</button>
 						{/if}
 					</div>
 				{/if}
 
-				<div class="control-group">
-					<span class="execution-state" class:running={isRunning} class:auto-stepping={isAutoStepping}>
+				<div class="flex items-center gap-2">
+					<span class="px-4 py-2 rounded text-sm font-medium {isRunning ? 'bg-status-info-bg text-status-info' : isAutoStepping ? 'bg-status-warning-bg text-status-warning' : 'bg-muted text-foreground-muted'}">
 						{isRunning ? 'Active' : isAutoStepping ? 'Auto Stepping' : 'Idle'}
 					</span>
 				</div>
 
-				<div class="control-group">
+				<div class="flex items-center gap-2">
 					<button
-						on:click={handleStep}
+						class={btnDefault}
+						onclick={handleStep}
 						disabled={isRunning || isAutoStepping || !selectedNetId}
 						title="Fire a single transition manually."
 					>
 						Step
 					</button>
 					<button
-						on:click={handleAutoStep}
+						class={isAutoStepping ? btnDanger : btnDefault}
+						onclick={handleAutoStep}
 						disabled={isRunning || !selectedNetId}
-						class:stop={isAutoStepping}
 						title={isAutoStepping
 							? "Stop automatic stepping."
 							: "Automatically fire transitions one at a time with animations."}
@@ -688,9 +695,9 @@
 						{isAutoStepping ? 'Stop' : 'Auto Step'}
 					</button>
 					<button
-						on:click={handleActivateDeactivate}
+						class={isRunning ? btnDanger : btnDefault}
+						onclick={handleActivateDeactivate}
 						disabled={isAutoStepping || !selectedNetId}
-						class:stop={isRunning}
 						title={isRunning
 							? "Stop continuous execution."
 							: "Start continuous execution."}
@@ -698,7 +705,8 @@
 						{isRunning ? 'Deactivate' : 'Activate'}
 					</button>
 					<button
-						on:click={handleReset}
+						class={btnDefault}
+						onclick={handleReset}
 						disabled={isRunning || isAutoStepping || !selectedNetId}
 						title="Reset the Petri net to its initial state."
 					>
@@ -707,37 +715,36 @@
 				</div>
 			{/if}
 
-			<div class="control-group user-info">
-				<span class="user-email">{userEmail}</span>
-				<a href="/settings" class="settings-link" title="Settings">Settings</a>
-				<button on:click={handleLogout} title="Sign out">Logout</button>
+			<div class="flex items-center gap-2 ml-auto">
+				<span class="text-sm text-foreground-muted">{userEmail}</span>
+				<a href="/settings" class="text-sm text-accent no-underline hover:underline" title="Settings">Settings</a>
+				<button class={btnDefault} onclick={handleLogout} title="Sign out">Logout</button>
 			</div>
 		</div>
 	</header>
 
 	{#if graphState}
-		<main class="panels" class:dragging={isDraggingSidebar || isDraggingPanelDivider}>
+		<main class="flex flex-1 overflow-hidden {isDraggingSidebar || isDraggingPanelDivider ? 'cursor-col-resize select-none' : ''}">
 			<!-- Left sidebar -->
 			{#if !sidebarCollapsed}
-				<aside class="sidebar" style="width: {sidebarWidth}px;">
-					<div class="sidebar-content">
+				<aside class="flex shrink-0 bg-card border-r border-border" style="width: {sidebarWidth}px;">
+					<div class="sidebar-content flex-1 flex flex-col overflow-hidden">
 						<!-- Execution Log Panel -->
 						<div
-							class="panel exec-log"
-							class:collapsed={execLogCollapsed}
+							class="flex flex-col bg-card overflow-hidden {execLogCollapsed ? 'flex-none' : ''}"
 							style={!execLogCollapsed && !tokenInspectorCollapsed
 								? `height: ${execLogRatio * 100}%`
 								: !execLogCollapsed
 									? 'flex: 1'
 									: ''}
 						>
-							<button class="panel-header" on:click={toggleExecLog}>
-								<span class="panel-toggle">{execLogCollapsed ? '▶' : '▼'}</span>
-								<span class="panel-title">Execution Log</span>
-								<span class="panel-badge">{logEntries.length}</span>
+							<button class="flex items-center gap-2 px-3 py-2 bg-muted border-0 border-b border-border cursor-pointer text-left text-sm font-medium text-foreground w-full transition-colors hover:bg-hover" onclick={toggleExecLog}>
+								<span class="text-[0.7rem] text-foreground-muted">{execLogCollapsed ? '▶' : '▼'}</span>
+								<span class="flex-1">Execution Log</span>
+								<span class="bg-hover text-foreground-muted px-1.5 py-0.5 rounded-full text-xs">{logEntries.length}</span>
 							</button>
 							{#if !execLogCollapsed}
-								<div class="panel-content">
+								<div class="flex-1 overflow-hidden flex flex-col">
 									<ExecutionLog entries={logEntries} />
 								</div>
 							{/if}
@@ -745,9 +752,10 @@
 
 						<!-- Resize handle between panels -->
 						{#if !execLogCollapsed && !tokenInspectorCollapsed}
+							<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 							<div
-								class="panel-divider"
-								on:mousedown={handlePanelDividerDragStart}
+								class="h-1.5 bg-muted cursor-row-resize shrink-0 transition-colors hover:bg-accent"
+								onmousedown={handlePanelDividerDragStart}
 								role="separator"
 								aria-orientation="horizontal"
 							></div>
@@ -755,21 +763,20 @@
 
 						<!-- Token Inspector Panel -->
 						<div
-							class="panel token-inspector"
-							class:collapsed={tokenInspectorCollapsed}
+							class="flex flex-col bg-card overflow-hidden {tokenInspectorCollapsed ? 'flex-none' : ''}"
 							style={!tokenInspectorCollapsed && !execLogCollapsed
 								? `height: ${(1 - execLogRatio) * 100}%`
 								: !tokenInspectorCollapsed
 									? 'flex: 1'
 									: ''}
 						>
-							<button class="panel-header" on:click={toggleTokenInspector}>
-								<span class="panel-toggle">{tokenInspectorCollapsed ? '▶' : '▼'}</span>
-								<span class="panel-title">All Tokens</span>
-								<span class="panel-badge">{tokens.length}</span>
+							<button class="flex items-center gap-2 px-3 py-2 bg-muted border-0 border-b border-border cursor-pointer text-left text-sm font-medium text-foreground w-full transition-colors hover:bg-hover" onclick={toggleTokenInspector}>
+								<span class="text-[0.7rem] text-foreground-muted">{tokenInspectorCollapsed ? '▶' : '▼'}</span>
+								<span class="flex-1">All Tokens</span>
+								<span class="bg-hover text-foreground-muted px-1.5 py-0.5 rounded-full text-xs">{tokens.length}</span>
 							</button>
 							{#if !tokenInspectorCollapsed}
-								<div class="panel-content">
+								<div class="flex-1 overflow-hidden flex flex-col">
 									<TokenInspector
 										{tokens}
 										places={graphState.places}
@@ -782,29 +789,30 @@
 					</div>
 
 					<!-- Resize handle for sidebar width -->
+					<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 					<div
-						class="sidebar-divider"
-						on:mousedown={handleSidebarDragStart}
+						class="w-1.5 bg-muted cursor-col-resize transition-colors hover:bg-accent"
+						onmousedown={handleSidebarDragStart}
 						role="separator"
 						aria-orientation="vertical"
 					></div>
 				</aside>
 			{:else}
 				<!-- Collapsed sidebar tabs -->
-				<aside class="sidebar-collapsed">
-					<button class="collapsed-tab" on:click={toggleExecLog} title="Execution Log">
-						<span class="tab-icon">📋</span>
-						<span class="tab-badge">{logEntries.length}</span>
+				<aside class="flex flex-col bg-card border-r border-border p-2 gap-2">
+					<button class="flex flex-col items-center p-2 border border-border rounded bg-muted cursor-pointer transition-all hover:bg-hover hover:border-accent" onclick={toggleExecLog} title="Execution Log">
+						<span class="text-xl">📋</span>
+						<span class="text-[0.7rem] text-foreground-muted">{logEntries.length}</span>
 					</button>
-					<button class="collapsed-tab" on:click={toggleTokenInspector} title="All Tokens">
-						<span class="tab-icon">🔘</span>
-						<span class="tab-badge">{tokens.length}</span>
+					<button class="flex flex-col items-center p-2 border border-border rounded bg-muted cursor-pointer transition-all hover:bg-hover hover:border-accent" onclick={toggleTokenInspector} title="All Tokens">
+						<span class="text-xl">🔘</span>
+						<span class="text-[0.7rem] text-foreground-muted">{tokens.length}</span>
 					</button>
 				</aside>
 			{/if}
 
 			<!-- Graph Panel -->
-			<div class="graph-area">
+			<div class="flex-1 p-4 overflow-hidden flex">
 				<GraphPanel
 					{graphState}
 					{tokens}
@@ -820,9 +828,9 @@
 			</div>
 		</main>
 	{:else}
-		<div class="loading">
-			<p>No graph data yet.</p>
-			<p class="hint">
+		<div class="flex-1 flex flex-col items-center justify-center p-8 text-center text-foreground">
+			<p class="my-2">No graph data yet.</p>
+			<p class="my-2 text-foreground-muted text-sm max-w-[500px]">
 				Create a net, assign it to a worker, and load it.
 				<br />
 				The graph will appear once the net is loaded on a running worker.
@@ -830,346 +838,3 @@
 		</div>
 	{/if}
 </div>
-
-<style>
-	.app {
-		display: flex;
-		flex-direction: column;
-		height: 100vh;
-		background: var(--bg-primary);
-	}
-
-	header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 1rem 2rem;
-		background: var(--bg-secondary);
-		border-bottom: 1px solid var(--border-color);
-		gap: 2rem;
-		flex-wrap: wrap;
-	}
-
-	.header-left {
-		display: flex;
-		align-items: center;
-		gap: 1rem;
-	}
-
-	h1 {
-		margin: 0;
-		font-size: 1.5rem;
-		color: var(--text-primary);
-	}
-
-	.status {
-		padding: 0.5rem 1rem;
-		border-radius: 4px;
-		font-size: 0.9em;
-		background: var(--status-bg-warning);
-		color: var(--status-text-warning);
-	}
-
-	.status.connected {
-		background: var(--status-bg-success);
-		color: var(--status-text-success);
-	}
-
-	.controls {
-		display: flex;
-		align-items: center;
-		gap: 1.5rem;
-		flex-wrap: wrap;
-	}
-
-	.control-group {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-	}
-
-	label {
-		font-size: 0.9em;
-		font-weight: 500;
-		color: var(--text-primary);
-	}
-
-	select {
-		padding: 0.5rem 1rem;
-		border: 1px solid var(--border-color);
-		border-radius: 4px;
-		background: var(--bg-secondary);
-		color: var(--text-primary);
-		font-size: 0.9em;
-		cursor: pointer;
-	}
-
-	select:hover {
-		border-color: var(--button-border);
-	}
-
-	button {
-		padding: 0.5rem 1.25rem;
-		border: 1px solid var(--button-border);
-		border-radius: 4px;
-		background: var(--bg-secondary);
-		color: var(--button-text);
-		font-size: 0.9em;
-		font-weight: 500;
-		cursor: pointer;
-		transition: all 0.2s;
-	}
-
-	button:hover:not(:disabled) {
-		background: var(--button-hover-bg);
-		color: var(--button-hover-text);
-	}
-
-	button.stop {
-		border-color: var(--danger);
-		color: var(--danger);
-	}
-
-	button.stop:hover {
-		background: var(--danger-hover);
-		color: white;
-	}
-
-	button:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-		border-color: var(--border-color);
-		color: var(--text-tertiary);
-	}
-
-	.user-info {
-		margin-left: auto;
-	}
-
-	.user-email {
-		font-size: 0.85em;
-		color: var(--text-secondary);
-	}
-
-	.settings-link {
-		font-size: 0.85em;
-		color: var(--button-border);
-		text-decoration: none;
-	}
-
-	.settings-link:hover {
-		text-decoration: underline;
-	}
-
-	.execution-state {
-		padding: 0.5rem 1rem;
-		border-radius: 4px;
-		font-size: 0.9em;
-		background: var(--bg-tertiary);
-		color: var(--text-secondary);
-		font-weight: 500;
-	}
-
-	.execution-state.running {
-		background: var(--status-bg-info);
-		color: var(--status-text-info);
-	}
-
-	.execution-state.auto-stepping {
-		background: var(--status-bg-warning);
-		color: var(--status-text-warning);
-	}
-
-	.panels {
-		display: flex;
-		flex: 1;
-		overflow: hidden;
-	}
-
-	.panels.dragging {
-		cursor: col-resize;
-		user-select: none;
-	}
-
-	/* Sidebar */
-	.sidebar {
-		display: flex;
-		flex-shrink: 0;
-		background: var(--bg-secondary);
-		border-right: 1px solid var(--border-color);
-	}
-
-	.sidebar-content {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-	}
-
-	.sidebar-divider {
-		width: 6px;
-		background: var(--bg-tertiary);
-		cursor: col-resize;
-		transition: background 0.2s;
-	}
-
-	.sidebar-divider:hover {
-		background: var(--button-border);
-	}
-
-	/* Collapsed sidebar */
-	.sidebar-collapsed {
-		display: flex;
-		flex-direction: column;
-		background: var(--bg-secondary);
-		border-right: 1px solid var(--border-color);
-		padding: 0.5rem;
-		gap: 0.5rem;
-	}
-
-	.collapsed-tab {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		padding: 0.5rem;
-		border: 1px solid var(--border-color);
-		border-radius: 4px;
-		background: var(--bg-tertiary);
-		cursor: pointer;
-		transition: all 0.2s;
-	}
-
-	.collapsed-tab:hover {
-		background: var(--bg-hover);
-		border-color: var(--button-border);
-	}
-
-	.tab-icon {
-		font-size: 1.2rem;
-	}
-
-	.tab-badge {
-		font-size: 0.7rem;
-		color: var(--text-secondary);
-	}
-
-	/* Panel styles */
-	.panel {
-		display: flex;
-		flex-direction: column;
-		background: var(--bg-secondary);
-		overflow: hidden;
-	}
-
-	.panel.collapsed {
-		flex: 0 0 auto;
-	}
-
-	.panel-header {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		padding: 0.5rem 0.75rem;
-		background: var(--bg-tertiary);
-		border: none;
-		border-bottom: 1px solid var(--border-color);
-		cursor: pointer;
-		text-align: left;
-		font-size: 0.85rem;
-		font-weight: 500;
-		color: var(--text-primary);
-		transition: background 0.2s;
-		width: 100%;
-	}
-
-	.panel-header:hover {
-		background: var(--bg-hover);
-	}
-
-	.panel-toggle {
-		font-size: 0.7rem;
-		color: var(--text-secondary);
-	}
-
-	.panel-title {
-		flex: 1;
-	}
-
-	.panel-badge {
-		background: var(--bg-hover);
-		color: var(--text-secondary);
-		padding: 0.1rem 0.4rem;
-		border-radius: 10px;
-		font-size: 0.75rem;
-	}
-
-	.panel-content {
-		flex: 1;
-		overflow: hidden;
-		display: flex;
-		flex-direction: column;
-	}
-
-	/* Panel divider */
-	.panel-divider {
-		height: 6px;
-		background: var(--bg-tertiary);
-		cursor: row-resize;
-		flex-shrink: 0;
-		transition: background 0.2s;
-	}
-
-	.panel-divider:hover {
-		background: var(--button-border);
-	}
-
-	/* Graph area */
-	.graph-area {
-		flex: 1;
-		padding: 1rem;
-		overflow: hidden;
-		display: flex;
-	}
-
-	.loading {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		padding: 2rem;
-		text-align: center;
-		color: var(--text-primary);
-	}
-
-	.loading p {
-		margin: 0.5rem 0;
-	}
-
-	.hint {
-		color: var(--text-secondary);
-		font-size: 0.9em;
-		max-width: 500px;
-	}
-
-	.nav-link {
-		color: var(--button-text);
-		font-size: 0.9em;
-		font-weight: 500;
-		text-decoration: none;
-		padding: 0.5rem 0.75rem;
-		border: 1px solid var(--button-border);
-		border-radius: 4px;
-		transition: all 0.2s;
-	}
-
-	.nav-link:hover {
-		background: var(--button-hover-bg);
-		color: var(--button-hover-text);
-	}
-
-	.small-btn {
-		padding: 0.35rem 0.7rem;
-		font-size: 0.85em;
-	}
-</style>

@@ -5,16 +5,16 @@
 	import { verifyEmail, resendVerification } from '$lib/api';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 
-	let status: 'loading' | 'success' | 'error' | 'no-token' = 'loading';
-	let errorMessage = '';
+	let status = $state<'loading' | 'success' | 'error' | 'no-token'>('loading');
+	let errorMessage = $state('');
 
 	// For resend functionality
-	let resendEmail = '';
-	let resendLoading = false;
-	let resendSuccess = false;
-	let resendError = '';
+	let resendEmail = $state('');
+	let resendLoading = $state(false);
+	let resendSuccess = $state(false);
+	let resendError = $state('');
 
-	$: token = $page.url.searchParams.get('token') || '';
+	let token = $derived($page.url.searchParams.get('token') || '');
 
 	onMount(async () => {
 		if (!token) {
@@ -48,117 +48,59 @@
 	}
 </script>
 
-<div class="auth-page">
-	<div class="auth-card" style="text-align:center;">
-		<div class="card-header">
-			<h1>Petritype</h1>
+<div class="flex items-center justify-center min-h-screen bg-surface">
+	<div class="bg-card border border-border rounded-lg p-8 w-full max-w-[380px] text-center">
+		<div class="flex items-center justify-between mb-1">
+			<h1 class="text-2xl font-bold text-foreground">Petrify</h1>
 			<ThemeToggle />
 		</div>
 
 		{#if status === 'loading'}
-			<h2>Verifying your email...</h2>
-			<div class="loading-spinner"></div>
+			<h2 class="mb-6 text-lg font-normal text-foreground-muted">Verifying your email...</h2>
+			<div class="w-8 h-8 mx-auto my-4 border-[3px] border-border border-t-accent rounded-full animate-spin"></div>
 		{:else if status === 'success'}
-			<h2>Email verified!</h2>
-			<div class="alert-success">
-				<p>Your email has been verified successfully.</p>
+			<h2 class="mb-6 text-lg font-normal text-foreground-muted">Email verified!</h2>
+			<div class="mb-4 p-3 rounded-md bg-success-bg text-success text-sm leading-relaxed">
+				<p class="mb-2">Your email has been verified successfully.</p>
 				<p>Redirecting you to the dashboard...</p>
 			</div>
 		{:else if status === 'no-token'}
-			<h2>Missing verification link</h2>
-			<div class="alert-error" style="text-align:left;">
+			<h2 class="mb-6 text-lg font-normal text-foreground-muted">Missing verification link</h2>
+			<div class="mb-4 px-3 py-2.5 rounded-md bg-error-bg text-error text-sm text-left">
 				No verification token found. Please use the link from your verification email.
 			</div>
-			<a href="/login" class="text-link" style="display:block;margin-top:1rem;">Back to login</a>
+			<a href="/login" class="block mt-4 text-accent text-sm hover:underline">Back to login</a>
 		{:else if status === 'error'}
-			<h2>Verification failed</h2>
-			<div class="alert-error" style="text-align:left;">{errorMessage}</div>
+			<h2 class="mb-6 text-lg font-normal text-foreground-muted">Verification failed</h2>
+			<div class="mb-4 px-3 py-2.5 rounded-md bg-error-bg text-error text-sm text-left">{errorMessage}</div>
 
 			{#if resendSuccess}
-				<div class="alert-success">
+				<div class="mb-4 p-3 rounded-md bg-success-bg text-success text-sm leading-relaxed">
 					<p>New verification email sent! Check your inbox.</p>
 				</div>
 			{:else}
-				<div class="resend-section">
-					<p>Need a new verification link?</p>
+				<div class="my-6 p-4 rounded-md bg-muted">
+					<p class="mb-3 text-sm text-foreground-muted">Need a new verification link?</p>
 					{#if resendError}
-						<p class="resend-error">{resendError}</p>
+						<p class="mb-3 text-sm text-error">{resendError}</p>
 					{/if}
-					<form on:submit|preventDefault={handleResend}>
+					<form class="flex flex-col gap-2" onsubmit={(e) => { e.preventDefault(); handleResend(); }}>
 						<input
 							type="email"
 							bind:value={resendEmail}
 							placeholder="Enter your email"
 							required
+							class="px-3 py-2 border border-border rounded-md bg-surface text-foreground text-sm focus:outline-none focus:border-accent"
 						/>
-						<button type="submit" disabled={resendLoading}>
+						<button type="submit" disabled={resendLoading}
+							class="w-full py-2 border border-accent rounded-md bg-accent text-accent-foreground text-sm font-semibold cursor-pointer transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed">
 							{resendLoading ? 'Sending...' : 'Resend verification email'}
 						</button>
 					</form>
 				</div>
 			{/if}
 
-			<a href="/login" class="text-link" style="display:block;margin-top:1rem;">Back to login</a>
+			<a href="/login" class="block mt-4 text-accent text-sm hover:underline">Back to login</a>
 		{/if}
 	</div>
 </div>
-
-<style>
-	.resend-section {
-		margin: 1.5rem 0;
-		padding: 1rem;
-		border-radius: 6px;
-		background: var(--bg-tertiary);
-	}
-
-	.resend-section p {
-		margin: 0 0 0.75rem;
-		font-size: 0.9rem;
-		color: var(--text-secondary);
-	}
-
-	.resend-error {
-		color: var(--error-text) !important;
-	}
-
-	.resend-section form {
-		display: flex;
-		flex-direction: column;
-		gap: 0.5rem;
-	}
-
-	.resend-section input {
-		padding: 0.5rem 0.75rem;
-		border: 1px solid var(--border-color);
-		border-radius: 6px;
-		background: var(--bg-primary);
-		color: var(--text-primary);
-		font-size: 0.9rem;
-	}
-
-	.resend-section input:focus {
-		outline: none;
-		border-color: var(--button-border);
-	}
-
-	.resend-section button {
-		padding: 0.5rem;
-		border: 1px solid var(--button-border);
-		border-radius: 6px;
-		background: var(--button-border);
-		color: var(--bg-primary);
-		font-size: 0.85rem;
-		font-weight: 600;
-		cursor: pointer;
-		transition: opacity 0.2s;
-	}
-
-	.resend-section button:hover:not(:disabled) {
-		opacity: 0.9;
-	}
-
-	.resend-section button:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-</style>

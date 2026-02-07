@@ -13,27 +13,27 @@
 	} from '$lib/api';
 	import AppNav from '$lib/components/AppNav.svelte';
 
-	let account: AccountStatus | null = null;
+	let account = $state<AccountStatus | null>(null);
 
 	// Password form
-	let currentPassword = '';
-	let newPassword = '';
-	let confirmPassword = '';
-	let passwordError = '';
-	let passwordSuccess = '';
-	let passwordLoading = false;
+	let currentPassword = $state('');
+	let newPassword = $state('');
+	let confirmPassword = $state('');
+	let passwordError = $state('');
+	let passwordSuccess = $state('');
+	let passwordLoading = $state(false);
 
 	// Email form
-	let newEmail = '';
-	let emailPassword = '';
-	let emailError = '';
-	let emailSuccess = '';
-	let emailLoading = false;
+	let newEmail = $state('');
+	let emailPassword = $state('');
+	let emailError = $state('');
+	let emailSuccess = $state('');
+	let emailLoading = $state(false);
 
 	// Google account
-	let googleError = '';
-	let googleSuccess = '';
-	let googleLoading = false;
+	let googleError = $state('');
+	let googleSuccess = $state('');
+	let googleLoading = $state(false);
 
 	onMount(async () => {
 		try {
@@ -126,53 +126,63 @@
 
 <AppNav title="Settings" />
 
-<div class="settings-page">
-	<div class="settings-card">
+<div class="flex items-start justify-center min-h-screen p-8 bg-surface">
+	<div class="bg-card border border-border rounded-lg p-8 w-full max-w-[480px]">
 
 		{#if account}
 			<!-- Account Info -->
-			<section class="account-info">
-				<h2>Account</h2>
-				<p class="email">{account.email}</p>
-				<button class="logout-btn" on:click={handleLogout}>Log out</button>
+			<section class="mb-8 pb-6 border-b border-border">
+				<h2 class="mb-4 text-lg font-medium text-foreground">Account</h2>
+				<p class="mb-4 text-foreground-muted">{account.email}</p>
+				<button
+					class="px-4 py-2 border border-border rounded-md bg-transparent text-foreground-muted text-sm cursor-pointer transition-colors hover:border-destructive hover:text-destructive"
+					onclick={handleLogout}
+				>
+					Log out
+				</button>
 			</section>
 
 			<!-- Linked Accounts -->
-			<section>
-				<h2>Linked Accounts</h2>
+			<section class="mb-8 pb-6 border-b border-border">
+				<h2 class="mb-4 text-lg font-medium text-foreground">Linked Accounts</h2>
 
 				{#if googleError}
-					<div class="alert-error">{googleError}</div>
+					<div class="mb-4 px-3 py-2.5 rounded-md bg-error-bg text-error text-sm">{googleError}</div>
 				{/if}
 
 				{#if googleSuccess}
-					<div class="alert-success">{googleSuccess}</div>
+					<div class="mb-4 p-3 rounded-md bg-success-bg text-success text-sm leading-relaxed">{googleSuccess}</div>
 				{/if}
 
-				<div class="linked-account">
-					<div class="account-info-row">
-						<svg class="google-icon" viewBox="0 0 24 24" width="20" height="20">
+				<div class="flex items-center justify-between p-3 bg-muted rounded-md">
+					<div class="flex items-center gap-2">
+						<svg class="shrink-0" viewBox="0 0 24 24" width="20" height="20">
 							<path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
 							<path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
 							<path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
 							<path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
 						</svg>
 						<span>Google</span>
-						<span class="status-badge" class:connected={account.has_google}>
-							{account.has_google ? 'Connected' : 'Not connected'}
-						</span>
+						{#if account.has_google}
+							<span class="text-xs px-2 py-0.5 rounded-sm bg-success-bg text-success">Connected</span>
+						{:else}
+							<span class="text-xs px-2 py-0.5 rounded-sm bg-border text-foreground-faint">Not connected</span>
+						{/if}
 					</div>
 					{#if account.has_google}
 						<button
-							class="unlink-btn"
-							on:click={handleUnlinkGoogle}
+							class="px-3 py-1.5 rounded-md text-xs border border-border bg-transparent text-foreground-muted cursor-pointer transition-colors hover:border-destructive hover:text-destructive disabled:opacity-50 disabled:cursor-not-allowed"
+							onclick={handleUnlinkGoogle}
 							disabled={googleLoading || !account.has_password}
 							title={!account.has_password ? 'Set a password first to unlink Google' : ''}
 						>
 							{googleLoading ? 'Unlinking...' : 'Unlink'}
 						</button>
 					{:else}
-						<button class="link-btn" on:click={handleLinkGoogle}>
+						<button
+							class="px-3 py-1.5 rounded-md text-xs border border-accent bg-accent text-accent-foreground cursor-pointer transition-opacity hover:opacity-90"
+							onclick={handleLinkGoogle}
+						>
 							Link Google
 						</button>
 					{/if}
@@ -180,35 +190,36 @@
 			</section>
 
 			<!-- Password Section -->
-			<section>
-				<h2>{account.has_password ? 'Change Password' : 'Set Password'}</h2>
+			<section class="mb-8 pb-6 border-b border-border">
+				<h2 class="mb-4 text-lg font-medium text-foreground">{account.has_password ? 'Change Password' : 'Set Password'}</h2>
 
 				{#if !account.has_password}
-					<p class="hint">Add a password to log in with email/password as an alternative to Google.</p>
+					<p class="mb-4 text-sm text-foreground-faint">Add a password to log in with email/password as an alternative to Google.</p>
 				{/if}
 
 				{#if passwordError}
-					<div class="alert-error">{passwordError}</div>
+					<div class="mb-4 px-3 py-2.5 rounded-md bg-error-bg text-error text-sm">{passwordError}</div>
 				{/if}
 
 				{#if passwordSuccess}
-					<div class="alert-success">{passwordSuccess}</div>
+					<div class="mb-4 p-3 rounded-md bg-success-bg text-success text-sm leading-relaxed">{passwordSuccess}</div>
 				{/if}
 
-				<form on:submit|preventDefault={handlePasswordSubmit}>
+				<form class="flex flex-col gap-4" onsubmit={(e) => { e.preventDefault(); handlePasswordSubmit(); }}>
 					{#if account.has_password}
-						<label>
+						<label class="flex flex-col gap-1 text-sm text-foreground-muted">
 							Current Password
 							<input
 								type="password"
 								bind:value={currentPassword}
 								required
 								autocomplete="current-password"
+								class="px-3 py-2.5 border border-border rounded-md bg-surface text-foreground text-base focus:outline-none focus:border-accent"
 							/>
 						</label>
 					{/if}
 
-					<label>
+					<label class="flex flex-col gap-1 text-sm text-foreground-muted">
 						New Password
 						<input
 							type="password"
@@ -216,10 +227,11 @@
 							required
 							minlength="6"
 							autocomplete="new-password"
+							class="px-3 py-2.5 border border-border rounded-md bg-surface text-foreground text-base focus:outline-none focus:border-accent"
 						/>
 					</label>
 
-					<label>
+					<label class="flex flex-col gap-1 text-sm text-foreground-muted">
 						Confirm New Password
 						<input
 							type="password"
@@ -227,10 +239,12 @@
 							required
 							minlength="6"
 							autocomplete="new-password"
+							class="px-3 py-2.5 border border-border rounded-md bg-surface text-foreground text-base focus:outline-none focus:border-accent"
 						/>
 					</label>
 
-					<button type="submit" disabled={passwordLoading}>
+					<button type="submit" disabled={passwordLoading}
+						class="w-full mt-2 py-2.5 border border-accent rounded-md bg-accent text-accent-foreground text-base font-semibold cursor-pointer transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed">
 						{passwordLoading ? 'Saving...' : account.has_password ? 'Change Password' : 'Set Password'}
 					</button>
 				</form>
@@ -238,225 +252,49 @@
 
 			<!-- Change Email Section -->
 			<section>
-				<h2>Change Email</h2>
+				<h2 class="mb-4 text-lg font-medium text-foreground">Change Email</h2>
 
 				{#if emailError}
-					<div class="alert-error">{emailError}</div>
+					<div class="mb-4 px-3 py-2.5 rounded-md bg-error-bg text-error text-sm">{emailError}</div>
 				{/if}
 
 				{#if emailSuccess}
-					<div class="alert-success">{emailSuccess}</div>
+					<div class="mb-4 p-3 rounded-md bg-success-bg text-success text-sm leading-relaxed">{emailSuccess}</div>
 				{/if}
 
-				<form on:submit|preventDefault={handleEmailSubmit}>
-					<label>
+				<form class="flex flex-col gap-4" onsubmit={(e) => { e.preventDefault(); handleEmailSubmit(); }}>
+					<label class="flex flex-col gap-1 text-sm text-foreground-muted">
 						New Email
 						<input
 							type="email"
 							bind:value={newEmail}
 							required
 							autocomplete="email"
+							class="px-3 py-2.5 border border-border rounded-md bg-surface text-foreground text-base focus:outline-none focus:border-accent"
 						/>
 					</label>
 
 					{#if account.has_password}
-						<label>
+						<label class="flex flex-col gap-1 text-sm text-foreground-muted">
 							Current Password
 							<input
 								type="password"
 								bind:value={emailPassword}
 								required
 								autocomplete="current-password"
+								class="px-3 py-2.5 border border-border rounded-md bg-surface text-foreground text-base focus:outline-none focus:border-accent"
 							/>
 						</label>
 					{/if}
 
-					<button type="submit" disabled={emailLoading}>
+					<button type="submit" disabled={emailLoading}
+						class="w-full mt-2 py-2.5 border border-accent rounded-md bg-accent text-accent-foreground text-base font-semibold cursor-pointer transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed">
 						{emailLoading ? 'Sending...' : 'Send Verification Email'}
 					</button>
 				</form>
 			</section>
 		{:else}
-			<p>Loading...</p>
+			<p class="text-foreground-muted">Loading...</p>
 		{/if}
 	</div>
 </div>
-
-<style>
-	.settings-page {
-		display: flex;
-		align-items: flex-start;
-		justify-content: center;
-		min-height: 100vh;
-		padding: 2rem;
-		background: var(--bg-primary);
-	}
-
-	.settings-card {
-		background: var(--bg-secondary);
-		border: 1px solid var(--border-color);
-		border-radius: 8px;
-		padding: 2rem;
-		width: 100%;
-		max-width: 480px;
-	}
-
-	h2 {
-		margin: 0 0 1rem;
-		font-size: 1.1rem;
-		font-weight: 500;
-		color: var(--text-primary);
-	}
-
-	section {
-		margin-bottom: 2rem;
-		padding-bottom: 1.5rem;
-		border-bottom: 1px solid var(--border-color);
-	}
-
-	section:last-of-type {
-		border-bottom: none;
-		margin-bottom: 0;
-		padding-bottom: 0;
-	}
-
-	.account-info .email {
-		margin: 0 0 1rem;
-		color: var(--text-secondary);
-		font-size: 0.95rem;
-	}
-
-	.logout-btn {
-		padding: 0.5rem 1rem;
-		border: 1px solid var(--border-color);
-		border-radius: 6px;
-		background: transparent;
-		color: var(--text-secondary);
-		font-size: 0.85rem;
-		cursor: pointer;
-		transition: border-color 0.2s, color 0.2s;
-	}
-
-	.logout-btn:hover {
-		border-color: var(--danger);
-		color: var(--danger);
-	}
-
-	.linked-account {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 0.75rem;
-		background: var(--bg-tertiary);
-		border-radius: 6px;
-	}
-
-	.account-info-row {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-	}
-
-	.google-icon {
-		flex-shrink: 0;
-	}
-
-	.status-badge {
-		font-size: 0.75rem;
-		padding: 0.2rem 0.5rem;
-		border-radius: 3px;
-		background: var(--border-color);
-		color: var(--text-tertiary);
-	}
-
-	.status-badge.connected {
-		background: var(--success-bg);
-		color: var(--success-text);
-	}
-
-	.link-btn, .unlink-btn {
-		padding: 0.4rem 0.75rem;
-		border-radius: 6px;
-		font-size: 0.8rem;
-		cursor: pointer;
-		transition: opacity 0.2s;
-	}
-
-	.link-btn {
-		border: 1px solid var(--button-border);
-		background: var(--button-border);
-		color: var(--bg-primary);
-	}
-
-	.unlink-btn {
-		border: 1px solid var(--border-color);
-		background: transparent;
-		color: var(--text-secondary);
-	}
-
-	.unlink-btn:hover:not(:disabled) {
-		border-color: var(--danger);
-		color: var(--danger);
-	}
-
-	.link-btn:disabled, .unlink-btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	.hint {
-		margin: 0 0 1rem;
-		font-size: 0.85rem;
-		color: var(--text-tertiary);
-	}
-
-	form {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
-	}
-
-	label {
-		display: flex;
-		flex-direction: column;
-		gap: 0.3rem;
-		font-size: 0.85rem;
-		color: var(--text-secondary);
-	}
-
-	input {
-		padding: 0.6rem 0.75rem;
-		border: 1px solid var(--border-color);
-		border-radius: 6px;
-		background: var(--bg-primary);
-		color: var(--text-primary);
-		font-size: 0.95rem;
-	}
-
-	input:focus {
-		outline: none;
-		border-color: var(--button-border);
-	}
-
-	button[type='submit'] {
-		margin-top: 0.5rem;
-		padding: 0.65rem;
-		border: 1px solid var(--button-border);
-		border-radius: 6px;
-		background: var(--button-border);
-		color: var(--bg-primary);
-		font-size: 0.95rem;
-		font-weight: 600;
-		cursor: pointer;
-		transition: opacity 0.2s;
-	}
-
-	button[type='submit']:hover:not(:disabled) {
-		opacity: 0.9;
-	}
-
-	button[type='submit']:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-</style>

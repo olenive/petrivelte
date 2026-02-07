@@ -4,23 +4,23 @@
 	import { register, login, resendVerification, getAuth0Status, getAuth0LoginUrl } from '$lib/api';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 
-	let mode: 'login' | 'register' = 'login';
-	let email = '';
-	let password = '';
-	let error = '';
-	let loading = false;
+	let mode = $state<'login' | 'register'>('login');
+	let email = $state('');
+	let password = $state('');
+	let error = $state('');
+	let loading = $state(false);
 
 	// After registration, show verification message
-	let registrationComplete = false;
-	let registeredEmail = '';
+	let registrationComplete = $state(false);
+	let registeredEmail = $state('');
 
 	// For "not verified" error, allow resending
-	let showResendOption = false;
-	let resendLoading = false;
-	let resendSuccess = false;
+	let showResendOption = $state(false);
+	let resendLoading = $state(false);
+	let resendSuccess = $state(false);
 
 	// Auth0 / social login
-	let auth0Configured = false;
+	let auth0Configured = $state(false);
 
 	onMount(async () => {
 		const status = await getAuth0Status();
@@ -86,41 +86,41 @@
 	}
 </script>
 
-<div class="auth-page">
-	<div class="auth-card">
-		<div class="card-header">
-			<h1>Petritype</h1>
+<div class="flex items-center justify-center min-h-screen bg-surface">
+	<div class="bg-card border border-border rounded-lg p-8 w-full max-w-[380px]">
+		<div class="flex items-center justify-between mb-1">
+			<h1 class="text-2xl font-bold text-foreground">Petrify</h1>
 			<ThemeToggle />
 		</div>
 
 		{#if registrationComplete}
-			<h2>Check your email</h2>
-			<div class="alert-success">
-				<p>We've sent a verification link to <strong>{registeredEmail}</strong></p>
+			<h2 class="mb-6 text-lg font-normal text-foreground-muted">Check your email</h2>
+			<div class="mb-4 p-3 rounded-md bg-success-bg text-success text-sm leading-relaxed">
+				<p class="mb-2">We've sent a verification link to <strong>{registeredEmail}</strong></p>
 				<p>Click the link in the email to verify your account and sign in.</p>
 			</div>
-			<button class="primary-btn" on:click={backToLogin}>
+			<button class="w-full mt-2 py-2.5 border border-accent rounded-md bg-accent text-accent-foreground text-base font-semibold cursor-pointer transition-opacity hover:opacity-90" onclick={backToLogin}>
 				Back to sign in
 			</button>
 		{:else}
-			<h2>{mode === 'login' ? 'Sign in' : 'Create account'}</h2>
+			<h2 class="mb-6 text-lg font-normal text-foreground-muted">{mode === 'login' ? 'Sign in' : 'Create account'}</h2>
 
 			{#if error}
-				<div class="alert-error">{error}</div>
+				<div class="mb-4 px-3 py-2.5 rounded-md bg-error-bg text-error text-sm">{error}</div>
 			{/if}
 
 			{#if resendSuccess}
-				<div class="alert-success">
+				<div class="mb-4 p-3 rounded-md bg-success-bg text-success text-sm leading-relaxed">
 					<p>Verification email sent! Check your inbox.</p>
 				</div>
 			{/if}
 
 			{#if showResendOption}
-				<div class="resend-option">
-					<p>Didn't receive the email?</p>
+				<div class="mb-4 p-3 rounded-md bg-muted text-sm text-center">
+					<p class="mb-2 text-foreground-muted">Didn't receive the email?</p>
 					<button
-						class="text-link"
-						on:click={handleResendVerification}
+						class="text-accent cursor-pointer text-sm hover:underline"
+						onclick={handleResendVerification}
 						disabled={resendLoading}
 					>
 						{resendLoading ? 'Sending...' : 'Resend verification email'}
@@ -128,13 +128,14 @@
 				</div>
 			{/if}
 
-			<form on:submit|preventDefault={handleSubmit}>
-				<label>
+			<form class="flex flex-col gap-4" onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
+				<label class="flex flex-col gap-1 text-sm text-foreground-muted">
 					Email
-					<input type="email" bind:value={email} required autocomplete="email" />
+					<input type="email" bind:value={email} required autocomplete="email"
+						class="px-3 py-2.5 border border-border rounded-md bg-surface text-foreground text-base focus:outline-none focus:border-accent" />
 				</label>
 
-				<label>
+				<label class="flex flex-col gap-1 text-sm text-foreground-muted">
 					Password
 					<input
 						type="password"
@@ -142,21 +143,25 @@
 						required
 						minlength="6"
 						autocomplete={mode === 'register' ? 'new-password' : 'current-password'}
+						class="px-3 py-2.5 border border-border rounded-md bg-surface text-foreground text-base focus:outline-none focus:border-accent"
 					/>
 				</label>
 
-				<button type="submit" disabled={loading}>
+				<button type="submit" disabled={loading}
+					class="w-full mt-2 py-2.5 border border-accent rounded-md bg-accent text-accent-foreground text-base font-semibold cursor-pointer transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed">
 					{loading ? '...' : mode === 'login' ? 'Sign in' : 'Create account'}
 				</button>
 			</form>
 
 			{#if auth0Configured}
-				<div class="divider">
-					<span>or</span>
+				<div class="flex items-center my-5 text-foreground-faint text-xs">
+					<div class="flex-1 h-px bg-border"></div>
+					<span class="px-3">or</span>
+					<div class="flex-1 h-px bg-border"></div>
 				</div>
 
-				<button class="google-btn" on:click={handleGoogleLogin}>
-					<svg class="google-icon" viewBox="0 0 24 24" width="18" height="18">
+				<button class="flex items-center justify-center gap-2 w-full py-2.5 border border-border rounded-md bg-surface text-foreground text-base font-medium cursor-pointer transition-colors hover:bg-muted hover:border-foreground-faint" onclick={handleGoogleLogin}>
+					<svg class="shrink-0" viewBox="0 0 24 24" width="18" height="18">
 						<path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
 						<path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
 						<path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
@@ -167,93 +172,17 @@
 			{/if}
 
 			{#if mode === 'login'}
-				<p class="forgot">
-					<a href="/forgot-password" class="text-link">Forgot password?</a>
+				<p class="mt-4 text-right text-sm">
+					<a href="/forgot-password" class="text-accent hover:underline">Forgot password?</a>
 				</p>
 			{/if}
 
-			<p class="switch">
+			<p class="mt-5 text-center text-sm text-foreground-muted">
 				{mode === 'login' ? "Don't have an account?" : 'Already have an account?'}
-				<button class="text-link" on:click={toggleMode}>
+				<button class="text-accent cursor-pointer text-sm hover:underline" onclick={toggleMode}>
 					{mode === 'login' ? 'Register' : 'Sign in'}
 				</button>
 			</p>
 		{/if}
 	</div>
 </div>
-
-<style>
-	/* Login-specific styles (shared styles come from theme.css) */
-	.resend-option {
-		margin-bottom: 1rem;
-		padding: 0.75rem;
-		border-radius: 6px;
-		background: var(--bg-tertiary);
-		font-size: 0.85rem;
-		text-align: center;
-	}
-
-	.resend-option p {
-		margin: 0 0 0.5rem;
-		color: var(--text-secondary);
-	}
-
-	.forgot {
-		margin-top: 1rem;
-		text-align: right;
-		font-size: 0.85rem;
-	}
-
-	.switch {
-		margin-top: 1.25rem;
-		text-align: center;
-		font-size: 0.85rem;
-		color: var(--text-secondary);
-	}
-
-	.divider {
-		display: flex;
-		align-items: center;
-		margin: 1.25rem 0;
-		color: var(--text-tertiary);
-		font-size: 0.8rem;
-	}
-
-	.divider::before,
-	.divider::after {
-		content: '';
-		flex: 1;
-		height: 1px;
-		background: var(--border-color);
-	}
-
-	.divider span {
-		padding: 0 0.75rem;
-	}
-
-	.google-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 0.5rem;
-		width: 100%;
-		padding: 0.65rem;
-		border: 1px solid var(--border-color);
-		border-radius: 6px;
-		background: var(--bg-primary);
-		color: var(--text-primary);
-		font-size: 0.95rem;
-		font-weight: 500;
-		cursor: pointer;
-		transition: background 0.2s, border-color 0.2s;
-	}
-
-	.google-btn:hover {
-		background: var(--bg-tertiary);
-		border-color: var(--text-tertiary);
-	}
-
-	.google-icon {
-		flex-shrink: 0;
-	}
-</style>

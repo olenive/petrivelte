@@ -9,71 +9,18 @@
 	let { title }: Props = $props();
 </script>
 
-<nav class="app-nav">
-	<div class="nav-left">
-		<a href="/" class="brand">Petritype</a>
+<nav class="flex items-center justify-between px-6 py-3 border-b border-border bg-card">
+	<div class="flex items-center gap-2">
+		<a href="/" class="font-bold text-lg text-foreground no-underline hover:opacity-80">Petrify</a>
 		{#if title}
-			<span class="sep">/</span>
-			<span class="title">{title}</span>
+			<span class="text-foreground-faint">/</span>
+			<span class="font-semibold text-foreground">{title}</span>
 		{/if}
 	</div>
-	<div class="nav-right">
+	<div class="flex items-center gap-4">
 		<ThemeToggle />
-		<a href="/" class="nav-link">App</a>
-		<a href="/workers" class="nav-link">Workers</a>
-		<a href="/settings" class="nav-link">Settings</a>
+		<a href="/" class="text-accent text-sm no-underline hover:underline">App</a>
+		<a href="/workers" class="text-accent text-sm no-underline hover:underline">Workers</a>
+		<a href="/settings" class="text-accent text-sm no-underline hover:underline">Settings</a>
 	</div>
 </nav>
-
-<style>
-	.app-nav {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 0.75rem 1.5rem;
-		border-bottom: 1px solid var(--border-color);
-		background: var(--bg-secondary);
-	}
-
-	.nav-left {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-	}
-
-	.brand {
-		font-weight: 700;
-		font-size: 1.1rem;
-		color: var(--text-primary);
-		text-decoration: none;
-	}
-
-	.brand:hover {
-		opacity: 0.8;
-	}
-
-	.sep {
-		color: var(--text-tertiary);
-	}
-
-	.title {
-		font-weight: 600;
-		color: var(--text-primary);
-	}
-
-	.nav-right {
-		display: flex;
-		align-items: center;
-		gap: 1rem;
-	}
-
-	.nav-link {
-		color: var(--button-text);
-		text-decoration: none;
-		font-size: 0.85rem;
-	}
-
-	.nav-link:hover {
-		text-decoration: underline;
-	}
-</style>
