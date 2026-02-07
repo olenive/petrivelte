@@ -8,6 +8,7 @@
 		listNets, patchNet, loadNet, unloadNet,
 		type Worker, type WorkerDetail, type Net,
 	} from '$lib/api';
+	import AppNav from '$lib/components/AppNav.svelte';
 
 	let workers: Worker[] = [];
 	let nets: Net[] = [];
@@ -16,7 +17,7 @@
 
 	// Create form state
 	let newWorkerName = '';
-	let newWorkerType: 'sprite' | 'fly_machine' = 'sprite';
+	let newWorkerCategory: 'ephemeral' | 'persistent' = 'ephemeral';
 
 	// Loading/error state
 	let actionInProgress: string | null = null;
@@ -47,7 +48,7 @@
 	async function handleCreate() {
 		if (!newWorkerName.trim()) return;
 		await withAction('create', async () => {
-			await createWorker({ name: newWorkerName.trim(), worker_type: newWorkerType });
+			await createWorker({ name: newWorkerName.trim(), worker_category: newWorkerCategory });
 			newWorkerName = '';
 			await refreshWorkers();
 		});
@@ -160,8 +161,8 @@
 		}
 	}
 
-	function workerTypeLabel(type: string): string {
-		return type === 'fly_machine' ? 'Fly Machine' : 'Sprite';
+	function workerCategoryLabel(category: string): string {
+		return category === 'persistent' ? 'Persistent' : 'Ephemeral';
 	}
 
 	function unassignedNets(workerId: string): Net[] {
@@ -172,31 +173,16 @@
 		return nets.filter(n => n.worker_id === workerId);
 	}
 
-	function applyTheme() {
-		if (typeof window === 'undefined') return;
-		const saved = localStorage.getItem('petrivelte-theme');
-		const theme = saved === 'light' || saved === 'dark'
-			? saved
-			: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-		document.body.classList.remove('light-theme', 'dark-theme');
-		document.body.classList.add(`${theme}-theme`);
-	}
-
 	onMount(async () => {
-		applyTheme();
 		const user = await getMe();
 		if (!user) { goto('/login'); return; }
 		await Promise.all([refreshWorkers(), refreshNets()]);
 	});
 </script>
 
+<AppNav title="Workers" />
+
 <div class="workers-page">
-	<nav class="page-nav">
-		<a href="/">Petritype</a>
-		<span class="nav-sep">/</span>
-		<span>Workers</span>
-		<a href="/settings" class="settings-link">Settings</a>
-	</nav>
 
 	{#if errorMessage}
 		<div class="error-banner">
@@ -215,21 +201,23 @@
 		/>
 		<div class="type-selector">
 			<label class="radio-label">
-				<input type="radio" bind:group={newWorkerType} value="sprite" />
-				Sprite
+				<input type="radio" bind:group={newWorkerCategory} value="ephemeral" />
+				Ephemeral
 			</label>
 			<label class="radio-label">
-				<input type="radio" bind:group={newWorkerType} value="fly_machine" />
-				Fly Machine
+				<input type="radio" bind:group={newWorkerCategory} value="persistent" />
+				Persistent
 			</label>
 		</div>
-		<button
-			class="create-btn"
-			on:click={handleCreate}
-			disabled={!newWorkerName.trim() || actionInProgress === 'create'}
-		>
-			{actionInProgress === 'create' ? 'Creating...' : 'Create Worker'}
-		</button>
+		<span class="create-btn-wrapper" title={!newWorkerName.trim() ? 'Enter a worker name first' : ''}>
+			<button
+				class="create-btn"
+				on:click={handleCreate}
+				disabled={!newWorkerName.trim() || actionInProgress === 'create'}
+			>
+				{actionInProgress === 'create' ? 'Creating...' : 'Create Worker'}
+			</button>
+		</span>
 	</div>
 
 	<!-- Worker List -->
@@ -242,7 +230,7 @@
 					<div class="worker-header" on:click={() => toggleExpand(worker.id)} role="button" tabindex="0" on:keydown={(e) => e.key === 'Enter' && toggleExpand(worker.id)}>
 						<div class="worker-info">
 							<span class="worker-name">{worker.name}</span>
-							<span class="worker-type">{workerTypeLabel(worker.worker_type)}</span>
+							<span class="worker-type">{workerCategoryLabel(worker.worker_category)}</span>
 							<span class="status-badge" style="background: {statusColor(worker.status)}">
 								{worker.status}
 							</span>
@@ -264,7 +252,7 @@
 									Retry
 								</button>
 							{/if}
-							{#if worker.status === 'ready' && worker.worker_type === 'fly_machine'}
+							{#if worker.status === 'ready' && worker.worker_category === 'persistent'}
 								<button
 									on:click|stopPropagation={() => handleStop(worker.id)}
 									disabled={actionInProgress === worker.id}
@@ -373,54 +361,21 @@
 		padding: 2rem;
 	}
 
-	.page-nav {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		margin-bottom: 1.5rem;
-		font-size: 1.1em;
-		color: var(--text-primary);
-	}
-
-	.page-nav a {
-		color: var(--button-text);
-		text-decoration: none;
-		font-weight: 600;
-	}
-
-	.page-nav a:hover {
-		text-decoration: underline;
-	}
-
-	.nav-sep {
-		color: var(--text-tertiary);
-	}
-
-	.page-nav span:last-of-type {
-		font-weight: 600;
-	}
-
-	.page-nav .settings-link {
-		margin-left: auto;
-		font-weight: normal;
-		font-size: 0.85em;
-	}
-
 	.error-banner {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
 		padding: 0.75rem 1rem;
-		background: #f8d7da;
-		color: #721c24;
-		border-radius: 4px;
+		background: var(--error-bg);
+		color: var(--error-text);
+		border-radius: 6px;
 		margin-bottom: 1rem;
 	}
 
 	.error-banner .dismiss {
 		background: none;
 		border: none;
-		color: #721c24;
+		color: var(--error-text);
 		cursor: pointer;
 		font-weight: bold;
 		padding: 0 0.25rem;
@@ -473,6 +428,10 @@
 		font-weight: 500;
 		cursor: pointer;
 		transition: opacity 0.2s;
+	}
+
+	.create-btn-wrapper {
+		display: inline-block;
 	}
 
 	.create-btn:disabled {
@@ -583,22 +542,22 @@
 	}
 
 	button.danger {
-		border-color: #dc3545;
-		color: #dc3545;
+		border-color: var(--danger);
+		color: var(--danger);
 	}
 
 	button.danger:hover:not(:disabled) {
-		background: #dc3545;
+		background: var(--danger-hover);
 		color: white;
 	}
 
 	button.danger-outline {
-		border-color: #dc3545;
-		color: #dc3545;
+		border-color: var(--danger);
+		color: var(--danger);
 	}
 
 	button.danger-outline:hover:not(:disabled) {
-		background: #dc3545;
+		background: var(--danger-hover);
 		color: white;
 	}
 

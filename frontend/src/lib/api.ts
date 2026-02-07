@@ -67,7 +67,7 @@ export interface AuthUser {
 	email: string;
 }
 
-export async function register(email: string, password: string): Promise<AuthUser> {
+export async function register(email: string, password: string): Promise<{ status: string; email: string }> {
 	const res = await post('/api/auth/register', { email, password });
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Registration failed'));
 	return res.json();
@@ -108,6 +108,73 @@ export async function resetPassword(token: string, newPassword: string): Promise
 		new_password: newPassword,
 	});
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to reset password'));
+}
+
+export async function verifyEmail(token: string): Promise<AuthUser> {
+	const res = await post('/api/auth/verify-email', { token });
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to verify email'));
+	return res.json();
+}
+
+export async function resendVerification(email: string): Promise<{ status: string }> {
+	const res = await post('/api/auth/resend-verification', { email });
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to resend verification email'));
+	return res.json();
+}
+
+// -- Auth0 --
+
+export async function getAuth0Status(): Promise<{ configured: boolean }> {
+	const res = await get('/api/auth/auth0/status');
+	if (!res.ok) return { configured: false };
+	return res.json();
+}
+
+export function getAuth0LoginUrl(): string {
+	return `${API_URL}/api/auth/auth0/login`;
+}
+
+export async function auth0Callback(code: string, state: string): Promise<AuthUser> {
+	const res = await post('/api/auth/auth0/callback', { code, state });
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Authentication failed'));
+	return res.json();
+}
+
+export async function unlinkAuth0(): Promise<void> {
+	const res = await post('/api/auth/auth0/unlink');
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to unlink Google account'));
+}
+
+// -- Account management --
+
+export interface AccountStatus {
+	id: string;
+	email: string;
+	has_password: boolean;
+	has_google: boolean;
+	email_verified: boolean;
+}
+
+export async function getAccountStatus(): Promise<AccountStatus> {
+	const res = await get('/api/auth/account-status');
+	if (!res.ok) throw new Error('Failed to get account status');
+	return res.json();
+}
+
+export async function setPassword(newPassword: string): Promise<void> {
+	const res = await post('/api/auth/set-password', { new_password: newPassword });
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to set password'));
+}
+
+export async function changeEmail(newEmail: string, password?: string): Promise<void> {
+	const res = await post('/api/auth/change-email', { new_email: newEmail, password });
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to initiate email change'));
+}
+
+export async function confirmEmailChange(token: string): Promise<AuthUser> {
+	const res = await post('/api/auth/confirm-email-change', { token });
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to confirm email change'));
+	return res.json();
 }
 
 // -- nets --
@@ -203,7 +270,8 @@ export async function executionReset(netId: string): Promise<void> {
 export interface Worker {
 	id: string;
 	name: string;
-	worker_type: string;
+	worker_category: string; // "ephemeral" or "persistent"
+	worker_type: string; // implementation: "sprite" or "fly_machine"
 	sprite_name: string | null;
 	fly_machine_id: string | null;
 	status: string;
@@ -230,7 +298,7 @@ export async function getWorker(workerId: string): Promise<WorkerDetail> {
 
 export async function createWorker(body: {
 	name: string;
-	worker_type?: string;
+	worker_category?: string; // "ephemeral" or "persistent"
 }): Promise<Worker> {
 	const res = await post('/api/workers', body);
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to create worker'));

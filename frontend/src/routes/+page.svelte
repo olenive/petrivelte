@@ -12,6 +12,7 @@
 	import GraphPanel from '$lib/components/GraphPanel.svelte';
 	import ExecutionLog from '$lib/components/ExecutionLog.svelte';
 	import TokenInspector from '$lib/components/TokenInspector.svelte';
+	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 	import type { GraphState, Token, LogEntry } from '$lib/types';
 
 	let graphState: GraphState | null = null;
@@ -52,45 +53,6 @@
 	let workerActionInProgress = false;
 
 	// Theme state
-	const THEME_STORAGE_KEY = 'petrivelte-theme';
-	let theme: 'light' | 'dark' = 'dark';
-
-	function loadTheme() {
-		if (typeof window === 'undefined') return;
-		try {
-			const saved = localStorage.getItem(THEME_STORAGE_KEY);
-			if (saved === 'light' || saved === 'dark') {
-				theme = saved;
-			} else {
-				// Detect OS preference
-				const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-				theme = prefersDark ? 'dark' : 'light';
-			}
-		} catch (e) {
-			console.warn('Failed to load theme:', e);
-			theme = 'dark'; // Fallback
-		}
-		applyTheme();
-	}
-
-	function toggleTheme() {
-		theme = theme === 'light' ? 'dark' : 'light';
-		applyTheme();
-		if (typeof window !== 'undefined') {
-			try {
-				localStorage.setItem(THEME_STORAGE_KEY, theme);
-			} catch (e) {
-				console.warn('Failed to save theme:', e);
-			}
-		}
-	}
-
-	function applyTheme() {
-		if (typeof document !== 'undefined') {
-			document.body.classList.remove('light-theme', 'dark-theme');
-			document.body.classList.add(`${theme}-theme`);
-		}
-	}
 
 	// Panel layout state
 	const PANEL_STORAGE_KEY = 'petrivelte-panel-layout';
@@ -570,9 +532,6 @@
 	}
 
 	onMount(() => {
-		// Load theme preference
-		loadTheme();
-
 		// Load saved panel layout
 		loadPanelLayout();
 
@@ -672,9 +631,7 @@
 			<span class="status" class:connected={connectionStatus === 'Connected'}>
 				{connectionStatus}
 			</span>
-			<button class="theme-toggle" on:click={toggleTheme} title="Toggle light/dark mode">
-				{theme === 'light' ? 'dark' : 'light'}
-			</button>
+			<ThemeToggle />
 			<a href="/workers" class="nav-link">Workers</a>
 		</div>
 
@@ -905,32 +862,17 @@
 		color: var(--text-primary);
 	}
 
-	.theme-toggle {
-		padding: 0.5rem 0.75rem;
-		border: 1px solid var(--border-color);
-		border-radius: 4px;
-		background: var(--bg-tertiary);
-		font-size: 1.2em;
-		cursor: pointer;
-		transition: all 0.2s;
-	}
-
-	.theme-toggle:hover {
-		background: var(--bg-hover);
-		transform: scale(1.1);
-	}
-
 	.status {
 		padding: 0.5rem 1rem;
 		border-radius: 4px;
 		font-size: 0.9em;
-		background: #fff3cd;
-		color: #856404;
+		background: var(--status-bg-warning);
+		color: var(--status-text-warning);
 	}
 
 	.status.connected {
-		background: #d4edda;
-		color: #155724;
+		background: var(--status-bg-success);
+		color: var(--status-text-success);
 	}
 
 	.controls {
@@ -984,12 +926,12 @@
 	}
 
 	button.stop {
-		border-color: #dc3545;
-		color: #dc3545;
+		border-color: var(--danger);
+		color: var(--danger);
 	}
 
 	button.stop:hover {
-		background: #dc3545;
+		background: var(--danger-hover);
 		color: white;
 	}
 
@@ -1029,13 +971,13 @@
 	}
 
 	.execution-state.running {
-		background: #d1ecf1;
-		color: #0c5460;
+		background: var(--status-bg-info);
+		color: var(--status-text-info);
 	}
 
 	.execution-state.auto-stepping {
-		background: #fff3cd;
-		color: #856404;
+		background: var(--status-bg-warning);
+		color: var(--status-text-warning);
 	}
 
 	.panels {
