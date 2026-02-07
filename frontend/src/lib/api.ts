@@ -13,6 +13,24 @@ const jsonHeaders = { 'Content-Type': 'application/json' };
 
 // -- helpers --
 
+/**
+ * Extract a human-readable error message from an API error response.
+ * Handles both simple string `detail` and Pydantic validation error arrays.
+ */
+function extractErrorMessage(data: unknown, fallback: string): string {
+	if (!data || typeof data !== 'object') return fallback;
+	const detail = (data as Record<string, unknown>).detail;
+	if (typeof detail === 'string') return detail;
+	if (Array.isArray(detail) && detail.length > 0) {
+		// Pydantic validation error format: [{loc: [...], msg: "...", type: "..."}]
+		const first = detail[0];
+		if (first && typeof first === 'object' && 'msg' in first) {
+			return String(first.msg);
+		}
+	}
+	return fallback;
+}
+
 async function get(path: string): Promise<Response> {
 	return fetch(`${API_URL}${path}`, { credentials: 'include' });
 }
@@ -51,13 +69,13 @@ export interface AuthUser {
 
 export async function register(email: string, password: string): Promise<AuthUser> {
 	const res = await post('/api/auth/register', { email, password });
-	if (!res.ok) throw new Error((await res.json()).detail ?? 'Registration failed');
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Registration failed'));
 	return res.json();
 }
 
 export async function login(email: string, password: string): Promise<AuthUser> {
 	const res = await post('/api/auth/login', { email, password });
-	if (!res.ok) throw new Error((await res.json()).detail ?? 'Login failed');
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Login failed'));
 	return res.json();
 }
 
@@ -69,6 +87,27 @@ export async function getMe(): Promise<AuthUser | null> {
 	const res = await get('/api/auth/me');
 	if (!res.ok) return null;
 	return res.json();
+}
+
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+	const res = await post('/api/auth/change-password', {
+		current_password: currentPassword,
+		new_password: newPassword,
+	});
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to change password'));
+}
+
+export async function forgotPassword(email: string): Promise<void> {
+	const res = await post('/api/auth/forgot-password', { email });
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to send reset email'));
+}
+
+export async function resetPassword(token: string, newPassword: string): Promise<void> {
+	const res = await post('/api/auth/reset-password', {
+		token,
+		new_password: newPassword,
+	});
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to reset password'));
 }
 
 // -- nets --
@@ -104,7 +143,7 @@ export async function createNet(body: {
 	worker_id?: string;
 }): Promise<Net> {
 	const res = await post('/api/nets', body);
-	if (!res.ok) throw new Error((await res.json()).detail ?? 'Failed to create net');
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to create net'));
 	return res.json();
 }
 
@@ -113,7 +152,7 @@ export async function patchNet(
 	body: Partial<Pick<Net, 'name' | 'entry_module' | 'entry_function' | 'worker_id'>>,
 ): Promise<Net> {
 	const res = await patch(`/api/nets/${netId}`, body);
-	if (!res.ok) throw new Error((await res.json()).detail ?? 'Failed to update net');
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to update net'));
 	return res.json();
 }
 
@@ -124,13 +163,13 @@ export async function deleteNet(netId: string): Promise<void> {
 
 export async function loadNet(netId: string): Promise<{ status: string; worker_ip: string }> {
 	const res = await post(`/api/nets/${netId}/load`);
-	if (!res.ok) throw new Error((await res.json()).detail ?? 'Failed to load net');
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to load net'));
 	return res.json();
 }
 
 export async function unloadNet(netId: string): Promise<void> {
 	const res = await post(`/api/nets/${netId}/unload`);
-	if (!res.ok) throw new Error((await res.json()).detail ?? 'Failed to unload net');
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to unload net'));
 }
 
 // -- execution (proxied through control plane to worker) --
@@ -194,7 +233,7 @@ export async function createWorker(body: {
 	worker_type?: string;
 }): Promise<Worker> {
 	const res = await post('/api/workers', body);
-	if (!res.ok) throw new Error((await res.json()).detail ?? 'Failed to create worker');
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to create worker'));
 	return res.json();
 }
 
@@ -205,21 +244,21 @@ export async function deleteWorker(workerId: string): Promise<void> {
 
 export async function provisionWorker(workerId: string): Promise<{ status: string; url: string }> {
 	const res = await post(`/api/workers/${workerId}/provision`);
-	if (!res.ok) throw new Error((await res.json()).detail ?? 'Failed to provision worker');
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to provision worker'));
 	return res.json();
 }
 
 export async function destroyWorkerResource(workerId: string): Promise<void> {
 	const res = await post(`/api/workers/${workerId}/destroy`);
-	if (!res.ok) throw new Error((await res.json()).detail ?? 'Failed to destroy resource');
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to destroy resource'));
 }
 
 export async function startWorker(workerId: string): Promise<void> {
 	const res = await post(`/api/workers/${workerId}/start`);
-	if (!res.ok) throw new Error((await res.json()).detail ?? 'Failed to start worker');
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to start worker'));
 }
 
 export async function stopWorker(workerId: string): Promise<void> {
 	const res = await post(`/api/workers/${workerId}/stop`);
-	if (!res.ok) throw new Error((await res.json()).detail ?? 'Failed to stop worker');
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to stop worker'));
 }

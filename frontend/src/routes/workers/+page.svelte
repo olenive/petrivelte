@@ -195,6 +195,7 @@
 		<a href="/">Petritype</a>
 		<span class="nav-sep">/</span>
 		<span>Workers</span>
+		<a href="/settings" class="settings-link">Settings</a>
 	</nav>
 
 	{#if errorMessage}
@@ -395,8 +396,14 @@
 		color: var(--text-tertiary);
 	}
 
-	.page-nav span:last-child {
+	.page-nav span:last-of-type {
 		font-weight: 600;
+	}
+
+	.page-nav .settings-link {
+		margin-left: auto;
+		font-weight: normal;
+		font-size: 0.85em;
 	}
 
 	.error-banner {

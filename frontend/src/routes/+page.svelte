@@ -752,6 +752,7 @@
 
 			<div class="control-group user-info">
 				<span class="user-email">{userEmail}</span>
+				<a href="/settings" class="settings-link" title="Settings">Settings</a>
 				<button on:click={handleLogout} title="Sign out">Logout</button>
 			</div>
 		</div>
@@ -1006,6 +1007,16 @@
 	.user-email {
 		font-size: 0.85em;
 		color: var(--text-secondary);
+	}
+
+	.settings-link {
+		font-size: 0.85em;
+		color: var(--button-border);
+		text-decoration: none;
+	}
+
+	.settings-link:hover {
+		text-decoration: underline;
 	}
 
 	.execution-state {

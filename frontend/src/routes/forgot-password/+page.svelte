@@ -1,84 +1,66 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
-	import { register, login } from '$lib/api';
+	import { forgotPassword } from '$lib/api';
 
-	let mode: 'login' | 'register' = 'login';
 	let email = '';
-	let password = '';
 	let error = '';
+	let success = false;
 	let loading = false;
 
 	async function handleSubmit() {
 		error = '';
 		loading = true;
 		try {
-			if (mode === 'register') {
-				await register(email, password);
-			} else {
-				await login(email, password);
-			}
-			goto('/');
+			await forgotPassword(email);
+			success = true;
 		} catch (e: any) {
 			error = e.message || 'Something went wrong';
 		} finally {
 			loading = false;
 		}
 	}
-
-	function toggleMode() {
-		mode = mode === 'login' ? 'register' : 'login';
-		error = '';
-	}
 </script>
 
-<div class="login-page">
-	<div class="login-card">
+<div class="page">
+	<div class="card">
 		<h1>Petritype</h1>
-		<h2>{mode === 'login' ? 'Sign in' : 'Create account'}</h2>
+		<h2>Reset your password</h2>
 
-		{#if error}
-			<div class="error">{error}</div>
-		{/if}
+		{#if success}
+			<div class="success">
+				<p>If an account exists with that email, we've sent a password reset link.</p>
+				<p>Check your inbox (and spam folder).</p>
+			</div>
+			<a href="/login" class="back-link">Back to login</a>
+		{:else}
+			{#if error}
+				<div class="error">{error}</div>
+			{/if}
 
-		<form on:submit|preventDefault={handleSubmit}>
-			<label>
-				Email
-				<input type="email" bind:value={email} required autocomplete="email" />
-			</label>
+			<p class="description">
+				Enter your email address and we'll send you a link to reset your password.
+			</p>
 
-			<label>
-				Password
-				<input
-					type="password"
-					bind:value={password}
-					required
-					minlength="6"
-					autocomplete={mode === 'register' ? 'new-password' : 'current-password'}
-				/>
-			</label>
+			<form onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
+				<label>
+					Email
+					<input type="email" bind:value={email} required autocomplete="email" />
+				</label>
 
-			<button type="submit" disabled={loading}>
-				{loading ? '...' : mode === 'login' ? 'Sign in' : 'Create account'}
-			</button>
-		</form>
+				<button type="submit" disabled={loading}>
+					{loading ? 'Sending...' : 'Send reset link'}
+				</button>
+			</form>
 
-		{#if mode === 'login'}
-			<p class="forgot">
-				<a href="/forgot-password" class="link">Forgot password?</a>
+			<p class="switch">
+				Remember your password?
+				<a href="/login" class="link">Sign in</a>
 			</p>
 		{/if}
-
-		<p class="switch">
-			{mode === 'login' ? "Don't have an account?" : 'Already have an account?'}
-			<button class="link" on:click={toggleMode}>
-				{mode === 'login' ? 'Register' : 'Sign in'}
-			</button>
-		</p>
 	</div>
 </div>
 
 <style>
-	.login-page {
+	.page {
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -86,7 +68,7 @@
 		background: var(--bg-primary, #0f0f0f);
 	}
 
-	.login-card {
+	.card {
 		background: var(--bg-secondary, #1a1a1a);
 		border: 1px solid var(--border-color, #333);
 		border-radius: 8px;
@@ -106,6 +88,13 @@
 		font-size: 1.1rem;
 		font-weight: 400;
 		color: var(--text-secondary, #b0b0b0);
+	}
+
+	.description {
+		margin: 0 0 1.5rem;
+		font-size: 0.9rem;
+		color: var(--text-secondary, #b0b0b0);
+		line-height: 1.5;
 	}
 
 	form {
@@ -167,18 +156,22 @@
 		font-size: 0.85rem;
 	}
 
-	.forgot {
-		margin-top: 1rem;
-		text-align: right;
-		font-size: 0.85rem;
+	.success {
+		margin-bottom: 1.5rem;
+		padding: 1rem;
+		border-radius: 4px;
+		background: #153b1a;
+		color: #4ade80;
+		font-size: 0.9rem;
+		line-height: 1.5;
 	}
 
-	.forgot a {
-		text-decoration: none;
+	.success p {
+		margin: 0 0 0.5rem;
 	}
 
-	.forgot a:hover {
-		text-decoration: underline;
+	.success p:last-child {
+		margin-bottom: 0;
 	}
 
 	.switch {
@@ -188,17 +181,18 @@
 		color: var(--text-secondary, #b0b0b0);
 	}
 
-	.link {
-		background: none;
-		border: none;
+	.link, .back-link {
 		color: var(--button-border, #4d9fff);
-		cursor: pointer;
 		font-size: 0.85rem;
-		padding: 0;
+		text-decoration: none;
+	}
+
+	.link:hover, .back-link:hover {
 		text-decoration: underline;
 	}
 
-	.link:hover {
-		opacity: 0.8;
+	.back-link {
+		display: block;
+		text-align: center;
 	}
 </style>
