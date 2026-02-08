@@ -274,6 +274,8 @@ export interface Worker {
 	worker_type: string; // implementation: "sprite" or "fly_machine"
 	sprite_name: string | null;
 	fly_machine_id: string | null;
+	deployment_id: string | null;
+	image_tag: string | null;
 	status: string;
 	url: string | null;
 	created_at: string;
@@ -299,6 +301,7 @@ export async function getWorker(workerId: string): Promise<WorkerDetail> {
 export async function createWorker(body: {
 	name: string;
 	worker_category?: string; // "ephemeral" or "persistent"
+	deployment_id?: string; // Link to a deployment for custom image
 }): Promise<Worker> {
 	const res = await post('/api/workers', body);
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to create worker'));
@@ -329,4 +332,85 @@ export async function startWorker(workerId: string): Promise<void> {
 export async function stopWorker(workerId: string): Promise<void> {
 	const res = await post(`/api/workers/${workerId}/stop`);
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to stop worker'));
+}
+
+// -- GitHub --
+
+export interface GitHubStatus {
+	connected: boolean;
+	username?: string;
+}
+
+export async function getGitHubStatus(): Promise<GitHubStatus> {
+	const res = await get('/api/github/status');
+	if (!res.ok) return { connected: false };
+	return res.json();
+}
+
+export function getGitHubConnectUrl(): string {
+	return `${API_URL}/api/github/connect`;
+}
+
+export async function disconnectGitHub(): Promise<void> {
+	const res = await del('/api/github/disconnect');
+	if (!res.ok) throw new Error('Failed to disconnect GitHub');
+}
+
+export interface GitHubRepo {
+	id: string;
+	full_name: string;
+	default_branch: string;
+	webhook_active: boolean;
+	created_at: string;
+}
+
+export async function listGitHubRepos(): Promise<GitHubRepo[]> {
+	const res = await get('/api/github/repos');
+	if (!res.ok) throw new Error('Failed to list repos');
+	return res.json();
+}
+
+export async function connectGitHubRepo(fullName: string, defaultBranch = 'main'): Promise<GitHubRepo> {
+	const res = await post('/api/github/repos', { full_name: fullName, default_branch: defaultBranch });
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to connect repo'));
+	return res.json();
+}
+
+export async function disconnectGitHubRepo(repoId: string): Promise<void> {
+	const res = await del(`/api/github/repos/${repoId}`);
+	if (!res.ok) throw new Error('Failed to disconnect repo');
+}
+
+export async function triggerRepoBuild(repoId: string): Promise<{ deployment_id: string; commit: string }> {
+	const res = await post(`/api/github/repos/${repoId}/trigger`);
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to trigger build'));
+	return res.json();
+}
+
+// -- Deployments --
+
+export interface Deployment {
+	id: string;
+	git_url: string;
+	git_ref: string;
+	git_commit: string | null;
+	image_tag: string | null;
+	build_status: string;
+	build_error: string | null;
+	discovered_nets: Array<{ name: string; module: string; function: string }> | null;
+	created_at: string;
+	build_started_at: string | null;
+	build_finished_at: string | null;
+}
+
+export async function listDeployments(): Promise<Deployment[]> {
+	const res = await get('/api/deployments');
+	if (!res.ok) throw new Error('Failed to list deployments');
+	return res.json();
+}
+
+export async function getDeployment(deploymentId: string): Promise<Deployment> {
+	const res = await get(`/api/deployments/${deploymentId}`);
+	if (!res.ok) throw new Error('Failed to get deployment');
+	return res.json();
 }
