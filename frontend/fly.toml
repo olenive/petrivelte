@@ -1,0 +1,24 @@
+# fly.toml app configuration file generated for petrify-frontend on 2026-02-08T20:56:47Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'petrify-frontend'
+primary_region = 'lhr'
+
+[build]
+  [build.args]
+    PUBLIC_API_URL = "https://petrify-fly-app.fly.dev"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+[[vm]]
+  memory = '256mb'
+  cpus = 1
+  memory_mb = 256

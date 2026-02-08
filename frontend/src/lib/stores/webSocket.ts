@@ -7,10 +7,10 @@
  */
 
 import { writable, get } from 'svelte/store';
-import { env } from '$env/dynamic/public';
+import { PUBLIC_API_URL } from '$env/static/public';
 import type { WebSocketMessage } from '$lib/types';
 
-const apiUrl = env.PUBLIC_API_URL || 'http://localhost:8000';
+const apiUrl = PUBLIC_API_URL || 'http://localhost:8000';
 const wsBase = apiUrl.replace(/^http/, 'ws');
 
 const { subscribe, set } = writable<WebSocketMessage | null>(null);
