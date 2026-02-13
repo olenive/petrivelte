@@ -54,6 +54,11 @@ bun run dev
 
 Open http://localhost:5173
 
+
+### 4. Deploy to Fly.io
+`fly deploy`
+
+
 ## Project Structure
 
 ```

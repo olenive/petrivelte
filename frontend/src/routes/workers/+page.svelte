@@ -223,7 +223,10 @@
 
 	<!-- Worker List -->
 	{#if workers.length === 0}
-		<p class="text-center text-foreground-muted p-8">No workers yet. Create one above.</p>
+		<div class="text-center text-foreground-muted p-8">
+			<p>No workers yet. Create one above.</p>
+			<p class="text-sm mt-2">Tip: You can also create workers from successful deployments on the <a href="/deployments" class="text-accent hover:underline">Deployments</a> page.</p>
+		</div>
 	{:else}
 		<div class="flex flex-col gap-2">
 			{#each workers as worker (worker.id)}

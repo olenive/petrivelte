@@ -7,12 +7,14 @@
 		getMe, logout,
 		listNets, listWorkers, patchNet, loadNet, unloadNet,
 		getExecutionState, executionStep, executionStart, executionStop, executionReset,
+		getGitHubStatus, listGitHubRepos, listDeployments,
 		type Net, type Worker,
 	} from '$lib/api';
 	import GraphPanel from '$lib/components/GraphPanel.svelte';
 	import ExecutionLog from '$lib/components/ExecutionLog.svelte';
 	import TokenInspector from '$lib/components/TokenInspector.svelte';
-	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
+	import AppNav from '$lib/components/AppNav.svelte';
+	import SetupChecklist from '$lib/components/SetupChecklist.svelte';
 	import type { GraphState, Token, LogEntry } from '$lib/types';
 
 	let graphState = $state<GraphState | null>(null);
@@ -51,6 +53,11 @@
 	// Worker state
 	let workers = $state<Worker[]>([]);
 	let workerActionInProgress = $state(false);
+
+	// Checklist state (fetched only when graphState is null)
+	let githubConnected = $state(false);
+	let hasRepos = $state(false);
+	let hasSuccessfulBuild = $state(false);
 
 	// Panel layout state
 	const PANEL_STORAGE_KEY = 'petrivelte-panel-layout';
@@ -175,6 +182,16 @@
 	async function selectNet(netId: string) {
 		selectedNetId = netId;
 		isRunning = false;
+		graphState = null;
+		tokens = [];
+
+		// Only connect WebSocket and fetch execution state if the net has a ready worker
+		const net = availableNets.find(n => n.id === netId);
+		const worker = net?.worker_id ? workers.find(w => w.id === net.worker_id) : null;
+		if (!worker || worker.status !== 'ready') {
+			webSocketStore.disconnect();
+			return;
+		}
 
 		// Connect WebSocket to this net
 		webSocketStore.connectToNet(netId);
@@ -201,7 +218,6 @@
 			tokens = calculateTokenPositions(tokensData, graphState!);
 		} catch (error) {
 			console.error('Failed to fetch execution state:', error);
-			// Net might not be loaded on worker yet — that's ok, WebSocket will send state
 		}
 	}
 
@@ -541,7 +557,14 @@
 				return;
 			}
 			userEmail = user.email;
-			await Promise.all([fetchNets(), listWorkers().then(w => workers = w).catch(() => {})]);
+			await Promise.all([
+				fetchNets(),
+				listWorkers().then(w => workers = w).catch(() => {}),
+				// Checklist data
+				getGitHubStatus().then(s => githubConnected = s.connected).catch(() => {}),
+				listGitHubRepos().then(r => hasRepos = r.length > 0).catch(() => {}),
+				listDeployments().then(d => hasSuccessfulBuild = d.some(dep => dep.build_status === 'success')).catch(() => {}),
+			]);
 		})();
 
 		const unsubscribe = webSocketStore.subscribe((message) => {
@@ -629,17 +652,15 @@
 <svelte:window onmousemove={handleMouseMove} onmouseup={handleMouseUp} />
 
 <div class="flex flex-col h-screen bg-surface">
-	<header class="flex items-center justify-between px-8 py-4 bg-card border-b border-border gap-8 flex-wrap">
-		<div class="flex items-center gap-4">
-			<h1 class="text-2xl font-bold text-foreground">Petrify</h1>
-			<span class="px-4 py-2 rounded text-sm {connectionStatus === 'Connected' ? 'bg-status-success-bg text-status-success' : 'bg-status-warning-bg text-status-warning'}">
+	<AppNav {userEmail} onLogout={handleLogout} />
+
+	{#if graphState}
+		<!-- Secondary toolbar: net controls + execution buttons -->
+		<div class="flex items-center gap-6 px-6 py-3 bg-card border-b border-border flex-wrap">
+			<span class="px-3 py-1.5 rounded text-xs {connectionStatus === 'Connected' ? 'bg-status-success-bg text-status-success' : 'bg-status-warning-bg text-status-warning'}">
 				{connectionStatus}
 			</span>
-			<ThemeToggle />
-			<a href="/workers" class="text-accent text-sm font-medium no-underline px-3 py-2 border border-accent rounded transition-all hover:bg-accent hover:text-accent-foreground">Workers</a>
-		</div>
 
-		<div class="flex items-center gap-6 flex-wrap">
 			{#if availableNets.length > 0}
 				<div class="flex items-center gap-2">
 					<label for="net-select" class="text-sm font-medium text-foreground">Net:</label>
@@ -651,7 +672,6 @@
 					</select>
 				</div>
 
-				<!-- Worker assignment -->
 				{#if selectedNetId}
 					<div class="flex items-center gap-2">
 						<label for="worker-select" class="text-sm font-medium text-foreground">Worker:</label>
@@ -676,52 +696,18 @@
 				</div>
 
 				<div class="flex items-center gap-2">
-					<button
-						class={btnDefault}
-						onclick={handleStep}
-						disabled={isRunning || isAutoStepping || !selectedNetId}
-						title="Fire a single transition manually."
-					>
-						Step
-					</button>
-					<button
-						class={isAutoStepping ? btnDanger : btnDefault}
-						onclick={handleAutoStep}
-						disabled={isRunning || !selectedNetId}
-						title={isAutoStepping
-							? "Stop automatic stepping."
-							: "Automatically fire transitions one at a time with animations."}
-					>
-						{isAutoStepping ? 'Stop' : 'Auto Step'}
-					</button>
-					<button
-						class={isRunning ? btnDanger : btnDefault}
-						onclick={handleActivateDeactivate}
-						disabled={isAutoStepping || !selectedNetId}
-						title={isRunning
-							? "Stop continuous execution."
-							: "Start continuous execution."}
-					>
-						{isRunning ? 'Deactivate' : 'Activate'}
-					</button>
-					<button
-						class={btnDefault}
-						onclick={handleReset}
-						disabled={isRunning || isAutoStepping || !selectedNetId}
-						title="Reset the Petri net to its initial state."
-					>
-						Reset
-					</button>
+					<button class={btnDefault} onclick={handleStep} disabled={isRunning || isAutoStepping || !selectedNetId} title="Fire a single transition manually.">Step</button>
+					<button class={isAutoStepping ? btnDanger : btnDefault} onclick={handleAutoStep} disabled={isRunning || !selectedNetId}
+						title={isAutoStepping ? "Stop automatic stepping." : "Automatically fire transitions one at a time with animations."}
+					>{isAutoStepping ? 'Stop' : 'Auto Step'}</button>
+					<button class={isRunning ? btnDanger : btnDefault} onclick={handleActivateDeactivate} disabled={isAutoStepping || !selectedNetId}
+						title={isRunning ? "Stop continuous execution." : "Start continuous execution."}
+					>{isRunning ? 'Deactivate' : 'Activate'}</button>
+					<button class={btnDefault} onclick={handleReset} disabled={isRunning || isAutoStepping || !selectedNetId} title="Reset the Petri net to its initial state.">Reset</button>
 				</div>
 			{/if}
-
-			<div class="flex items-center gap-2 ml-auto">
-				<span class="text-sm text-foreground-muted">{userEmail}</span>
-				<a href="/settings" class="text-sm text-accent no-underline hover:underline" title="Settings">Settings</a>
-				<button class={btnDefault} onclick={handleLogout} title="Sign out">Logout</button>
-			</div>
 		</div>
-	</header>
+	{/if}
 
 	{#if graphState}
 		<main class="flex flex-1 overflow-hidden {isDraggingSidebar || isDraggingPanelDivider ? 'cursor-col-resize select-none' : ''}">
@@ -828,13 +814,15 @@
 			</div>
 		</main>
 	{:else}
-		<div class="flex-1 flex flex-col items-center justify-center p-8 text-center text-foreground">
-			<p class="my-2">No graph data yet.</p>
-			<p class="my-2 text-foreground-muted text-sm max-w-[500px]">
-				Create a net, assign it to a worker, and load it.
-				<br />
-				The graph will appear once the net is loaded on a running worker.
-			</p>
+		<div class="flex-1 flex flex-col items-center justify-center p-8">
+			<SetupChecklist
+				{githubConnected}
+				{hasRepos}
+				{hasSuccessfulBuild}
+				hasWorkers={workers.length > 0}
+				hasReadyWorker={workers.some(w => w.status === 'ready')}
+				hasLoadedNet={false}
+			/>
 		</div>
 	{/if}
 </div>

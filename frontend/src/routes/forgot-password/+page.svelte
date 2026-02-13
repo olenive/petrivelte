@@ -24,7 +24,7 @@
 <div class="flex items-center justify-center min-h-screen bg-surface">
 	<div class="bg-card border border-border rounded-lg p-8 w-full max-w-[380px]">
 		<div class="flex items-center justify-between mb-1">
-			<h1 class="text-2xl font-bold text-foreground">Petrify</h1>
+			<h1 class="text-2xl font-bold text-foreground">Petri</h1>
 			<ThemeToggle />
 		</div>
 		<h2 class="mb-6 text-lg font-normal text-foreground-muted">Reset your password</h2>

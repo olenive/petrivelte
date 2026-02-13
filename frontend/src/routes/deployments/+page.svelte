@@ -216,7 +216,10 @@
 			</div>
 
 			{#if repos.length === 0}
-				<p class="text-center text-foreground-muted p-4">No repositories connected yet.</p>
+				<div class="text-center text-foreground-muted p-4">
+					<p>No repositories connected yet.</p>
+					<p class="text-sm mt-1">Enter a GitHub repository containing Python Petri net modules (e.g. <code class="text-foreground-faint">owner/repo</code>).</p>
+				</div>
 			{:else}
 				<div class="flex flex-col gap-2">
 					{#each repos as repo (repo.id)}
