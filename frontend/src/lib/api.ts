@@ -187,6 +187,7 @@ export interface Net {
 	execution_mode: string;
 	image_tag: string | null;
 	worker_id: string | null;
+	load_state: 'unloaded' | 'loaded' | 'error';
 	created_at: string;
 	updated_at: string;
 }
@@ -283,7 +284,7 @@ export interface Worker {
 }
 
 export interface WorkerDetail extends Worker {
-	assigned_nets: Array<{ id: string; name: string; entry_module: string; entry_function: string }>;
+	assigned_nets: Array<{ id: string; name: string; entry_module: string; entry_function: string; load_state: string }>;
 }
 
 export async function listWorkers(): Promise<Worker[]> {

@@ -142,13 +142,23 @@
 	async function handleLoadNet(netId: string) {
 		await withAction(netId, async () => {
 			await loadNet(netId);
+			await refreshNets();
 		});
 	}
 
 	async function handleUnloadNet(netId: string) {
 		await withAction(netId, async () => {
 			await unloadNet(netId);
+			await refreshNets();
 		});
+	}
+
+	function loadStateBadge(state: string): { label: string; color: string } {
+		switch (state) {
+			case 'loaded': return { label: 'Loaded', color: 'var(--status-ready)' };
+			case 'error': return { label: 'Error', color: 'var(--status-error)' };
+			default: return { label: 'Unloaded', color: 'var(--status-stopped)' };
+		}
 	}
 
 	function statusColor(status: string): string {
@@ -312,25 +322,30 @@
 								{:else}
 									<ul class="list-none m-0 p-0 mb-3">
 										{#each netsForWorker(worker.id) as net (net.id)}
+											{@const badge = loadStateBadge(net.load_state)}
 											<li class="flex items-center gap-3 py-1.5 border-b border-border-light flex-wrap last:border-b-0">
 												<span class="font-medium text-foreground text-sm">{net.name}</span>
+												<span class="text-xs px-2 py-0.5 rounded-full text-white font-medium" style="background: {badge.color}">{badge.label}</span>
 												<span class="text-xs text-foreground-faint font-mono">{net.entry_module}:{net.entry_function}</span>
 												<div class="flex gap-1.5 ml-auto">
 													{#if worker.status === 'ready'}
-														<button
-															class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-xs font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
-															onclick={() => handleLoadNet(net.id)}
-															disabled={actionInProgress === net.id}
-														>
-															Load
-														</button>
-														<button
-															class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-xs font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
-															onclick={() => handleUnloadNet(net.id)}
-															disabled={actionInProgress === net.id}
-														>
-															Unload
-														</button>
+														{#if net.load_state !== 'loaded'}
+															<button
+																class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-xs font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+																onclick={() => handleLoadNet(net.id)}
+																disabled={actionInProgress === net.id}
+															>
+																Load
+															</button>
+														{:else}
+															<button
+																class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-xs font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+																onclick={() => handleUnloadNet(net.id)}
+																disabled={actionInProgress === net.id}
+															>
+																Unload
+															</button>
+														{/if}
 													{/if}
 													<button
 														class="px-2.5 py-1 border border-destructive rounded bg-transparent text-destructive text-xs font-medium cursor-pointer transition-all hover:bg-destructive-hover hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"

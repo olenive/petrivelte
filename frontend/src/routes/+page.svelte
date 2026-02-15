@@ -521,6 +521,7 @@
 		workerActionInProgress = true;
 		try {
 			await loadNet(selectedNetId);
+			availableNets = await listNets();
 		} catch (error) {
 			console.error('Load failed:', error);
 		} finally {
@@ -533,6 +534,7 @@
 		workerActionInProgress = true;
 		try {
 			await unloadNet(selectedNetId);
+			availableNets = await listNets();
 		} catch (error) {
 			console.error('Unload failed:', error);
 		} finally {
@@ -683,8 +685,15 @@
 							{/each}
 						</select>
 						{#if selectedNet()?.worker_id && selectedNetWorker()?.status === 'ready'}
-							<button class={btnSmall} onclick={handleLoadNet} disabled={workerActionInProgress}>Load</button>
-							<button class={btnSmall} onclick={handleUnloadNet} disabled={workerActionInProgress}>Unload</button>
+							{#if selectedNet()?.load_state !== 'loaded'}
+								<button class={btnSmall} onclick={handleLoadNet} disabled={workerActionInProgress}>Load</button>
+							{:else}
+								<button class={btnSmall} onclick={handleUnloadNet} disabled={workerActionInProgress}>Unload</button>
+							{/if}
+							<span class="text-xs px-2 py-0.5 rounded-full text-white font-medium"
+								style="background: {selectedNet()?.load_state === 'loaded' ? 'var(--status-ready)' : selectedNet()?.load_state === 'error' ? 'var(--status-error)' : 'var(--status-stopped)'}">
+								{selectedNet()?.load_state === 'loaded' ? 'Loaded' : selectedNet()?.load_state === 'error' ? 'Error' : 'Unloaded'}
+							</span>
 						{/if}
 					</div>
 				{/if}
@@ -821,7 +830,7 @@
 				{hasSuccessfulBuild}
 				hasWorkers={workers.length > 0}
 				hasReadyWorker={workers.some(w => w.status === 'ready')}
-				hasLoadedNet={false}
+				hasLoadedNet={availableNets.some(n => n.load_state === 'loaded')}
 			/>
 		</div>
 	{/if}
