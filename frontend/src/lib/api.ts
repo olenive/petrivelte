@@ -278,6 +278,7 @@ export interface Worker {
 	deployment_id: string | null;
 	image_tag: string | null;
 	status: string;
+	status_detail: string | null;
 	url: string | null;
 	created_at: string;
 	updated_at: string;
@@ -333,6 +334,12 @@ export async function startWorker(workerId: string): Promise<void> {
 export async function stopWorker(workerId: string): Promise<void> {
 	const res = await post(`/api/workers/${workerId}/stop`);
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to stop worker'));
+}
+
+export async function healthCheckWorker(workerId: string): Promise<{ status: string }> {
+	const res = await post(`/api/workers/${workerId}/health-check`);
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Health check failed'));
+	return res.json();
 }
 
 // -- GitHub --

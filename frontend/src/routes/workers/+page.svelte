@@ -1,14 +1,15 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import {
 		getMe,
 		listWorkers, createWorker, deleteWorker, provisionWorker, destroyWorkerResource,
-		startWorker, stopWorker, getWorker,
+		startWorker, stopWorker, healthCheckWorker, getWorker,
 		listNets, patchNet, loadNet, unloadNet,
 		type Worker, type WorkerDetail, type Net,
 	} from '$lib/api';
 	import AppNav from '$lib/components/AppNav.svelte';
+	import { serverEventsStore } from '$lib/stores/serverEvents';
 
 	let workers = $state<Worker[]>([]);
 	let nets = $state<Net[]>([]);
@@ -32,6 +33,8 @@
 			await fn();
 		} catch (e: any) {
 			errorMessage = e.message || 'Something went wrong';
+			// Refresh state so UI reflects reality after a failure
+			await refreshAll();
 		} finally {
 			actionInProgress = null;
 		}
@@ -44,6 +47,102 @@
 	async function refreshNets() {
 		nets = await listNets();
 	}
+
+	async function refreshAll() {
+		await Promise.all([refreshWorkers(), refreshNets()]);
+	}
+
+	// -- Polling --
+
+	const POLL_INTERVAL = 30_000;
+	let pollTimer: ReturnType<typeof setInterval> | null = null;
+	let pollInFlight = false;
+
+	async function poll() {
+		if (pollInFlight) return; // skip if previous poll hasn't returned
+		pollInFlight = true;
+		try {
+			await refreshAll();
+		} catch {
+			// silently ignore polling errors
+		} finally {
+			pollInFlight = false;
+		}
+	}
+
+	function startPolling() {
+		stopPolling();
+		pollTimer = setInterval(poll, POLL_INTERVAL);
+	}
+
+	function stopPolling() {
+		if (pollTimer !== null) {
+			clearInterval(pollTimer);
+			pollTimer = null;
+		}
+	}
+
+	function handleVisibilityChange() {
+		if (document.hidden) {
+			stopPolling();
+		} else {
+			poll(); // immediate refresh when tab becomes visible
+			startPolling();
+		}
+	}
+
+	// -- SSE listener (debounced to avoid bursts hitting rate limits) --
+
+	let sseDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const unsubscribeSSE = serverEventsStore.subscribe((event) => {
+		if (!event) return;
+		if (sseDebounceTimer) clearTimeout(sseDebounceTimer);
+		sseDebounceTimer = setTimeout(() => {
+			sseDebounceTimer = null;
+			refreshAll();
+		}, 500);
+	});
+
+	// -- Pre-action state checks --
+
+	async function checkWorkerState(workerId: string, expectedStatus: string): Promise<boolean> {
+		await refreshWorkers();
+		const worker = workers.find(w => w.id === workerId);
+		if (!worker || worker.status !== expectedStatus) {
+			errorMessage = `Worker state has changed — it is now "${worker?.status ?? 'unknown'}". Please review before retrying.`;
+			return false;
+		}
+		return true;
+	}
+
+	async function checkNetForLoad(netId: string): Promise<boolean> {
+		await refreshAll();
+		const net = nets.find(n => n.id === netId);
+		if (!net) { errorMessage = 'Net no longer exists.'; return false; }
+		if (net.load_state === 'loaded') { errorMessage = 'Net is already loaded.'; return false; }
+		const worker = net.worker_id ? workers.find(w => w.id === net.worker_id) : null;
+		if (!worker || worker.status !== 'ready') {
+			errorMessage = `Worker is not ready (status: "${worker?.status ?? 'unknown'}"). Cannot load net.`;
+			return false;
+		}
+		return true;
+	}
+
+	async function checkNetForUnload(netId: string): Promise<boolean> {
+		await refreshAll();
+		const net = nets.find(n => n.id === netId);
+		if (!net) { errorMessage = 'Net no longer exists.'; return false; }
+		if (net.load_state !== 'loaded') { errorMessage = 'Net is not currently loaded.'; return false; }
+		const worker = net.worker_id ? workers.find(w => w.id === net.worker_id) : null;
+		if (!worker || worker.status !== 'ready') {
+			errorMessage = `Worker is not ready (status: "${worker?.status ?? 'unknown'}"). Cannot unload net.`;
+			return false;
+		}
+		return true;
+	}
+
+	// -- Action handlers --
 
 	async function handleCreate() {
 		if (!newWorkerName.trim()) return;
@@ -62,13 +161,29 @@
 	}
 
 	async function handleStart(workerId: string) {
+		await refreshWorkers();
+		const worker = workers.find(w => w.id === workerId);
+		const canStart = worker?.status === 'stopped' ||
+			(worker?.status === 'error' && worker?.status_detail === 'machine_stopped');
+		if (!canStart) {
+			errorMessage = `Worker state has changed — it is now "${worker?.status ?? 'unknown'}". Please review before retrying.`;
+			return;
+		}
 		await withAction(workerId, async () => {
 			await startWorker(workerId);
 			await refreshWorkers();
 		});
 	}
 
+	async function handleHealthCheck(workerId: string) {
+		await withAction(workerId, async () => {
+			await healthCheckWorker(workerId);
+			await refreshWorkers();
+		});
+	}
+
 	async function handleStop(workerId: string) {
+		if (!await checkWorkerState(workerId, 'ready')) return;
 		await withAction(workerId, async () => {
 			await stopWorker(workerId);
 			await refreshWorkers();
@@ -76,6 +191,12 @@
 	}
 
 	async function handleDestroyResource(workerId: string) {
+		await refreshWorkers();
+		const worker = workers.find(w => w.id === workerId);
+		if (!worker || (worker.status !== 'ready' && worker.status !== 'stopped')) {
+			errorMessage = `Worker state has changed — it is now "${worker?.status ?? 'unknown'}". Please review before retrying.`;
+			return;
+		}
 		await withAction(workerId, async () => {
 			await destroyWorkerResource(workerId);
 			await refreshWorkers();
@@ -108,6 +229,12 @@
 
 	async function handleAssignNet(workerId: string, netId: string) {
 		if (!netId) return;
+		await refreshNets();
+		const net = nets.find(n => n.id === netId);
+		if (!net || net.worker_id) {
+			errorMessage = 'Net is no longer available for assignment.';
+			return;
+		}
 		await withAction(workerId, async () => {
 			await patchNet(netId, { worker_id: workerId });
 			await refreshNets();
@@ -118,6 +245,12 @@
 	}
 
 	async function handleUnassignNet(netId: string) {
+		await refreshNets();
+		const net = nets.find(n => n.id === netId);
+		if (!net || !net.worker_id) {
+			errorMessage = 'Net is no longer assigned to a worker.';
+			return;
+		}
 		await withAction(netId, async () => {
 			// Patch worker_id to null by sending explicit null
 			const res = await fetch(
@@ -140,6 +273,7 @@
 	}
 
 	async function handleLoadNet(netId: string) {
+		if (!await checkNetForLoad(netId)) return;
 		await withAction(netId, async () => {
 			await loadNet(netId);
 			await refreshNets();
@@ -147,6 +281,7 @@
 	}
 
 	async function handleUnloadNet(netId: string) {
+		if (!await checkNetForUnload(netId)) return;
 		await withAction(netId, async () => {
 			await unloadNet(netId);
 			await refreshNets();
@@ -161,13 +296,34 @@
 		}
 	}
 
-	function statusColor(status: string): string {
+	function statusColor(status: string, statusDetail?: string | null): string {
+		if (status === 'error' && statusDetail === 'machine_stopped') return 'var(--status-stopped)';
 		switch (status) {
 			case 'ready': return 'var(--status-ready)';
 			case 'stopped': return 'var(--status-stopped)';
 			case 'error': return 'var(--status-error)';
 			case 'provisioning': return 'var(--status-provisioning)';
 			default: return 'var(--status-pending)';
+		}
+	}
+
+	function errorDisplayText(statusDetail: string | null): string {
+		switch (statusDetail) {
+			case 'machine_stopped': return 'stopped externally';
+			case 'machine_destroyed': return 'destroyed';
+			case 'unreachable': return 'unreachable';
+			case 'provision_failed': return 'provision failed';
+			default: return 'error';
+		}
+	}
+
+	function errorExplanation(statusDetail: string | null): string | null {
+		switch (statusDetail) {
+			case 'machine_stopped': return 'The machine was stopped outside of Petri';
+			case 'machine_destroyed': return 'The machine no longer exists and must be re-created';
+			case 'unreachable': return 'The worker is not responding to health checks';
+			case 'provision_failed': return 'Provisioning failed — try again';
+			default: return null;
 		}
 	}
 
@@ -186,7 +342,18 @@
 	onMount(async () => {
 		const user = await getMe();
 		if (!user) { goto('/login'); return; }
-		await Promise.all([refreshWorkers(), refreshNets()]);
+		await refreshAll();
+		startPolling();
+		document.addEventListener('visibilitychange', handleVisibilityChange);
+	});
+
+	onDestroy(() => {
+		stopPolling();
+		unsubscribeSSE();
+		if (sseDebounceTimer) clearTimeout(sseDebounceTimer);
+		if (typeof document !== 'undefined') {
+			document.removeEventListener('visibilitychange', handleVisibilityChange);
+		}
 	});
 </script>
 
@@ -252,9 +419,12 @@
 						<div class="flex items-center gap-3">
 							<span class="font-semibold text-foreground">{worker.name}</span>
 							<span class="text-xs text-foreground-muted px-2 py-0.5 bg-muted rounded-sm">{workerCategoryLabel(worker.worker_category)}</span>
-							<span class="text-xs px-2.5 py-0.5 rounded-full text-white font-medium capitalize" style="background: {statusColor(worker.status)}">
-								{worker.status}
+							<span class="text-xs px-2.5 py-0.5 rounded-full text-white font-medium capitalize" style="background: {statusColor(worker.status, worker.status_detail)}">
+								{worker.status === 'error' ? errorDisplayText(worker.status_detail) : worker.status}
 							</span>
+							{#if worker.status === 'error' && errorExplanation(worker.status_detail)}
+								<span class="text-xs text-foreground-muted">{errorExplanation(worker.status_detail)}</span>
+							{/if}
 						</div>
 						<div class="flex items-center gap-2 flex-wrap">
 							{#if worker.status === 'pending'}
@@ -267,12 +437,37 @@
 								</button>
 							{/if}
 							{#if worker.status === 'error'}
+								{#if worker.status_detail === 'machine_stopped'}
+									<button
+										class="px-3.5 py-1.5 border border-accent rounded bg-card text-accent text-sm font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+										onclick={(e) => { e.stopPropagation(); handleStart(worker.id); }}
+										disabled={actionInProgress === worker.id}
+									>
+										Start
+									</button>
+								{:else if worker.status_detail === 'unreachable'}
+									<button
+										class="px-3.5 py-1.5 border border-accent rounded bg-card text-accent text-sm font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+										onclick={(e) => { e.stopPropagation(); handleHealthCheck(worker.id); }}
+										disabled={actionInProgress === worker.id}
+									>
+										Check Health
+									</button>
+								{:else}
+									<button
+										class="px-3.5 py-1.5 border border-accent rounded bg-card text-accent text-sm font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+										onclick={(e) => { e.stopPropagation(); handleProvision(worker.id); }}
+										disabled={actionInProgress === worker.id}
+									>
+										{worker.status_detail === 'machine_destroyed' || worker.status_detail === 'provision_failed' ? 'Re-provision' : 'Retry'}
+									</button>
+								{/if}
 								<button
-									class="px-3.5 py-1.5 border border-accent rounded bg-card text-accent text-sm font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
-									onclick={(e) => { e.stopPropagation(); handleProvision(worker.id); }}
+									class="px-3.5 py-1.5 border border-destructive rounded bg-transparent text-destructive text-sm font-medium cursor-pointer transition-all hover:bg-destructive-hover hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
+									onclick={(e) => { e.stopPropagation(); handleDelete(worker.id); }}
 									disabled={actionInProgress === worker.id}
 								>
-									Retry
+									Delete
 								</button>
 							{/if}
 							{#if worker.status === 'ready' && worker.worker_category === 'persistent'}

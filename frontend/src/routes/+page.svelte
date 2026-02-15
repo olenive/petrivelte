@@ -1,8 +1,9 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { webSocketStore } from '$lib/stores/webSocket';
 	import { selectedTokenId } from '$lib/stores/tokenSelection';
+	import { serverEventsStore } from '$lib/stores/serverEvents';
 	import {
 		getMe, logout,
 		listNets, listWorkers, patchNet, loadNet, unloadNet,
@@ -518,12 +519,21 @@
 
 	async function handleLoadNet() {
 		if (!selectedNetId) return;
+		// Pre-action check: refresh and verify state
+		availableNets = await listNets();
+		workers = await listWorkers();
+		const net = selectedNet();
+		const worker = selectedNetWorker();
+		if (!net || net.load_state === 'loaded') return;
+		if (!worker || worker.status !== 'ready') return;
 		workerActionInProgress = true;
 		try {
 			await loadNet(selectedNetId);
 			availableNets = await listNets();
 		} catch (error) {
 			console.error('Load failed:', error);
+			availableNets = await listNets();
+			workers = await listWorkers();
 		} finally {
 			workerActionInProgress = false;
 		}
@@ -531,18 +541,41 @@
 
 	async function handleUnloadNet() {
 		if (!selectedNetId) return;
+		// Pre-action check: refresh and verify state
+		availableNets = await listNets();
+		workers = await listWorkers();
+		const net = selectedNet();
+		const worker = selectedNetWorker();
+		if (!net || net.load_state !== 'loaded') return;
+		if (!worker || worker.status !== 'ready') return;
 		workerActionInProgress = true;
 		try {
 			await unloadNet(selectedNetId);
 			availableNets = await listNets();
 		} catch (error) {
 			console.error('Unload failed:', error);
+			availableNets = await listNets();
+			workers = await listWorkers();
 		} finally {
 			workerActionInProgress = false;
 		}
 	}
 
+	// -- SSE listener: refresh nets/workers on state change events (debounced) --
+	let sseDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const unsubscribeSSE = serverEventsStore.subscribe((event) => {
+		if (!event) return;
+		if (sseDebounceTimer) clearTimeout(sseDebounceTimer);
+		sseDebounceTimer = setTimeout(() => {
+			sseDebounceTimer = null;
+			listNets().then(n => availableNets = n).catch(() => {});
+			listWorkers().then(w => workers = w).catch(() => {});
+		}, 500);
+	});
+
 	async function handleLogout() {
+		unsubscribeSSE();
 		await logout();
 		goto('/login');
 	}
@@ -559,14 +592,17 @@
 				return;
 			}
 			userEmail = user.email;
+			// Load workers first — selectNet() (called from fetchNets) needs workers
+			// to determine if a net has a ready worker and set graphState.
 			await Promise.all([
-				fetchNets(),
 				listWorkers().then(w => workers = w).catch(() => {}),
-				// Checklist data
+				// Checklist data (independent, can load in parallel)
 				getGitHubStatus().then(s => githubConnected = s.connected).catch(() => {}),
 				listGitHubRepos().then(r => hasRepos = r.length > 0).catch(() => {}),
 				listDeployments().then(d => hasSuccessfulBuild = d.some(dep => dep.build_status === 'success')).catch(() => {}),
 			]);
+			// Now fetch nets (which may auto-select and load graphState)
+			await fetchNets();
 		})();
 
 		const unsubscribe = webSocketStore.subscribe((message) => {
