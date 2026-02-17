@@ -57,8 +57,9 @@
 		},
 		{
 			label: 'Select a net and load it',
-			description: 'Choose a net above, assign a worker, and load it.',
+			description: 'Go to Nets, assign a worker, and load your net.',
 			done: hasLoadedNet,
+			link: '/nets',
 		},
 	]);
 
@@ -100,7 +101,7 @@
 								href={step.link}
 								class="inline-block mt-2 px-3 py-1.5 border border-accent rounded bg-accent text-accent-foreground text-xs font-medium no-underline transition-opacity hover:opacity-90"
 							>
-								Go to {step.label.toLowerCase().includes('github') ? 'Settings' : step.label.toLowerCase().includes('repo') || step.label.toLowerCase().includes('build') ? 'Deployments' : 'Workers'}
+								Go to {step.link === '/settings' ? 'Settings' : step.link === '/deployments' ? 'Deployments' : step.link === '/nets' ? 'Nets' : 'Workers'}
 							</a>
 						{/if}
 					{/if}

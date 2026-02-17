@@ -23,7 +23,7 @@
 	</div>
 	<div class="flex items-center gap-4">
 		<ThemeToggle />
-		<a href="/" class="text-accent text-sm no-underline hover:underline">Nets</a>
+		<a href="/nets" class="text-accent text-sm no-underline hover:underline">Nets</a>
 		<a href="/workers" class="text-accent text-sm no-underline hover:underline">Workers</a>
 		<a href="/deployments" class="text-accent text-sm no-underline hover:underline">Deployments</a>
 		<a href="/settings" class="text-accent text-sm no-underline hover:underline">Settings</a>

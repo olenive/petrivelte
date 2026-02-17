@@ -379,11 +379,11 @@
 		/>
 		<div class="flex gap-3">
 			<label class="flex items-center gap-1 text-sm text-foreground cursor-pointer">
-				<input type="radio" bind:group={newWorkerCategory} value="ephemeral" />
+				<input type="radio" name="worker-category" bind:group={newWorkerCategory} value="ephemeral" />
 				Ephemeral
 			</label>
 			<label class="flex items-center gap-1 text-sm text-foreground cursor-pointer">
-				<input type="radio" bind:group={newWorkerCategory} value="persistent" />
+				<input type="radio" name="worker-category" bind:group={newWorkerCategory} value="persistent" />
 				Persistent
 			</label>
 		</div>
