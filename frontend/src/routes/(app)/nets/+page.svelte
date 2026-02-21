@@ -1,11 +1,12 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import { webSocketStore } from '$lib/stores/webSocket';
 	import { selectedTokenId } from '$lib/stores/tokenSelection';
 	import { serverEventsStore } from '$lib/stores/serverEvents';
 	import {
-		getMe, logout,
+		logout,
 		listNets, listWorkers, patchNet, loadNet, unloadNet,
 		getExecutionState, executionStep, executionStart, executionStop, executionReset,
 		type Net, type Worker,
@@ -41,7 +42,7 @@
 	let isAnimating = false;
 
 	// Auth state
-	let userEmail = $state('');
+	let userEmail = $derived($page.data.user?.email ?? '');
 
 	// Net selection and execution state
 	let availableNets = $state<Net[]>([]);
@@ -576,16 +577,9 @@
 		// Load saved panel layout
 		loadPanelLayout();
 
-		// Check auth and load nets
+		// Load workers first — selectNet() (called from fetchNets) needs workers
+		// to determine if a net has a ready worker and set graphState.
 		(async () => {
-			const user = await getMe();
-			if (!user) {
-				goto('/login');
-				return;
-			}
-			userEmail = user.email;
-			// Load workers first — selectNet() (called from fetchNets) needs workers
-			// to determine if a net has a ready worker and set graphState.
 			await listWorkers().then(w => workers = w).catch(() => {});
 			// Now fetch nets (which may auto-select and load graphState)
 			await fetchNets();

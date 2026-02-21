@@ -1,6 +1,5 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { page } from '$app/stores';
 	import { onMount } from 'svelte';
 	import {
 		getAccountStatus,
@@ -47,21 +46,17 @@
 	let githubLoading = $state(false);
 
 	onMount(async () => {
-		try {
-			account = await getAccountStatus();
-			github = await getGitHubStatus();
+		account = await getAccountStatus();
+		github = await getGitHubStatus();
 
-			// Check for GitHub OAuth callback
-			const url = new URL(window.location.href);
-			if (url.searchParams.get('connected') === 'true') {
-				githubSuccess = 'GitHub connected successfully';
-				github = await getGitHubStatus();
-				// Clean URL
-				url.searchParams.delete('connected');
-				window.history.replaceState({}, '', url.pathname);
-			}
-		} catch {
-			goto('/login');
+		// Check for GitHub OAuth callback
+		const url = new URL(window.location.href);
+		if (url.searchParams.get('connected') === 'true') {
+			githubSuccess = 'GitHub connected successfully';
+			github = await getGitHubStatus();
+			// Clean URL
+			url.searchParams.delete('connected');
+			window.history.replaceState({}, '', url.pathname);
 		}
 	});
 

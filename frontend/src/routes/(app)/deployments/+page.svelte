@@ -1,8 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { goto } from '$app/navigation';
 	import {
-		getMe,
 		getGitHubStatus,
 		getGitHubConnectUrl,
 		listGitHubRepos,
@@ -137,11 +135,6 @@
 
 	onMount(() => {
 		(async () => {
-			const user = await getMe();
-			if (!user) {
-				goto('/login');
-				return;
-			}
 			await refreshData();
 
 			// Start polling if there are active builds

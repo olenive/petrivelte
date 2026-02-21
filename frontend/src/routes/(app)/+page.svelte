@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import {
-		getMe, logout,
+		logout,
 		listNets, listWorkers,
 		getGitHubStatus, listGitHubRepos, listDeployments,
 		type Net, type Worker,
@@ -10,7 +11,7 @@
 	import AppNav from '$lib/components/AppNav.svelte';
 	import SetupChecklist from '$lib/components/SetupChecklist.svelte';
 
-	let userEmail = $state('');
+	let userEmail = $derived($page.data.user?.email ?? '');
 	let loading = $state(true);
 
 	// Checklist state
@@ -27,13 +28,6 @@
 
 	onMount(() => {
 		(async () => {
-			const user = await getMe();
-			if (!user) {
-				goto('/login');
-				return;
-			}
-			userEmail = user.email;
-
 			await Promise.all([
 				listWorkers().then(w => workers = w).catch(() => {}),
 				listNets().then(n => nets = n).catch(() => {}),

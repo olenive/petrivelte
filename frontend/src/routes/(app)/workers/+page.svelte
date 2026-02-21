@@ -1,8 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { goto } from '$app/navigation';
 	import {
-		getMe,
 		listWorkers, createWorker, deleteWorker, provisionWorker, destroyWorkerResource,
 		startWorker, stopWorker, healthCheckWorker, getWorker,
 		listNets, patchNet, loadNet, unloadNet,
@@ -340,8 +338,6 @@
 	}
 
 	onMount(async () => {
-		const user = await getMe();
-		if (!user) { goto('/login'); return; }
 		await refreshAll();
 		startPolling();
 		document.addEventListener('visibilitychange', handleVisibilityChange);
