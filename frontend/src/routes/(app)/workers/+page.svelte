@@ -454,7 +454,7 @@
 						<div class="flex items-center gap-2 flex-wrap">
 							{#if worker.status === 'pending'}
 								<button
-									class="px-3.5 py-1.5 border border-accent rounded bg-card text-accent text-sm font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+									class="px-3.5 py-1.5 border border-green-600 rounded bg-green-600 text-white text-sm font-medium cursor-pointer transition-all hover:bg-green-700 hover:border-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
 									onclick={(e) => { e.stopPropagation(); handleProvision(worker.id); }}
 									disabled={actionInProgress === worker.id}
 								>
@@ -572,24 +572,24 @@
 												<span class="text-xs px-2 py-0.5 rounded-full text-white font-medium" style="background: {badge.color}">{badge.label}</span>
 												<span class="text-xs text-foreground-faint font-mono">{net.entry_module}:{net.entry_function}</span>
 												<div class="flex gap-1.5 ml-auto">
-													{#if worker.status === 'ready'}
-														{#if net.load_state !== 'loaded'}
+													{#if net.load_state !== 'loaded'}
+														<span title={worker.status !== 'ready' ? 'Provision the worker before loading a net' : ''}>
 															<button
-																class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-xs font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+																class="px-2.5 py-1 border border-green-600 rounded bg-green-600 text-white text-xs font-medium cursor-pointer transition-all hover:bg-green-700 hover:border-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
 																onclick={() => handleLoadNet(net.id)}
-																disabled={actionInProgress === net.id}
+																disabled={worker.status !== 'ready' || actionInProgress === net.id}
 															>
 																Load
 															</button>
-														{:else}
-															<button
-																class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-xs font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
-																onclick={() => handleUnloadNet(net.id)}
-																disabled={actionInProgress === net.id}
-															>
-																Unload
-															</button>
-														{/if}
+														</span>
+													{:else}
+														<button
+															class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-xs font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+															onclick={() => handleUnloadNet(net.id)}
+															disabled={actionInProgress === net.id}
+														>
+															Unload
+														</button>
 													{/if}
 													<button
 														class="px-2.5 py-1 border border-destructive rounded bg-transparent text-destructive text-xs font-medium cursor-pointer transition-all hover:bg-destructive-hover hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"

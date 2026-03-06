@@ -24,4 +24,8 @@ COPY --from=build /app/node_modules ./node_modules
 EXPOSE 3000
 
 ENV NODE_ENV=production
+# PUBLIC_API_URL is read at runtime by $env/dynamic/public.
+# Override at deploy time: docker run -e PUBLIC_API_URL=https://api.example.com ...
+ARG PUBLIC_API_URL
+ENV PUBLIC_API_URL=$PUBLIC_API_URL
 CMD ["node", "build"]
