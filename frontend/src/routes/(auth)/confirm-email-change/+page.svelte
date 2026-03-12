@@ -1,17 +1,17 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { confirmEmailChange } from '$lib/api';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
+	import { captureAndStripSearchParams } from '$lib/security/sensitiveQueryParams';
 
 	let status = $state<'loading' | 'success' | 'error' | 'no-token'>('loading');
 	let errorMessage = $state('');
 	let newEmail = $state('');
 
-	let token = $derived($page.url.searchParams.get('token') || '');
-
 	onMount(async () => {
+		const { token } = await captureAndStripSearchParams(new URL($page.url.toString()), ['token']);
+
 		if (!token) {
 			status = 'no-token';
 			return;

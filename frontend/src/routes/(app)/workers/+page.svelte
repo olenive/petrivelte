@@ -22,6 +22,34 @@
 	let actionInProgress = $state<string | null>(null);
 	let errorMessage = $state('');
 
+	// Delete confirmation state
+	let deletePendingWorkerId = $state<string | null>(null);
+	let deleteCountdown = $state(0);
+	let deleteTimerId = $state<ReturnType<typeof setInterval> | null>(null);
+
+	function startDeleteCountdown(workerId: string) {
+		cancelDeleteCountdown();
+		deletePendingWorkerId = workerId;
+		deleteCountdown = 10;
+		deleteTimerId = setInterval(() => {
+			deleteCountdown -= 1;
+			if (deleteCountdown <= 0) {
+				const id = deletePendingWorkerId;
+				cancelDeleteCountdown();
+				if (id) handleDelete(id);
+			}
+		}, 1000);
+	}
+
+	function cancelDeleteCountdown() {
+		if (deleteTimerId) {
+			clearInterval(deleteTimerId);
+			deleteTimerId = null;
+		}
+		deletePendingWorkerId = null;
+		deleteCountdown = 0;
+	}
+
 	function clearError() { errorMessage = ''; }
 
 	async function withAction(id: string, fn: () => Promise<void>) {
@@ -346,6 +374,7 @@
 	onDestroy(() => {
 		stopPolling();
 		unsubscribeSSE();
+		cancelDeleteCountdown();
 		if (sseDebounceTimer) clearTimeout(sseDebounceTimer);
 		if (typeof document !== 'undefined') {
 			document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -458,13 +487,25 @@
 										{worker.status_detail === 'machine_destroyed' || worker.status_detail === 'provision_failed' ? 'Re-provision' : 'Retry'}
 									</button>
 								{/if}
-								<button
-									class="px-3.5 py-1.5 border border-destructive rounded bg-transparent text-destructive text-sm font-medium cursor-pointer transition-all hover:bg-destructive-hover hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
-									onclick={(e) => { e.stopPropagation(); handleDelete(worker.id); }}
-									disabled={actionInProgress === worker.id}
-								>
-									Delete
-								</button>
+								{#if deletePendingWorkerId === worker.id}
+									<span class="inline-flex items-center gap-1.5 text-sm text-destructive font-medium">
+										Deleting in {deleteCountdown}s...
+										<button
+											class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-sm font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground"
+											onclick={(e) => { e.stopPropagation(); cancelDeleteCountdown(); }}
+										>
+											Cancel
+										</button>
+									</span>
+								{:else}
+									<button
+										class="px-3.5 py-1.5 border border-destructive rounded bg-transparent text-destructive text-sm font-medium cursor-pointer transition-all hover:bg-destructive-hover hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
+										onclick={(e) => { e.stopPropagation(); startDeleteCountdown(worker.id); }}
+										disabled={actionInProgress === worker.id}
+									>
+										Delete
+									</button>
+								{/if}
 							{/if}
 							{#if worker.status === 'ready' && worker.worker_category === 'persistent'}
 								<button
@@ -493,13 +534,25 @@
 									Destroy Resource
 								</button>
 							{/if}
-							<button
-								class="px-3.5 py-1.5 border border-destructive rounded bg-transparent text-destructive text-sm font-medium cursor-pointer transition-all hover:bg-destructive-hover hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
-								onclick={(e) => { e.stopPropagation(); handleDelete(worker.id); }}
-								disabled={actionInProgress === worker.id}
-							>
-								Delete
-							</button>
+							{#if deletePendingWorkerId === worker.id}
+								<span class="inline-flex items-center gap-1.5 text-sm text-destructive font-medium">
+									Deleting in {deleteCountdown}s...
+									<button
+										class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-sm font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground"
+										onclick={(e) => { e.stopPropagation(); cancelDeleteCountdown(); }}
+									>
+										Cancel
+									</button>
+								</span>
+							{:else}
+								<button
+									class="px-3.5 py-1.5 border border-destructive rounded bg-transparent text-destructive text-sm font-medium cursor-pointer transition-all hover:bg-destructive-hover hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
+									onclick={(e) => { e.stopPropagation(); startDeleteCountdown(worker.id); }}
+									disabled={actionInProgress === worker.id}
+								>
+									Delete
+								</button>
+							{/if}
 							<span class="text-[0.7em] text-foreground-muted ml-1">{expandedWorkerId === worker.id ? '▼' : '▶'}</span>
 						</div>
 					</div>

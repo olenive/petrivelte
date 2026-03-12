@@ -5,9 +5,9 @@
  * session cookie (`petritype_session`) is sent automatically.
  */
 
-import { PUBLIC_API_URL } from '$env/static/public';
+import { API_URL as resolvedApiUrl } from '$lib/config/network';
 
-export const API_URL = PUBLIC_API_URL || 'http://localhost:8000';
+export const API_URL = resolvedApiUrl;
 
 const jsonHeaders = { 'Content-Type': 'application/json' };
 

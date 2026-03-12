@@ -6,19 +6,29 @@
  * Reconnects automatically on disconnect.
  */
 
-import { writable, get } from 'svelte/store';
-import { PUBLIC_API_URL } from '$env/static/public';
+import { writable } from 'svelte/store';
+import { WS_BASE_URL } from '$lib/config/network';
 import type { WebSocketMessage } from '$lib/types';
 
-const apiUrl = PUBLIC_API_URL || 'http://localhost:8000';
-const wsBase = apiUrl.replace(/^http/, 'ws');
+const wsBase = WS_BASE_URL;
 
 const { subscribe, set } = writable<WebSocketMessage | null>(null);
+
+/** Close codes that indicate the server will never accept this connection. */
+const NO_RETRY_CODES = new Set([
+	4001, // not authenticated / session expired
+	4004, // net not found or not loaded
+]);
+
+const MAX_RETRIES = 8;
+const BASE_DELAY_MS = 1000;
+const MAX_DELAY_MS = 30_000;
 
 let ws: WebSocket | null = null;
 let currentNetId: string | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let intentionalClose = false;
+let retryCount = 0;
 
 function cleanup() {
 	if (reconnectTimer !== null) {
@@ -42,6 +52,7 @@ function connectRaw(netId: string) {
 
 	ws.onopen = () => {
 		console.log(`WebSocket connected to net ${netId}`);
+		retryCount = 0;
 	};
 
 	ws.onmessage = (event) => {
@@ -53,11 +64,23 @@ function connectRaw(netId: string) {
 		console.error('WebSocket error:', error);
 	};
 
-	ws.onclose = () => {
-		if (!intentionalClose && currentNetId === netId) {
-			console.log(`WebSocket disconnected from net ${netId}, reconnecting...`);
-			reconnectTimer = setTimeout(() => connectRaw(netId), 1000);
+	ws.onclose = (event) => {
+		if (intentionalClose || currentNetId !== netId) return;
+
+		if (NO_RETRY_CODES.has(event.code)) {
+			console.log(`WebSocket closed for net ${netId} (code ${event.code}), not reconnecting`);
+			return;
 		}
+
+		if (retryCount >= MAX_RETRIES) {
+			console.log(`WebSocket reconnect limit reached for net ${netId}, giving up`);
+			return;
+		}
+
+		const delay = Math.min(BASE_DELAY_MS * 2 ** retryCount, MAX_DELAY_MS);
+		retryCount++;
+		console.log(`WebSocket disconnected from net ${netId}, reconnecting in ${delay}ms (attempt ${retryCount}/${MAX_RETRIES})...`);
+		reconnectTimer = setTimeout(() => connectRaw(netId), delay);
 	};
 }
 
@@ -65,6 +88,7 @@ export function connectToNet(netId: string) {
 	if (currentNetId === netId && ws && ws.readyState === WebSocket.OPEN) {
 		return; // already connected to this net
 	}
+	retryCount = 0;
 	connectRaw(netId);
 }
 

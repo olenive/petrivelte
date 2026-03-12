@@ -1,15 +1,25 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { resetPassword } from '$lib/api';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
+	import { captureAndStripSearchParams } from '$lib/security/sensitiveQueryParams';
 
-	let token = $derived($page.url.searchParams.get('token') || '');
+	let token = $state<string | null>(null);
 	let newPassword = $state('');
 	let confirmPassword = $state('');
 	let error = $state('');
 	let success = $state(false);
 	let loading = $state(false);
+
+	onMount(async () => {
+		const { token: parsedToken } = await captureAndStripSearchParams(
+			new URL($page.url.toString()),
+			['token'],
+		);
+		token = parsedToken;
+	});
 
 	async function handleSubmit() {
 		error = '';
@@ -61,6 +71,9 @@
 			<button class="w-full mt-2 py-2.5 border border-accent rounded-md bg-accent text-accent-foreground text-base font-semibold cursor-pointer transition-opacity hover:opacity-90" onclick={goToLogin}>
 				Go to login
 			</button>
+		{:else if token === null}
+			<h2 class="mb-6 text-lg font-normal text-foreground-muted">Preparing reset form...</h2>
+			<div class="w-8 h-8 mx-auto my-4 border-[3px] border-border border-t-accent rounded-full animate-spin"></div>
 		{:else if !token}
 			<div class="mb-4 px-3 py-2.5 rounded-md bg-error-bg text-error text-sm">
 				Invalid or missing reset token. Please request a new password reset link.

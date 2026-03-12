@@ -4,20 +4,21 @@
 	import { page } from '$app/stores';
 	import { auth0Callback } from '$lib/api';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
+	import { captureAndStripSearchParams } from '$lib/security/sensitiveQueryParams';
 
 	let status = $state<'loading' | 'error'>('loading');
 	let errorMessage = $state('');
 
 	onMount(async () => {
-		const code = $page.url.searchParams.get('code');
-		const state = $page.url.searchParams.get('state');
-		const error = $page.url.searchParams.get('error');
-		const errorDescription = $page.url.searchParams.get('error_description');
+		const { code, state, error, error_description } = await captureAndStripSearchParams(
+			new URL($page.url.toString()),
+			['code', 'state', 'error', 'error_description'],
+		);
 
 		// Handle Auth0 error response
 		if (error) {
 			status = 'error';
-			errorMessage = errorDescription || error;
+			errorMessage = error_description || error;
 			return;
 		}
 
