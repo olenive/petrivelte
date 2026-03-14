@@ -187,7 +187,8 @@ export interface Net {
 	execution_mode: string;
 	image_tag: string | null;
 	worker_id: string | null;
-	load_state: 'unloaded' | 'loaded' | 'error';
+	load_state: 'unloaded' | 'loaded' | 'loading' | 'error';
+	load_error: string | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -277,6 +278,8 @@ export interface Worker {
 	fly_machine_id: string | null;
 	deployment_id: string | null;
 	image_tag: string | null;
+	memory_mb: number;
+	cpus: number;
 	status: string;
 	status_detail: string | null;
 	url: string | null;
@@ -304,6 +307,8 @@ export async function createWorker(body: {
 	name: string;
 	worker_category?: string; // "ephemeral" or "persistent"
 	deployment_id?: string; // Link to a deployment for custom image
+	memory_mb?: number; // 256, 512, 1024, 2048
+	cpus?: number; // 1, 2, 4
 }): Promise<Worker> {
 	const res = await post('/api/workers', body);
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to create worker'));

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, tick } from 'svelte';
 	import {
 		listWorkers, createWorker, deleteWorker, provisionWorker, destroyWorkerResource,
 		startWorker, stopWorker, healthCheckWorker, getWorker,
@@ -7,20 +7,41 @@
 		type Worker, type WorkerDetail, type Net,
 	} from '$lib/api';
 	import AppNav from '$lib/components/AppNav.svelte';
+	import LogViewer from '$lib/components/LogViewer.svelte';
 	import { serverEventsStore } from '$lib/stores/serverEvents';
 
 	let workers = $state<Worker[]>([]);
 	let nets = $state<Net[]>([]);
-	let expandedWorkerId = $state<string | null>(null);
+	let expandedWorkerIds = $state<Record<string, boolean>>({});
 	let workerDetails = $state<Map<string, WorkerDetail>>(new Map());
 
 	// Create form state
 	let newWorkerName = $state('');
 	let newWorkerCategory = $state<'ephemeral' | 'persistent'>('ephemeral');
+	let newWorkerMemory = $state(512);
+	let newWorkerCpus = $state(1);
 
 	// Loading/error state
 	let actionInProgress = $state<string | null>(null);
 	let errorMessage = $state('');
+
+	// Per-worker log lines (includes net load logs, provisioning progress, etc.)
+	let workerLogs = $state<Map<string, string[]>>(new Map());
+	let workerLogsExpanded = $state<Map<string, boolean>>(new Map());
+
+	// Net load progress logs (net_id -> log lines) — kept for backwards compat with inline display
+	let loadLogs = $state<Map<string, string[]>>(new Map());
+
+	// Provisioning progress
+	const PROVISION_STEPS = ['provisioning', 'ready'] as const;
+	let provisionProgress = $state<Map<string, { step: number; total: number; label: string }>>(new Map());
+
+	function appendWorkerLog(workerId: string, message: string) {
+		const lines = workerLogs.get(workerId) || [];
+		lines.push(message);
+		workerLogs.set(workerId, lines);
+		workerLogs = workerLogs;
+	}
 
 	// Delete confirmation state
 	let deletePendingWorkerId = $state<string | null>(null);
@@ -123,6 +144,55 @@
 
 	const unsubscribeSSE = serverEventsStore.subscribe((event) => {
 		if (!event) return;
+
+		if (event.type === 'net_load_log') {
+			const netId = event.net_id;
+			// Keep per-net logs for inline display
+			const current = loadLogs.get(netId) || [];
+			current.push(event.message);
+			loadLogs.set(netId, current);
+			loadLogs = loadLogs;
+
+			// Also append to the worker's log viewer
+			const net = nets.find(n => n.id === netId);
+			if (net?.worker_id) {
+				appendWorkerLog(net.worker_id, `[${net.name}] ${event.message}`);
+			}
+			return;
+		}
+
+		if (event.type === 'net_state_changed') {
+			if (event.load_state === 'unloaded') {
+				loadLogs.delete(event.net_id);
+				loadLogs = loadLogs;
+			}
+			const net = nets.find(n => n.id === event.net_id);
+			if (net?.worker_id) {
+				appendWorkerLog(net.worker_id, `[${net.name}] State → ${event.load_state}`);
+			}
+		}
+
+		if (event.type === 'worker_state_changed') {
+			const wid = event.worker_id;
+			appendWorkerLog(wid, `[worker] Status → ${event.status}${event.status_detail ? ` (${event.status_detail})` : ''}`);
+
+			// Update provisioning progress
+			if (event.status === 'provisioning') {
+				provisionProgress.set(wid, { step: 1, total: 3, label: 'Creating machine...' });
+				provisionProgress = provisionProgress;
+			} else if (event.status === 'ready') {
+				provisionProgress.set(wid, { step: 3, total: 3, label: 'Ready' });
+				provisionProgress = provisionProgress;
+				setTimeout(() => {
+					provisionProgress.delete(wid);
+					provisionProgress = provisionProgress;
+				}, 3000);
+			} else if (event.status === 'error') {
+				provisionProgress.delete(wid);
+				provisionProgress = provisionProgress;
+			}
+		}
+
 		if (sseDebounceTimer) clearTimeout(sseDebounceTimer);
 		sseDebounceTimer = setTimeout(() => {
 			sseDebounceTimer = null;
@@ -147,6 +217,7 @@
 		const net = nets.find(n => n.id === netId);
 		if (!net) { errorMessage = 'Net no longer exists.'; return false; }
 		if (net.load_state === 'loaded') { errorMessage = 'Net is already loaded.'; return false; }
+		if (net.load_state === 'loading') { errorMessage = 'Net is currently loading.'; return false; }
 		const worker = net.worker_id ? workers.find(w => w.id === net.worker_id) : null;
 		if (!worker || worker.status !== 'ready') {
 			errorMessage = `Worker is not ready (status: "${worker?.status ?? 'unknown'}"). Cannot load net.`;
@@ -170,16 +241,28 @@
 
 	// -- Action handlers --
 
+	function maxMemoryForCpus(cpus: number): number {
+		return cpus * 2048;
+	}
+
 	async function handleCreate() {
 		if (!newWorkerName.trim()) return;
 		await withAction('create', async () => {
-			await createWorker({ name: newWorkerName.trim(), worker_category: newWorkerCategory });
+			await createWorker({
+				name: newWorkerName.trim(),
+				worker_category: newWorkerCategory,
+				memory_mb: newWorkerMemory,
+				cpus: newWorkerCpus,
+			});
 			newWorkerName = '';
 			await refreshWorkers();
 		});
 	}
 
 	async function handleProvision(workerId: string) {
+		provisionProgress.set(workerId, { step: 1, total: 3, label: 'Creating machine...' });
+		provisionProgress = provisionProgress;
+		appendWorkerLog(workerId, '[worker] Provisioning started...');
 		await withAction(workerId, async () => {
 			await provisionWorker(workerId);
 			await refreshWorkers();
@@ -232,22 +315,24 @@
 	async function handleDelete(workerId: string) {
 		await withAction(workerId, async () => {
 			await deleteWorker(workerId);
-			if (expandedWorkerId === workerId) expandedWorkerId = null;
+			const { [workerId]: _, ...rest } = expandedWorkerIds;
+			expandedWorkerIds = rest;
 			await refreshWorkers();
 			await refreshNets();
 		});
 	}
 
 	async function toggleExpand(workerId: string) {
-		if (expandedWorkerId === workerId) {
-			expandedWorkerId = null;
+		if (expandedWorkerIds[workerId]) {
+			const { [workerId]: _, ...rest } = expandedWorkerIds;
+			expandedWorkerIds = rest;
 			return;
 		}
-		expandedWorkerId = workerId;
+		expandedWorkerIds = { ...expandedWorkerIds, [workerId]: true };
 		try {
 			const detail = await getWorker(workerId);
 			workerDetails.set(workerId, detail);
-			workerDetails = workerDetails; // trigger reactivity
+			workerDetails = workerDetails;
 		} catch (e: any) {
 			errorMessage = e.message;
 		}
@@ -290,16 +375,18 @@
 			);
 			if (!res.ok) throw new Error('Failed to unassign net');
 			await refreshNets();
-			if (expandedWorkerId) {
-				const detail = await getWorker(expandedWorkerId);
-				workerDetails.set(expandedWorkerId, detail);
-				workerDetails = workerDetails;
+			for (const wid of Object.keys(expandedWorkerIds)) {
+				const detail = await getWorker(wid);
+				workerDetails.set(wid, detail);
 			}
+			workerDetails = workerDetails;
 		});
 	}
 
 	async function handleLoadNet(netId: string) {
 		if (!await checkNetForLoad(netId)) return;
+		loadLogs.delete(netId);
+		loadLogs = loadLogs;
 		await withAction(netId, async () => {
 			await loadNet(netId);
 			await refreshNets();
@@ -317,6 +404,7 @@
 	function loadStateBadge(state: string): { label: string; color: string } {
 		switch (state) {
 			case 'loaded': return { label: 'Loaded', color: 'var(--status-ready)' };
+			case 'loading': return { label: 'Loading...', color: 'var(--status-provisioning)' };
 			case 'error': return { label: 'Error', color: 'var(--status-error)' };
 			default: return { label: 'Unloaded', color: 'var(--status-stopped)' };
 		}
@@ -365,8 +453,23 @@
 		return nets.filter(n => n.worker_id === workerId);
 	}
 
+	function seedLogsFromNetErrors() {
+		for (const net of nets) {
+			if (net.load_state === 'error' && net.load_error && net.worker_id) {
+				const lines = workerLogs.get(net.worker_id) || [];
+				const errorLine = `[${net.name}] Load error: ${net.load_error}`;
+				if (!lines.includes(errorLine)) {
+					lines.push(errorLine);
+					workerLogs.set(net.worker_id, lines);
+				}
+			}
+		}
+		workerLogs = workerLogs;
+	}
+
 	onMount(async () => {
 		await refreshAll();
+		seedLogsFromNetErrors();
 		startPolling();
 		document.addEventListener('visibilitychange', handleVisibilityChange);
 	});
@@ -412,6 +515,33 @@
 				Persistent
 			</label>
 		</div>
+		<div class="flex gap-3 items-center">
+			<label class="flex items-center gap-1 text-sm text-foreground">
+				<span class="text-foreground-muted">RAM</span>
+				<select
+					bind:value={newWorkerMemory}
+					class="px-2 py-1.5 border border-border rounded bg-surface text-foreground text-sm"
+				>
+					{#each [256, 512, 1024, 2048] as mb}
+						{#if mb <= maxMemoryForCpus(newWorkerCpus)}
+							<option value={mb}>{mb >= 1024 ? `${mb / 1024} GB` : `${mb} MB`}</option>
+						{/if}
+					{/each}
+				</select>
+			</label>
+			<label class="flex items-center gap-1 text-sm text-foreground">
+				<span class="text-foreground-muted">CPUs</span>
+				<select
+					bind:value={newWorkerCpus}
+					onchange={() => { if (newWorkerMemory > maxMemoryForCpus(newWorkerCpus)) newWorkerMemory = maxMemoryForCpus(newWorkerCpus); }}
+					class="px-2 py-1.5 border border-border rounded bg-surface text-foreground text-sm"
+				>
+					<option value={1}>1</option>
+					<option value={2}>2</option>
+					<option value={4}>4</option>
+				</select>
+			</label>
+		</div>
 		<span class="inline-block" title={!newWorkerName.trim() ? 'Enter a worker name first' : ''}>
 			<button
 				class="px-5 py-2 border border-accent rounded bg-accent text-accent-foreground font-medium cursor-pointer transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -444,6 +574,7 @@
 						<div class="flex items-center gap-3">
 							<span class="font-semibold text-foreground">{worker.name}</span>
 							<span class="text-xs text-foreground-muted px-2 py-0.5 bg-muted rounded-sm">{workerCategoryLabel(worker.worker_category)}</span>
+							<span class="text-xs text-foreground-muted px-2 py-0.5 bg-muted rounded-sm">{worker.memory_mb >= 1024 ? `${worker.memory_mb / 1024} GB` : `${worker.memory_mb} MB`} / {worker.cpus} CPU{worker.cpus > 1 ? 's' : ''}</span>
 							<span class="text-xs px-2.5 py-0.5 rounded-full text-white font-medium capitalize" style="background: {statusColor(worker.status, worker.status_detail)}">
 								{worker.status === 'error' ? errorDisplayText(worker.status_detail) : worker.status}
 							</span>
@@ -485,25 +616,6 @@
 										disabled={actionInProgress === worker.id}
 									>
 										{worker.status_detail === 'machine_destroyed' || worker.status_detail === 'provision_failed' ? 'Re-provision' : 'Retry'}
-									</button>
-								{/if}
-								{#if deletePendingWorkerId === worker.id}
-									<span class="inline-flex items-center gap-1.5 text-sm text-destructive font-medium">
-										Deleting in {deleteCountdown}s...
-										<button
-											class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-sm font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground"
-											onclick={(e) => { e.stopPropagation(); cancelDeleteCountdown(); }}
-										>
-											Cancel
-										</button>
-									</span>
-								{:else}
-									<button
-										class="px-3.5 py-1.5 border border-destructive rounded bg-transparent text-destructive text-sm font-medium cursor-pointer transition-all hover:bg-destructive-hover hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
-										onclick={(e) => { e.stopPropagation(); startDeleteCountdown(worker.id); }}
-										disabled={actionInProgress === worker.id}
-									>
-										Delete
 									</button>
 								{/if}
 							{/if}
@@ -553,11 +665,11 @@
 									Delete
 								</button>
 							{/if}
-							<span class="text-[0.7em] text-foreground-muted ml-1">{expandedWorkerId === worker.id ? '▼' : '▶'}</span>
+							<span class="text-[0.7em] text-foreground-muted ml-1">{expandedWorkerIds[worker.id] ? '▼' : '▶'}</span>
 						</div>
 					</div>
 
-					{#if expandedWorkerId === worker.id}
+					{#if expandedWorkerIds[worker.id]}
 						<div class="px-4 py-3 border-t border-border bg-muted">
 							<div>
 								<h4 class="mb-2 text-sm font-semibold text-foreground">Assigned Nets</h4>
@@ -567,12 +679,21 @@
 									<ul class="list-none m-0 p-0 mb-3">
 										{#each netsForWorker(worker.id) as net (net.id)}
 											{@const badge = loadStateBadge(net.load_state)}
-											<li class="flex items-center gap-3 py-1.5 border-b border-border-light flex-wrap last:border-b-0">
+											<li class="py-1.5 border-b border-border-light last:border-b-0">
+												<div class="flex items-center gap-3 flex-wrap">
 												<span class="font-medium text-foreground text-sm">{net.name}</span>
 												<span class="text-xs px-2 py-0.5 rounded-full text-white font-medium" style="background: {badge.color}">{badge.label}</span>
 												<span class="text-xs text-foreground-faint font-mono">{net.entry_module}:{net.entry_function}</span>
 												<div class="flex gap-1.5 ml-auto">
-													{#if net.load_state !== 'loaded'}
+													{#if net.load_state === 'loaded'}
+														<button
+															class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-xs font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+															onclick={() => handleUnloadNet(net.id)}
+															disabled={actionInProgress === net.id}
+														>
+															Unload
+														</button>
+													{:else if net.load_state !== 'loading'}
 														<span title={worker.status !== 'ready' ? 'Provision the worker before loading a net' : ''}>
 															<button
 																class="px-2.5 py-1 border border-green-600 rounded bg-green-600 text-white text-xs font-medium cursor-pointer transition-all hover:bg-green-700 hover:border-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -582,14 +703,6 @@
 																Load
 															</button>
 														</span>
-													{:else}
-														<button
-															class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-xs font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
-															onclick={() => handleUnloadNet(net.id)}
-															disabled={actionInProgress === net.id}
-														>
-															Unload
-														</button>
 													{/if}
 													<button
 														class="px-2.5 py-1 border border-destructive rounded bg-transparent text-destructive text-xs font-medium cursor-pointer transition-all hover:bg-destructive-hover hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
@@ -599,6 +712,20 @@
 														Unassign
 													</button>
 												</div>
+												</div>
+												{#if net.load_state === 'error' && net.load_error}
+													<div class="mt-1 text-xs text-error bg-error-bg px-2.5 py-1.5 rounded">
+														{net.load_error}
+													</div>
+												{/if}
+												{#if loadLogs.get(net.id)?.length}
+													<div class="mt-2">
+														<pre
+															data-log-viewer={net.id}
+															class="bg-[#1a1a2e] text-[#c8c8d0] p-3 rounded text-xs font-mono max-h-[150px] overflow-y-auto whitespace-pre-wrap break-words m-0"
+														>{loadLogs.get(net.id)?.join('\n')}</pre>
+													</div>
+												{/if}
 											</li>
 										{/each}
 									</ul>
@@ -618,6 +745,38 @@
 										</select>
 									</div>
 								{/if}
+							</div>
+
+							{#if provisionProgress.has(worker.id)}
+								{@const progress = provisionProgress.get(worker.id)!}
+								<div class="mt-3 flex items-center gap-3 px-1">
+									<div class="flex items-center gap-2 text-sm text-foreground-muted">
+										<svg class="animate-spin h-4 w-4 text-accent" viewBox="0 0 24 24" fill="none">
+											<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+											<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+										</svg>
+										<span>Step {progress.step}/{progress.total}</span>
+									</div>
+									<span class="text-xs text-foreground-faint">{progress.label}</span>
+								</div>
+							{/if}
+
+							<div class="mt-3">
+								<LogViewer
+									lines={workerLogs.get(worker.id) || []}
+									expanded={workerLogsExpanded.get(worker.id) || false}
+									title="Worker Logs"
+									fullPageUrl={`/workers/${worker.id}/logs`}
+									onToggle={() => {
+										const current = workerLogsExpanded.get(worker.id) || false;
+										workerLogsExpanded.set(worker.id, !current);
+										workerLogsExpanded = workerLogsExpanded;
+									}}
+									onClear={() => {
+										workerLogs.delete(worker.id);
+										workerLogs = workerLogs;
+									}}
+								/>
 							</div>
 
 							<div class="mt-3 text-xs text-foreground-faint">
