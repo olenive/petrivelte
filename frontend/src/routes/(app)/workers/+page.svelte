@@ -3,7 +3,7 @@
 	import {
 		listWorkers, createWorker, deleteWorker, provisionWorker, destroyWorkerResource,
 		startWorker, stopWorker, healthCheckWorker, getWorker,
-		listNets, patchNet, loadNet, unloadNet,
+		listNets, createNet, patchNet, loadNet, unloadNet,
 		type Worker, type WorkerDetail, type Net,
 	} from '$lib/api';
 	import AppNav from '$lib/components/AppNav.svelte';
@@ -27,7 +27,7 @@
 
 	// Per-worker log lines (includes net load logs, provisioning progress, etc.)
 	let workerLogs = $state<Map<string, string[]>>(new Map());
-	let workerLogsExpanded = $state<Map<string, boolean>>(new Map());
+	let workerLogsExpanded = $state<Record<string, boolean>>({});
 
 	// Net load progress logs (net_id -> log lines) — kept for backwards compat with inline display
 	let loadLogs = $state<Map<string, string[]>>(new Map());
@@ -38,37 +38,43 @@
 
 	function appendWorkerLog(workerId: string, message: string) {
 		const lines = workerLogs.get(workerId) || [];
-		lines.push(message);
-		workerLogs.set(workerId, lines);
+		workerLogs.set(workerId, [...lines, message]);
 		workerLogs = workerLogs;
 	}
 
-	// Delete confirmation state
-	let deletePendingWorkerId = $state<string | null>(null);
-	let deleteCountdown = $state(0);
-	let deleteTimerId = $state<ReturnType<typeof setInterval> | null>(null);
+	// Delete confirmation state (per-worker so timers don't interfere)
+	let deleteTimers = $state<Map<string, { countdown: number; timerId: ReturnType<typeof setInterval> }>>(new Map());
 
 	function startDeleteCountdown(workerId: string) {
-		cancelDeleteCountdown();
-		deletePendingWorkerId = workerId;
-		deleteCountdown = 10;
-		deleteTimerId = setInterval(() => {
-			deleteCountdown -= 1;
-			if (deleteCountdown <= 0) {
-				const id = deletePendingWorkerId;
-				cancelDeleteCountdown();
-				if (id) handleDelete(id);
+		cancelDeleteCountdown(workerId);
+		const entry = { countdown: 10, timerId: 0 as unknown as ReturnType<typeof setInterval> };
+		entry.timerId = setInterval(() => {
+			entry.countdown -= 1;
+			deleteTimers = new Map(deleteTimers); // trigger reactivity
+			if (entry.countdown <= 0) {
+				cancelDeleteCountdown(workerId);
+				handleDelete(workerId);
 			}
 		}, 1000);
+		deleteTimers.set(workerId, entry);
+		deleteTimers = new Map(deleteTimers);
 	}
 
-	function cancelDeleteCountdown() {
-		if (deleteTimerId) {
-			clearInterval(deleteTimerId);
-			deleteTimerId = null;
+	function cancelDeleteCountdown(workerId: string) {
+		const entry = deleteTimers.get(workerId);
+		if (entry) {
+			clearInterval(entry.timerId);
+			deleteTimers.delete(workerId);
+			deleteTimers = new Map(deleteTimers);
 		}
-		deletePendingWorkerId = null;
-		deleteCountdown = 0;
+	}
+
+	function cancelAllDeleteCountdowns() {
+		for (const entry of deleteTimers.values()) {
+			clearInterval(entry.timerId);
+		}
+		deleteTimers.clear();
+		deleteTimers = new Map(deleteTimers);
 	}
 
 	function clearError() { errorMessage = ''; }
@@ -149,8 +155,7 @@
 			const netId = event.net_id;
 			// Keep per-net logs for inline display
 			const current = loadLogs.get(netId) || [];
-			current.push(event.message);
-			loadLogs.set(netId, current);
+			loadLogs.set(netId, [...current, event.message]);
 			loadLogs = loadLogs;
 
 			// Also append to the worker's log viewer
@@ -170,6 +175,16 @@
 			if (net?.worker_id) {
 				appendWorkerLog(net.worker_id, `[${net.name}] State → ${event.load_state}`);
 			}
+		}
+
+		if (event.type === 'worker_provision_log') {
+			const wid = event.worker_id;
+			appendWorkerLog(wid, `[provision] ${event.message}`);
+			// Auto-expand log viewer during provisioning
+			if (!workerLogsExpanded[wid]) {
+				workerLogsExpanded = { ...workerLogsExpanded, [wid]: true };
+			}
+			return;
 		}
 
 		if (event.type === 'worker_state_changed') {
@@ -262,11 +277,16 @@
 	async function handleProvision(workerId: string) {
 		provisionProgress.set(workerId, { step: 1, total: 3, label: 'Creating machine...' });
 		provisionProgress = provisionProgress;
-		appendWorkerLog(workerId, '[worker] Provisioning started...');
+		appendWorkerLog(workerId, '[provision] Provisioning started...');
+		// Auto-expand log viewer so the user sees progress
+		workerLogsExpanded = { ...workerLogsExpanded, [workerId]: true };
 		await withAction(workerId, async () => {
 			await provisionWorker(workerId);
 			await refreshWorkers();
 		});
+		// Clear progress indicator — the SSE event may not arrive (e.g. if provisioning completed synchronously)
+		provisionProgress.delete(workerId);
+		provisionProgress = provisionProgress;
 	}
 
 	async function handleStart(workerId: string) {
@@ -342,12 +362,23 @@
 		if (!netId) return;
 		await refreshNets();
 		const net = nets.find(n => n.id === netId);
-		if (!net || net.worker_id) {
-			errorMessage = 'Net is no longer available for assignment.';
+		if (!net) {
+			errorMessage = 'Net not found.';
 			return;
 		}
 		await withAction(workerId, async () => {
-			await patchNet(netId, { worker_id: workerId });
+			if (net.worker_id) {
+				// Net is already assigned — clone it onto this worker
+				await createNet({
+					name: net.name,
+					entry_module: net.entry_module,
+					entry_function: net.entry_function,
+					deployment_id: net.deployment_id ?? undefined,
+					worker_id: workerId,
+				});
+			} else {
+				await patchNet(netId, { worker_id: workerId });
+			}
 			await refreshNets();
 			const detail = await getWorker(workerId);
 			workerDetails.set(workerId, detail);
@@ -363,17 +394,7 @@
 			return;
 		}
 		await withAction(netId, async () => {
-			// Patch worker_id to null by sending explicit null
-			const res = await fetch(
-				`${(await import('$lib/api')).API_URL}/api/nets/${netId}`,
-				{
-					method: 'PATCH',
-					credentials: 'include',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ worker_id: null }),
-				}
-			);
-			if (!res.ok) throw new Error('Failed to unassign net');
+			await patchNet(netId, { worker_id: null });
 			await refreshNets();
 			for (const wid of Object.keys(expandedWorkerIds)) {
 				const detail = await getWorker(wid);
@@ -453,6 +474,14 @@
 		return nets.filter(n => n.worker_id === workerId);
 	}
 
+	function netInstanceLabel(net: Net): string {
+		const siblings = nets.filter(n => n.name === net.name && n.entry_module === net.entry_module);
+		if (siblings.length <= 1) return '';
+		const sorted = siblings.sort((a, b) => a.created_at.localeCompare(b.created_at));
+		const index = sorted.findIndex(n => n.id === net.id) + 1;
+		return `(${index}/${siblings.length})`;
+	}
+
 	function seedLogsFromNetErrors() {
 		for (const net of nets) {
 			if (net.load_state === 'error' && net.load_error && net.worker_id) {
@@ -477,7 +506,7 @@
 	onDestroy(() => {
 		stopPolling();
 		unsubscribeSSE();
-		cancelDeleteCountdown();
+		cancelAllDeleteCountdowns();
 		if (sseDebounceTimer) clearTimeout(sseDebounceTimer);
 		if (typeof document !== 'undefined') {
 			document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -646,12 +675,12 @@
 									Destroy Resource
 								</button>
 							{/if}
-							{#if deletePendingWorkerId === worker.id}
+							{#if deleteTimers.has(worker.id)}
 								<span class="inline-flex items-center gap-1.5 text-sm text-destructive font-medium">
-									Deleting in {deleteCountdown}s...
+									Deleting in {deleteTimers.get(worker.id)!.countdown}s...
 									<button
 										class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-sm font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground"
-										onclick={(e) => { e.stopPropagation(); cancelDeleteCountdown(); }}
+										onclick={(e) => { e.stopPropagation(); cancelDeleteCountdown(worker.id); }}
 									>
 										Cancel
 									</button>
@@ -681,7 +710,7 @@
 											{@const badge = loadStateBadge(net.load_state)}
 											<li class="py-1.5 border-b border-border-light last:border-b-0">
 												<div class="flex items-center gap-3 flex-wrap">
-												<span class="font-medium text-foreground text-sm">{net.name}</span>
+												<span class="font-medium text-foreground text-sm">{net.name} {netInstanceLabel(net)}</span>
 												<span class="text-xs px-2 py-0.5 rounded-full text-white font-medium" style="background: {badge.color}">{badge.label}</span>
 												<span class="text-xs text-foreground-faint font-mono">{net.entry_module}:{net.entry_function}</span>
 												<div class="flex gap-1.5 ml-auto">
@@ -696,7 +725,7 @@
 													{:else if net.load_state !== 'loading'}
 														<span title={worker.status !== 'ready' ? 'Provision the worker before loading a net' : ''}>
 															<button
-																class="px-2.5 py-1 border border-green-600 rounded bg-green-600 text-white text-xs font-medium cursor-pointer transition-all hover:bg-green-700 hover:border-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+																class="px-2.5 py-1 border border-green-600 rounded bg-green-600 text-white text-xs font-medium cursor-pointer transition-all hover:bg-green-700 hover:border-green-700 disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none"
 																onclick={() => handleLoadNet(net.id)}
 																disabled={worker.status !== 'ready' || actionInProgress === net.id}
 															>
@@ -732,15 +761,21 @@
 								{/if}
 
 								<!-- Assign Net Dropdown -->
-								{#if nets.filter(n => !n.worker_id).length > 0}
+								{#if nets.length > 0}
+								{@const uniqueNets = nets
+									.reduce((acc, n) => {
+										if (!acc.some(x => x.name === n.name)) acc.push(n);
+										return acc;
+									}, [] as typeof nets)}
 									<div class="mt-2">
 										<select
 											class="px-3 py-1.5 border border-border rounded bg-card text-foreground text-sm"
 											onchange={(e) => { handleAssignNet(worker.id, e.currentTarget.value); e.currentTarget.value = ''; }}
 										>
 											<option value="">Assign a net...</option>
-											{#each nets.filter(n => !n.worker_id) as net (net.id)}
-												<option value={net.id}>{net.name}</option>
+											{#each uniqueNets as net (net.id)}
+												{@const instanceCount = nets.filter(n => n.name === net.name && n.worker_id).length}
+												<option value={net.id}>{net.name} ({instanceCount})</option>
 											{/each}
 										</select>
 									</div>
@@ -764,13 +799,11 @@
 							<div class="mt-3">
 								<LogViewer
 									lines={workerLogs.get(worker.id) || []}
-									expanded={workerLogsExpanded.get(worker.id) || false}
+									expanded={workerLogsExpanded[worker.id] ?? false}
 									title="Worker Logs"
 									fullPageUrl={`/workers/${worker.id}/logs`}
 									onToggle={() => {
-										const current = workerLogsExpanded.get(worker.id) || false;
-										workerLogsExpanded.set(worker.id, !current);
-										workerLogsExpanded = workerLogsExpanded;
+										workerLogsExpanded = { ...workerLogsExpanded, [worker.id]: !workerLogsExpanded[worker.id] };
 									}}
 									onClear={() => {
 										workerLogs.delete(worker.id);

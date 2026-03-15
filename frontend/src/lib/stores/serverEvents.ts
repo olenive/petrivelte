@@ -12,7 +12,8 @@ import { API_URL } from '$lib/api';
 export type ServerEvent =
 	| { type: 'worker_state_changed'; worker_id: string; status: string; status_detail?: string | null }
 	| { type: 'net_state_changed'; net_id: string; load_state: string }
-	| { type: 'net_load_log'; net_id: string; step: string; message: string };
+	| { type: 'net_load_log'; net_id: string; step: string; message: string }
+	| { type: 'worker_provision_log'; worker_id: string; step: string; message: string };
 
 const { subscribe, set } = writable<ServerEvent | null>(null);
 

@@ -162,7 +162,8 @@
 
 	async function fetchNets() {
 		try {
-			availableNets = await listNets();
+			// Only show nets assigned to a worker — templates (worker_id=null) can't be executed.
+			availableNets = (await listNets()).filter(n => n.worker_id);
 
 			// Auto-select first net if none selected
 			if (availableNets.length > 0 && !selectedNetId) {
@@ -513,7 +514,7 @@
 	async function handleLoadNet() {
 		if (!selectedNetId) return;
 		// Pre-action check: refresh and verify state
-		availableNets = await listNets();
+		availableNets = (await listNets()).filter(n => n.worker_id);
 		workers = await listWorkers();
 		const net = selectedNet();
 		const worker = selectedNetWorker();
@@ -522,10 +523,10 @@
 		workerActionInProgress = true;
 		try {
 			await loadNet(selectedNetId);
-			availableNets = await listNets();
+			availableNets = (await listNets()).filter(n => n.worker_id);
 		} catch (error) {
 			console.error('Load failed:', error);
-			availableNets = await listNets();
+			availableNets = (await listNets()).filter(n => n.worker_id);
 			workers = await listWorkers();
 		} finally {
 			workerActionInProgress = false;
@@ -535,7 +536,7 @@
 	async function handleUnloadNet() {
 		if (!selectedNetId) return;
 		// Pre-action check: refresh and verify state
-		availableNets = await listNets();
+		availableNets = (await listNets()).filter(n => n.worker_id);
 		workers = await listWorkers();
 		const net = selectedNet();
 		const worker = selectedNetWorker();
@@ -544,10 +545,10 @@
 		workerActionInProgress = true;
 		try {
 			await unloadNet(selectedNetId);
-			availableNets = await listNets();
+			availableNets = (await listNets()).filter(n => n.worker_id);
 		} catch (error) {
 			console.error('Unload failed:', error);
-			availableNets = await listNets();
+			availableNets = (await listNets()).filter(n => n.worker_id);
 			workers = await listWorkers();
 		} finally {
 			workerActionInProgress = false;

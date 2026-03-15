@@ -186,6 +186,7 @@ export interface Net {
 	entry_function: string;
 	execution_mode: string;
 	image_tag: string | null;
+	deployment_id: string | null;
 	worker_id: string | null;
 	load_state: 'unloaded' | 'loaded' | 'loading' | 'error';
 	load_error: string | null;
@@ -209,6 +210,7 @@ export async function createNet(body: {
 	name: string;
 	entry_module: string;
 	entry_function?: string;
+	deployment_id?: string;
 	worker_id?: string;
 }): Promise<Net> {
 	const res = await post('/api/nets', body);
