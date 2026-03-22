@@ -9,6 +9,7 @@
 	import AppNav from '$lib/components/AppNav.svelte';
 	import LogViewer from '$lib/components/LogViewer.svelte';
 	import { serverEventsStore } from '$lib/stores/serverEvents';
+	import { netDisplayName, netInstanceLabel, netFullLabel } from '$lib/netHelpers';
 
 	let workers = $state<Worker[]>([]);
 	let nets = $state<Net[]>([]);
@@ -29,8 +30,6 @@
 	let workerLogs = $state<Map<string, string[]>>(new Map());
 	let workerLogsExpanded = $state<Record<string, boolean>>({});
 
-	// Net load progress logs (net_id -> log lines) — kept for backwards compat with inline display
-	let loadLogs = $state<Map<string, string[]>>(new Map());
 
 	// Provisioning progress
 	const PROVISION_STEPS = ['provisioning', 'ready'] as const;
@@ -152,14 +151,7 @@
 		if (!event) return;
 
 		if (event.type === 'net_load_log') {
-			const netId = event.net_id;
-			// Keep per-net logs for inline display
-			const current = loadLogs.get(netId) || [];
-			loadLogs.set(netId, [...current, event.message]);
-			loadLogs = loadLogs;
-
-			// Also append to the worker's log viewer
-			const net = nets.find(n => n.id === netId);
+			const net = nets.find(n => n.id === event.net_id);
 			if (net?.worker_id) {
 				appendWorkerLog(net.worker_id, `[${net.name}] ${event.message}`);
 			}
@@ -167,10 +159,6 @@
 		}
 
 		if (event.type === 'net_state_changed') {
-			if (event.load_state === 'unloaded') {
-				loadLogs.delete(event.net_id);
-				loadLogs = loadLogs;
-			}
 			const net = nets.find(n => n.id === event.net_id);
 			if (net?.worker_id) {
 				appendWorkerLog(net.worker_id, `[${net.name}] State → ${event.load_state}`);
@@ -367,18 +355,13 @@
 			return;
 		}
 		await withAction(workerId, async () => {
-			if (net.worker_id) {
-				// Net is already assigned — clone it onto this worker
-				await createNet({
-					name: net.name,
-					entry_module: net.entry_module,
-					entry_function: net.entry_function,
-					deployment_id: net.deployment_id ?? undefined,
-					worker_id: workerId,
-				});
-			} else {
-				await patchNet(netId, { worker_id: workerId });
-			}
+			await createNet({
+				name: net.name,
+				entry_module: net.entry_module,
+				entry_function: net.entry_function,
+				deployment_id: net.deployment_id ?? undefined,
+				worker_id: workerId,
+			});
 			await refreshNets();
 			const detail = await getWorker(workerId);
 			workerDetails.set(workerId, detail);
@@ -406,8 +389,6 @@
 
 	async function handleLoadNet(netId: string) {
 		if (!await checkNetForLoad(netId)) return;
-		loadLogs.delete(netId);
-		loadLogs = loadLogs;
 		await withAction(netId, async () => {
 			await loadNet(netId);
 			await refreshNets();
@@ -474,12 +455,34 @@
 		return nets.filter(n => n.worker_id === workerId);
 	}
 
-	function netInstanceLabel(net: Net): string {
-		const siblings = nets.filter(n => n.name === net.name && n.entry_module === net.entry_module);
-		if (siblings.length <= 1) return '';
-		const sorted = siblings.sort((a, b) => a.created_at.localeCompare(b.created_at));
-		const index = sorted.findIndex(n => n.id === net.id) + 1;
-		return `(${index}/${siblings.length})`;
+	// Inline rename state
+	let editingNetId = $state<string | null>(null);
+	let editingNetName = $state('');
+
+	function startEditNetName(net: Net) {
+		editingNetId = net.id;
+		editingNetName = netDisplayName(net);
+	}
+
+	function cancelEditNetName() {
+		editingNetId = null;
+		editingNetName = '';
+	}
+
+	async function saveNetName(netId: string) {
+		const trimmed = editingNetName.trim();
+		if (!trimmed) { cancelEditNetName(); return; }
+		const net = nets.find(n => n.id === netId);
+		if (!net) { cancelEditNetName(); return; }
+		// If display name matches the template name, clear it (set to null)
+		const newDisplayName = trimmed === net.name ? null : trimmed;
+		try {
+			await patchNet(netId, { display_name: newDisplayName });
+			await refreshNets();
+		} catch (e: any) {
+			errorMessage = e.message || 'Failed to rename net';
+		}
+		cancelEditNetName();
 	}
 
 	function seedLogsFromNetErrors() {
@@ -710,7 +713,27 @@
 											{@const badge = loadStateBadge(net.load_state)}
 											<li class="py-1.5 border-b border-border-light last:border-b-0">
 												<div class="flex items-center gap-3 flex-wrap">
-												<span class="font-medium text-foreground text-sm">{net.name} {netInstanceLabel(net)}</span>
+												{#if editingNetId === net.id}
+													<input
+														type="text"
+														bind:value={editingNetName}
+														onkeydown={(e) => {
+															if (e.key === 'Enter') saveNetName(net.id);
+															if (e.key === 'Escape') cancelEditNetName();
+														}}
+														onblur={() => saveNetName(net.id)}
+														class="font-medium text-foreground text-sm px-1 py-0 border border-accent rounded bg-surface w-40"
+														autofocus
+													/>
+												{:else}
+													<button
+														class="font-medium text-foreground text-sm bg-transparent border-0 border-b border-dashed border-foreground-faint cursor-pointer px-0 py-0 hover:border-accent"
+														onclick={(e) => { e.stopPropagation(); startEditNetName(net); }}
+														title="Click to rename"
+													>
+														{netDisplayName(net)} {netInstanceLabel(net, nets)}
+													</button>
+												{/if}
 												<span class="text-xs px-2 py-0.5 rounded-full text-white font-medium" style="background: {badge.color}">{badge.label}</span>
 												<span class="text-xs text-foreground-faint font-mono">{net.entry_module}:{net.entry_function}</span>
 												<div class="flex gap-1.5 ml-auto">
@@ -742,20 +765,7 @@
 													</button>
 												</div>
 												</div>
-												{#if net.load_state === 'error' && net.load_error}
-													<div class="mt-1 text-xs text-error bg-error-bg px-2.5 py-1.5 rounded">
-														{net.load_error}
-													</div>
-												{/if}
-												{#if loadLogs.get(net.id)?.length}
-													<div class="mt-2">
-														<pre
-															data-log-viewer={net.id}
-															class="bg-[#1a1a2e] text-[#c8c8d0] p-3 rounded text-xs font-mono max-h-[150px] overflow-y-auto whitespace-pre-wrap break-words m-0"
-														>{loadLogs.get(net.id)?.join('\n')}</pre>
-													</div>
-												{/if}
-											</li>
+												</li>
 										{/each}
 									</ul>
 								{/if}
@@ -774,8 +784,7 @@
 										>
 											<option value="">Assign a net...</option>
 											{#each uniqueNets as net (net.id)}
-												{@const instanceCount = nets.filter(n => n.name === net.name && n.worker_id).length}
-												<option value={net.id}>{net.name} ({instanceCount})</option>
+													<option value={net.id}>{net.name}</option>
 											{/each}
 										</select>
 									</div>

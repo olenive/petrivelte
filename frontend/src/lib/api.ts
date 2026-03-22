@@ -182,6 +182,7 @@ export async function confirmEmailChange(token: string): Promise<AuthUser> {
 export interface Net {
 	id: string;
 	name: string;
+	display_name: string | null;
 	entry_module: string;
 	entry_function: string;
 	execution_mode: string;
@@ -220,7 +221,7 @@ export async function createNet(body: {
 
 export async function patchNet(
 	netId: string,
-	body: Partial<Pick<Net, 'name' | 'entry_module' | 'entry_function' | 'worker_id'>>,
+	body: Partial<Pick<Net, 'name' | 'display_name' | 'entry_module' | 'entry_function' | 'worker_id'>>,
 ): Promise<Net> {
 	const res = await patch(`/api/nets/${netId}`, body);
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to update net'));

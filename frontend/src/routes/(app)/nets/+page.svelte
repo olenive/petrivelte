@@ -16,6 +16,7 @@
 	import TokenInspector from '$lib/components/TokenInspector.svelte';
 	import AppNav from '$lib/components/AppNav.svelte';
 	import type { GraphState, Token, LogEntry } from '$lib/types';
+	import { netFullLabel } from '$lib/netHelpers';
 
 	let graphState = $state<GraphState | null>(null);
 	let tokens = $state<Token[]>([]);
@@ -493,15 +494,7 @@
 			if (workerId) {
 				await patchNet(selectedNetId, { worker_id: workerId });
 			} else {
-				// Unassign — send explicit null via raw fetch
-				const { API_URL } = await import('$lib/api');
-				const res = await fetch(`${API_URL}/api/nets/${selectedNetId}`, {
-					method: 'PATCH',
-					credentials: 'include',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ worker_id: null }),
-				});
-				if (!res.ok) throw new Error('Failed to unassign worker');
+				await patchNet(selectedNetId, { worker_id: null });
 			}
 			await fetchNets();
 		} catch (error) {
@@ -686,7 +679,7 @@
 					<select id="net-select" bind:value={selectedNetId} onchange={handleNetSelect}
 						class="px-4 py-2 border border-border rounded bg-card text-foreground text-sm cursor-pointer hover:border-accent">
 						{#each availableNets as net}
-							<option value={net.id}>{net.name}</option>
+							<option value={net.id}>{netFullLabel(net, availableNets)}</option>
 						{/each}
 					</select>
 				</div>
@@ -849,7 +842,7 @@
 						<select bind:value={selectedNetId} onchange={handleNetSelect}
 							class="px-4 py-2 border border-border rounded bg-card text-foreground text-sm cursor-pointer hover:border-accent">
 							{#each availableNets as net}
-								<option value={net.id}>{net.name}</option>
+								<option value={net.id}>{netFullLabel(net, availableNets)}</option>
 							{/each}
 						</select>
 					</div>
