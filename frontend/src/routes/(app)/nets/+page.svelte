@@ -9,7 +9,7 @@
 		logout,
 		listNets, listWorkers, patchNet, loadNet, unloadNet,
 		getExecutionState, executionStep, executionStart, executionStop, executionReset,
-		type Net, type Worker,
+		type Net, type Worker, type NetParam,
 	} from '$lib/api';
 	import GraphPanel from '$lib/components/GraphPanel.svelte';
 	import ExecutionLog from '$lib/components/ExecutionLog.svelte';
@@ -54,6 +54,23 @@
 	// Worker state
 	let workers = $state<Worker[]>([]);
 	let workerActionInProgress = $state(false);
+
+	// Factory params dialog state
+	let showParamsDialog = $state(false);
+	let paramsSchema = $state<NetParam[]>([]);
+	let paramValues = $state<Record<string, string>>({});
+
+	function getRequiredParams(net: Net | undefined): NetParam[] {
+		if (!net?.factory_params_schema) return [];
+		return net.factory_params_schema;
+	}
+
+	function coerceParamValue(value: string, type: string | null): unknown {
+		if (type === 'int') return parseInt(value, 10);
+		if (type === 'float') return parseFloat(value);
+		if (type === 'bool') return value.toLowerCase() === 'true';
+		return value;
+	}
 
 	// Panel layout state
 	const PANEL_STORAGE_KEY = 'petrivelte-panel-layout';
@@ -164,7 +181,7 @@
 	async function fetchNets() {
 		try {
 			// Only show nets assigned to a worker — templates (worker_id=null) can't be executed.
-			availableNets = (await listNets()).filter(n => n.worker_id);
+			availableNets = await listNets({ assigned: true });
 
 			// Auto-select first net if none selected
 			if (availableNets.length > 0 && !selectedNetId) {
@@ -507,29 +524,64 @@
 	async function handleLoadNet() {
 		if (!selectedNetId) return;
 		// Pre-action check: refresh and verify state
-		availableNets = (await listNets()).filter(n => n.worker_id);
+		availableNets = await listNets({ assigned: true });
 		workers = await listWorkers();
 		const net = selectedNet();
 		const worker = selectedNetWorker();
 		if (!net || net.load_state === 'loaded') return;
 		if (!worker || worker.status !== 'ready') return;
+
+		// If the net has factory params, show a dialog to collect them
+		const params = getRequiredParams(net);
+		if (params.length > 0) {
+			paramsSchema = params;
+			paramValues = {};
+			for (const p of params) {
+				paramValues[p.name] = p.default ?? '';
+			}
+			showParamsDialog = true;
+			return;
+		}
+
+		await doLoadNet();
+	}
+
+	async function doLoadNet(factoryParams?: Record<string, unknown>) {
+		if (!selectedNetId) return;
 		workerActionInProgress = true;
 		try {
-			await loadNet(selectedNetId);
-			availableNets = (await listNets()).filter(n => n.worker_id);
+			await loadNet(selectedNetId, factoryParams);
+			availableNets = await listNets({ assigned: true });
 		} catch (error) {
 			console.error('Load failed:', error);
-			availableNets = (await listNets()).filter(n => n.worker_id);
+			availableNets = await listNets({ assigned: true });
 			workers = await listWorkers();
 		} finally {
 			workerActionInProgress = false;
 		}
 	}
 
+	function handleParamsSubmit() {
+		showParamsDialog = false;
+		const factoryParams: Record<string, unknown> = {};
+		for (const p of paramsSchema) {
+			const raw = paramValues[p.name] ?? '';
+			if (p.required && raw === '') continue; // will be caught by server
+			if (raw !== '' || p.required) {
+				factoryParams[p.name] = coerceParamValue(raw, p.type);
+			}
+		}
+		doLoadNet(factoryParams);
+	}
+
+	function handleParamsCancel() {
+		showParamsDialog = false;
+	}
+
 	async function handleUnloadNet() {
 		if (!selectedNetId) return;
 		// Pre-action check: refresh and verify state
-		availableNets = (await listNets()).filter(n => n.worker_id);
+		availableNets = await listNets({ assigned: true });
 		workers = await listWorkers();
 		const net = selectedNet();
 		const worker = selectedNetWorker();
@@ -538,10 +590,10 @@
 		workerActionInProgress = true;
 		try {
 			await unloadNet(selectedNetId);
-			availableNets = (await listNets()).filter(n => n.worker_id);
+			availableNets = await listNets({ assigned: true });
 		} catch (error) {
 			console.error('Unload failed:', error);
-			availableNets = (await listNets()).filter(n => n.worker_id);
+			availableNets = await listNets({ assigned: true });
 			workers = await listWorkers();
 		} finally {
 			workerActionInProgress = false;
@@ -556,7 +608,7 @@
 		if (sseDebounceTimer) clearTimeout(sseDebounceTimer);
 		sseDebounceTimer = setTimeout(() => {
 			sseDebounceTimer = null;
-			listNets().then(n => availableNets = n).catch(() => {});
+			listNets({ assigned: true }).then(n => availableNets = n).catch(() => {});
 			listWorkers().then(w => workers = w).catch(() => {});
 		}, 500);
 	});
@@ -867,3 +919,43 @@
 		</div>
 	{/if}
 </div>
+
+{#if showParamsDialog}
+	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+	<div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onkeydown={(e) => e.key === 'Escape' && handleParamsCancel()} onclick={handleParamsCancel}>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="bg-card border border-border rounded-lg shadow-lg p-6 min-w-[360px] max-w-[480px]" onclick={(e) => e.stopPropagation()}>
+			<h3 class="text-base font-semibold text-foreground mb-1">Factory Parameters</h3>
+			<p class="text-xs text-foreground-muted mb-4">This net requires parameters before loading.</p>
+
+			<form onsubmit={(e) => { e.preventDefault(); handleParamsSubmit(); }}>
+				{#each paramsSchema as param}
+					<div class="mb-3">
+						<label for="param-{param.name}" class="block text-sm font-medium text-foreground mb-1">
+							{param.name}
+							{#if param.type}
+								<span class="text-xs text-foreground-faint ml-1">({param.type})</span>
+							{/if}
+							{#if !param.required}
+								<span class="text-xs text-foreground-faint ml-1">optional</span>
+							{/if}
+						</label>
+						<input
+							id="param-{param.name}"
+							type="text"
+							bind:value={paramValues[param.name]}
+							placeholder={param.default ?? ''}
+							required={param.required}
+							class="w-full px-3 py-2 border border-border rounded bg-surface text-foreground text-sm focus:outline-none focus:border-accent"
+						/>
+					</div>
+				{/each}
+
+				<div class="flex justify-end gap-2 mt-4">
+					<button type="button" class={btnSmall} onclick={handleParamsCancel}>Cancel</button>
+					<button type="submit" class={btnSmall}>Load</button>
+				</div>
+			</form>
+		</div>
+	</div>
+{/if}

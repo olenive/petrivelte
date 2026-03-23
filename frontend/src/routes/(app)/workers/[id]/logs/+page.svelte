@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy, tick } from 'svelte';
 	import { page } from '$app/stores';
-	import { getWorker, listNets, type WorkerDetail, type Net } from '$lib/api';
+	import { getWorker, listNets, getWorkerLogHistory, type WorkerDetail, type Net } from '$lib/api';
 	import { serverEventsStore } from '$lib/stores/serverEvents';
 	import AppNav from '$lib/components/AppNav.svelte';
 
@@ -12,6 +12,16 @@
 	let scrollContainer = $state<HTMLPreElement | null>(null);
 	let userScrolledUp = $state(false);
 	let errorMessage = $state('');
+
+	function formatTs(ts?: string): string {
+		if (!ts) return '';
+		try {
+			const d = new Date(ts);
+			return `[${d.toISOString().slice(11, 19)}] `;
+		} catch {
+			return '';
+		}
+	}
 
 	function handleScroll() {
 		if (!scrollContainer) return;
@@ -40,21 +50,39 @@
 
 	const unsubscribeSSE = serverEventsStore.subscribe((event) => {
 		if (!event) return;
+		const ts = event.ts;
 
 		if (event.type === 'net_load_log') {
 			const net = nets.find(n => n.id === event.net_id && n.worker_id === workerId);
 			if (net) {
-				logLines.push(`[${net.name}] ${event.message}`);
+				logLines.push(`${formatTs(ts)}[${net.name}] ${event.message}`);
 				logLines = logLines;
 			}
 		}
 
+		if (event.type === 'worker_provision_log' && event.worker_id === workerId) {
+			logLines.push(`${formatTs(ts)}[provision] ${event.message}`);
+			logLines = logLines;
+		}
+
 		if (event.type === 'worker_state_changed' && event.worker_id === workerId) {
-			logLines.push(`[worker] Status changed to: ${event.status}${event.status_detail ? ` (${event.status_detail})` : ''}`);
+			logLines.push(`${formatTs(ts)}[worker] Status changed to: ${event.status}${event.status_detail ? ` (${event.status_detail})` : ''}`);
 			logLines = logLines;
 			refreshWorker();
 		}
 	});
+
+	function formatHistoryEvent(evt: Record<string, any>): string {
+		const ts = evt.ts ? formatTs(evt.ts) : '';
+		if (evt.type === 'net_load_log') {
+			const netName = nets.find(n => n.id === evt.net_id)?.name ?? evt.net_id;
+			return `${ts}[${netName}] ${evt.message ?? ''}`;
+		}
+		if (evt.type === 'worker_provision_log') {
+			return `${ts}[provision] ${evt.message ?? ''}`;
+		}
+		return `${ts}${evt.message ?? JSON.stringify(evt)}`;
+	}
 
 	async function refreshWorker() {
 		try {
@@ -65,7 +93,21 @@
 		}
 	}
 
-	onMount(refreshWorker);
+	async function loadHistory() {
+		try {
+			const history = await getWorkerLogHistory(workerId);
+			if (history.length > 0) {
+				logLines = history.map(formatHistoryEvent);
+			}
+		} catch {
+			// ignore — history endpoint may not be available
+		}
+	}
+
+	onMount(async () => {
+		await refreshWorker();
+		await loadHistory();
+	});
 	onDestroy(unsubscribeSSE);
 </script>
 

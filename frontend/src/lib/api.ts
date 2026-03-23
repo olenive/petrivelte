@@ -179,6 +179,13 @@ export async function confirmEmailChange(token: string): Promise<AuthUser> {
 
 // -- nets --
 
+export interface NetParam {
+	name: string;
+	type: string | null;
+	default: string | null;
+	required: boolean;
+}
+
 export interface Net {
 	id: string;
 	name: string;
@@ -191,12 +198,17 @@ export interface Net {
 	worker_id: string | null;
 	load_state: 'unloaded' | 'loaded' | 'loading' | 'error';
 	load_error: string | null;
+	factory_params_schema: NetParam[] | null;
 	created_at: string;
 	updated_at: string;
 }
 
-export async function listNets(): Promise<Net[]> {
-	const res = await get('/api/nets');
+export async function listNets(opts?: { assigned?: boolean }): Promise<Net[]> {
+	const params = new URLSearchParams();
+	if (opts?.assigned === true) params.set('assigned', 'true');
+	else if (opts?.assigned === false) params.set('assigned', 'false');
+	const qs = params.toString();
+	const res = await get(`/api/nets${qs ? `?${qs}` : ''}`);
 	if (!res.ok) throw new Error('Failed to list nets');
 	return res.json();
 }
@@ -233,8 +245,12 @@ export async function deleteNet(netId: string): Promise<void> {
 	if (!res.ok) throw new Error('Failed to delete net');
 }
 
-export async function loadNet(netId: string): Promise<{ status: string; worker_ip: string }> {
-	const res = await post(`/api/nets/${netId}/load`);
+export async function loadNet(
+	netId: string,
+	factoryParams?: Record<string, unknown>,
+): Promise<{ status: string; worker_ip: string }> {
+	const body = factoryParams ? { factory_params: factoryParams } : undefined;
+	const res = await post(`/api/nets/${netId}/load`, body);
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to load net'));
 	return res.json();
 }
@@ -347,6 +363,12 @@ export async function stopWorker(workerId: string): Promise<void> {
 export async function healthCheckWorker(workerId: string): Promise<{ status: string }> {
 	const res = await post(`/api/workers/${workerId}/health-check`);
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Health check failed'));
+	return res.json();
+}
+
+export async function getWorkerLogHistory(workerId: string): Promise<Array<Record<string, any>>> {
+	const res = await get(`/api/workers/${workerId}/logs/history`);
+	if (!res.ok) return [];
 	return res.json();
 }
 

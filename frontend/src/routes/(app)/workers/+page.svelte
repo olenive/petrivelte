@@ -2,7 +2,7 @@
 	import { onMount, onDestroy, tick } from 'svelte';
 	import {
 		listWorkers, createWorker, deleteWorker, provisionWorker, destroyWorkerResource,
-		startWorker, stopWorker, healthCheckWorker, getWorker,
+		startWorker, stopWorker, healthCheckWorker, getWorker, getWorkerLogHistory,
 		listNets, createNet, patchNet, loadNet, unloadNet,
 		type Worker, type WorkerDetail, type Net,
 	} from '$lib/api';
@@ -35,9 +35,19 @@
 	const PROVISION_STEPS = ['provisioning', 'ready'] as const;
 	let provisionProgress = $state<Map<string, { step: number; total: number; label: string }>>(new Map());
 
-	function appendWorkerLog(workerId: string, message: string) {
+	function formatTs(ts?: string): string {
+		if (!ts) return '';
+		try {
+			const d = new Date(ts);
+			return `[${d.toISOString().slice(11, 19)}] `;
+		} catch {
+			return '';
+		}
+	}
+
+	function appendWorkerLog(workerId: string, message: string, ts?: string) {
 		const lines = workerLogs.get(workerId) || [];
-		workerLogs.set(workerId, [...lines, message]);
+		workerLogs.set(workerId, [...lines, `${formatTs(ts)}${message}`]);
 		workerLogs = workerLogs;
 	}
 
@@ -149,11 +159,12 @@
 
 	const unsubscribeSSE = serverEventsStore.subscribe((event) => {
 		if (!event) return;
+		const ts = event.ts;
 
 		if (event.type === 'net_load_log') {
 			const net = nets.find(n => n.id === event.net_id);
 			if (net?.worker_id) {
-				appendWorkerLog(net.worker_id, `[${net.name}] ${event.message}`);
+				appendWorkerLog(net.worker_id, `[${net.name}] ${event.message}`, ts);
 			}
 			return;
 		}
@@ -161,13 +172,13 @@
 		if (event.type === 'net_state_changed') {
 			const net = nets.find(n => n.id === event.net_id);
 			if (net?.worker_id) {
-				appendWorkerLog(net.worker_id, `[${net.name}] State → ${event.load_state}`);
+				appendWorkerLog(net.worker_id, `[${net.name}] State → ${event.load_state}`, ts);
 			}
 		}
 
 		if (event.type === 'worker_provision_log') {
 			const wid = event.worker_id;
-			appendWorkerLog(wid, `[provision] ${event.message}`);
+			appendWorkerLog(wid, `[provision] ${event.message}`, ts);
 			// Auto-expand log viewer during provisioning
 			if (!workerLogsExpanded[wid]) {
 				workerLogsExpanded = { ...workerLogsExpanded, [wid]: true };
@@ -177,7 +188,7 @@
 
 		if (event.type === 'worker_state_changed') {
 			const wid = event.worker_id;
-			appendWorkerLog(wid, `[worker] Status → ${event.status}${event.status_detail ? ` (${event.status_detail})` : ''}`);
+			appendWorkerLog(wid, `[worker] Status → ${event.status}${event.status_detail ? ` (${event.status_detail})` : ''}`, ts);
 
 			// Update provisioning progress
 			if (event.status === 'provisioning') {
@@ -485,6 +496,37 @@
 		cancelEditNetName();
 	}
 
+	function formatHistoryEvent(evt: Record<string, any>): string {
+		const ts = evt.ts ? formatTs(evt.ts) : '';
+		if (evt.type === 'net_load_log') {
+			const netName = nets.find(n => n.id === evt.net_id)?.name ?? evt.net_id;
+			return `${ts}[${netName}] ${evt.message ?? ''}`;
+		}
+		if (evt.type === 'worker_provision_log') {
+			return `${ts}[provision] ${evt.message ?? ''}`;
+		}
+		return `${ts}${evt.message ?? JSON.stringify(evt)}`;
+	}
+
+	async function loadLogHistory() {
+		for (const w of workers) {
+			if (w.status === 'ready' || w.status === 'provisioning' || w.status === 'error') {
+				try {
+					const history = await getWorkerLogHistory(w.id);
+					if (history.length > 0) {
+						const existing = workerLogs.get(w.id) || [];
+						if (existing.length === 0) {
+							workerLogs.set(w.id, history.map(formatHistoryEvent));
+						}
+					}
+				} catch {
+					// Worker may not be reachable — ignore
+				}
+			}
+		}
+		workerLogs = workerLogs;
+	}
+
 	function seedLogsFromNetErrors() {
 		for (const net of nets) {
 			if (net.load_state === 'error' && net.load_error && net.worker_id) {
@@ -501,6 +543,7 @@
 
 	onMount(async () => {
 		await refreshAll();
+		await loadLogHistory();
 		seedLogsFromNetErrors();
 		startPolling();
 		document.addEventListener('visibilitychange', handleVisibilityChange);

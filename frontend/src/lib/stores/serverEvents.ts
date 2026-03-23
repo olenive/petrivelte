@@ -10,10 +10,10 @@ import { writable } from 'svelte/store';
 import { API_URL } from '$lib/api';
 
 export type ServerEvent =
-	| { type: 'worker_state_changed'; worker_id: string; status: string; status_detail?: string | null }
-	| { type: 'net_state_changed'; net_id: string; load_state: string }
-	| { type: 'net_load_log'; net_id: string; step: string; message: string }
-	| { type: 'worker_provision_log'; worker_id: string; step: string; message: string };
+	| { type: 'worker_state_changed'; worker_id: string; status: string; status_detail?: string | null; ts?: string }
+	| { type: 'net_state_changed'; net_id: string; load_state: string; ts?: string }
+	| { type: 'net_load_log'; net_id: string; step: string; message: string; ts?: string }
+	| { type: 'worker_provision_log'; worker_id: string; step: string; message: string; ts?: string };
 
 const { subscribe, set } = writable<ServerEvent | null>(null);
 
