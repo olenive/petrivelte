@@ -1,27 +1,23 @@
 <script lang="ts">
 	import { onMount, onDestroy, tick } from 'svelte';
 	import { page } from '$app/stores';
-	import { getWorker, listNets, getWorkerLogHistory, type WorkerDetail, type Net } from '$lib/api';
-	import { serverEventsStore } from '$lib/stores/serverEvents';
+	import { getWorker, listNets, type WorkerDetail, type Net } from '$lib/api';
 	import AppNav from '$lib/components/AppNav.svelte';
+	import {
+		workerLogsStore, setNets, loadHistory, clearLogs,
+	} from '$lib/stores/workerLogs';
 
 	let workerId = $derived($page.params.id as string);
 	let worker = $state<WorkerDetail | null>(null);
 	let nets = $state<Net[]>([]);
-	let logLines = $state<string[]>([]);
+	let allLogs = $state<Map<string, string[]>>(new Map());
+	let logLines = $derived(allLogs.get(workerId) || []);
 	let scrollContainer = $state<HTMLPreElement | null>(null);
 	let userScrolledUp = $state(false);
 	let errorMessage = $state('');
 
-	function formatTs(ts?: string): string {
-		if (!ts) return '';
-		try {
-			const d = new Date(ts);
-			return `[${d.toISOString().slice(11, 19)}] `;
-		} catch {
-			return '';
-		}
-	}
+	// Subscribe to the shared log store
+	const unsubscribeLogs = workerLogsStore.subscribe(m => { allLogs = m; });
 
 	function handleScroll() {
 		if (!scrollContainer) return;
@@ -48,67 +44,24 @@
 		}
 	}
 
-	const unsubscribeSSE = serverEventsStore.subscribe((event) => {
-		if (!event) return;
-		const ts = event.ts;
-
-		if (event.type === 'net_load_log') {
-			const net = nets.find(n => n.id === event.net_id && n.worker_id === workerId);
-			if (net) {
-				logLines.push(`${formatTs(ts)}[${net.name}] ${event.message}`);
-				logLines = logLines;
-			}
-		}
-
-		if (event.type === 'worker_provision_log' && event.worker_id === workerId) {
-			logLines.push(`${formatTs(ts)}[provision] ${event.message}`);
-			logLines = logLines;
-		}
-
-		if (event.type === 'worker_state_changed' && event.worker_id === workerId) {
-			logLines.push(`${formatTs(ts)}[worker] Status changed to: ${event.status}${event.status_detail ? ` (${event.status_detail})` : ''}`);
-			logLines = logLines;
-			refreshWorker();
-		}
-	});
-
-	function formatHistoryEvent(evt: Record<string, any>): string {
-		const ts = evt.ts ? formatTs(evt.ts) : '';
-		if (evt.type === 'net_load_log') {
-			const netName = nets.find(n => n.id === evt.net_id)?.name ?? evt.net_id;
-			return `${ts}[${netName}] ${evt.message ?? ''}`;
-		}
-		if (evt.type === 'worker_provision_log') {
-			return `${ts}[provision] ${evt.message ?? ''}`;
-		}
-		return `${ts}${evt.message ?? JSON.stringify(evt)}`;
-	}
-
 	async function refreshWorker() {
 		try {
 			worker = await getWorker(workerId);
 			nets = await listNets();
+			setNets(nets);
 		} catch (e: any) {
 			errorMessage = e.message;
 		}
 	}
 
-	async function loadHistory() {
-		try {
-			const history = await getWorkerLogHistory(workerId);
-			if (history.length > 0) {
-				logLines = history.map(formatHistoryEvent);
-			}
-		} catch {
-			// ignore — history endpoint may not be available
-		}
-	}
-
 	onMount(async () => {
 		await refreshWorker();
-		await loadHistory();
+		await loadHistory(workerId);
 	});
-	onDestroy(unsubscribeSSE);
+
+	onDestroy(() => {
+		unsubscribeLogs();
+	});
 </script>
 
 <AppNav title={worker ? `Logs — ${worker.name}` : 'Worker Logs'} />
@@ -153,7 +106,7 @@
 		{#if logLines.length > 0}
 			<button
 				class="text-xs text-foreground-faint hover:text-foreground-muted cursor-pointer bg-transparent border-0"
-				onclick={() => { logLines = []; }}
+				onclick={() => clearLogs(workerId)}
 			>Clear</button>
 		{/if}
 	</div>

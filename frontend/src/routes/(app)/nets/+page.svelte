@@ -14,8 +14,9 @@
 	import GraphPanel from '$lib/components/GraphPanel.svelte';
 	import ExecutionLog from '$lib/components/ExecutionLog.svelte';
 	import TokenInspector from '$lib/components/TokenInspector.svelte';
+	import TransitionInspector from '$lib/components/TransitionInspector.svelte';
 	import AppNav from '$lib/components/AppNav.svelte';
-	import type { GraphState, Token, LogEntry } from '$lib/types';
+	import type { GraphState, Token, LogEntry, Transition } from '$lib/types';
 	import { netFullLabel } from '$lib/netHelpers';
 
 	let graphState = $state<GraphState | null>(null);
@@ -50,6 +51,10 @@
 	let selectedNetId = $state<string | null>(null);
 	let isRunning = $state(false);
 	let isAutoStepping = $state(false);
+	let isStepping = $state(false);
+	let stepError = $state<string | null>(null);
+	let subprocessLines = $state<string[]>([]);
+	let selectedTransitionId = $state<string | null>(null);
 
 	// Worker state
 	let workers = $state<Worker[]>([]);
@@ -83,9 +88,12 @@
 	let tokenInspectorCollapsed = $state(false);
 	let sidebarWidth = $state(DEFAULT_SIDEBAR_WIDTH);
 	let execLogRatio = $state(DEFAULT_PANEL_RATIO);
+	let rightSidebarCollapsed = $state(false);
+	let rightSidebarWidth = $state(DEFAULT_SIDEBAR_WIDTH);
 
 	// Drag state for resizing
 	let isDraggingSidebar = $state(false);
+	let isDraggingRightSidebar = $state(false);
 	let isDraggingPanelDivider = $state(false);
 	let dragStartX = 0;
 	let dragStartY = 0;
@@ -102,6 +110,8 @@
 				tokenInspectorCollapsed = layout.tokenInspectorCollapsed ?? false;
 				sidebarWidth = layout.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH;
 				execLogRatio = layout.execLogRatio ?? DEFAULT_PANEL_RATIO;
+				rightSidebarCollapsed = layout.rightSidebarCollapsed ?? false;
+				rightSidebarWidth = layout.rightSidebarWidth ?? DEFAULT_SIDEBAR_WIDTH;
 			}
 		} catch (e) {
 			console.warn('Failed to load panel layout:', e);
@@ -115,7 +125,9 @@
 				execLogCollapsed,
 				tokenInspectorCollapsed,
 				sidebarWidth,
-				execLogRatio
+				execLogRatio,
+				rightSidebarCollapsed,
+				rightSidebarWidth,
 			}));
 		} catch (e) {
 			console.warn('Failed to save panel layout:', e);
@@ -132,10 +144,22 @@
 		savePanelLayout();
 	}
 
+	function toggleRightSidebar() {
+		rightSidebarCollapsed = !rightSidebarCollapsed;
+		savePanelLayout();
+	}
+
 	function handleSidebarDragStart(event: MouseEvent) {
 		isDraggingSidebar = true;
 		dragStartX = event.clientX;
 		dragStartWidth = sidebarWidth;
+		event.preventDefault();
+	}
+
+	function handleRightSidebarDragStart(event: MouseEvent) {
+		isDraggingRightSidebar = true;
+		dragStartX = event.clientX;
+		dragStartWidth = rightSidebarWidth;
 		event.preventDefault();
 	}
 
@@ -151,6 +175,10 @@
 			const dx = event.clientX - dragStartX;
 			sidebarWidth = Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, dragStartWidth + dx));
 		}
+		if (isDraggingRightSidebar) {
+			const dx = dragStartX - event.clientX;
+			rightSidebarWidth = Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, dragStartWidth + dx));
+		}
 		if (isDraggingPanelDivider) {
 			const container = document.querySelector('.sidebar-content');
 			if (container) {
@@ -163,8 +191,9 @@
 	}
 
 	function handleMouseUp() {
-		if (isDraggingSidebar || isDraggingPanelDivider) {
+		if (isDraggingSidebar || isDraggingRightSidebar || isDraggingPanelDivider) {
 			isDraggingSidebar = false;
+			isDraggingRightSidebar = false;
 			isDraggingPanelDivider = false;
 			savePanelLayout();
 		}
@@ -177,6 +206,22 @@
 	function handleTokenSelect(tokenId: string | null) {
 		$selectedTokenId = tokenId;
 	}
+
+	// Transition selection handler
+	function handleTransitionSelect(transitionId: string | null) {
+		selectedTransitionId = transitionId;
+		// Auto-expand right sidebar when a transition is selected
+		if (transitionId && rightSidebarCollapsed) {
+			rightSidebarCollapsed = false;
+			savePanelLayout();
+		}
+	}
+
+	let selectedTransition = $derived(
+		selectedTransitionId && graphState
+			? graphState.transitions.find(t => t.id === selectedTransitionId) ?? null
+			: null
+	);
 
 	async function fetchNets() {
 		try {
@@ -197,6 +242,7 @@
 		isRunning = false;
 		graphState = null;
 		tokens = [];
+		selectedTransitionId = null;
 
 		// Only connect WebSocket and fetch execution state if the net has a ready worker
 		const net = availableNets.find(n => n.id === netId);
@@ -236,6 +282,8 @@
 
 	async function handleStep() {
 		if (!selectedNetId) return;
+		stepError = null;
+		subprocessLines = [];
 		try {
 			await executionStep(selectedNetId);
 		} catch (error) {
@@ -257,11 +305,18 @@
 		}
 	}
 
+	// Resolve function for auto-step to wait on WebSocket step result
+	let autoStepResolve: ((fired: boolean) => void) | null = null;
+
 	async function handleAutoStep() {
 		if (!selectedNetId) return;
 
 		if (isAutoStepping) {
 			isAutoStepping = false;
+			if (autoStepResolve) {
+				autoStepResolve(false);
+				autoStepResolve = null;
+			}
 			console.log('AUTO STEP: Stopped by user');
 			return;
 		}
@@ -271,9 +326,16 @@
 
 		while (isAutoStepping) {
 			try {
-				const result = await executionStep(selectedNetId);
+				subprocessLines = [];
+				await executionStep(selectedNetId);
 
-				if (result.fired === 0) {
+				// Wait for WebSocket to tell us whether a transition fired
+				const fired = await new Promise<boolean>((resolve) => {
+					autoStepResolve = resolve;
+				});
+				autoStepResolve = null;
+
+				if (!fired) {
 					console.log('AUTO STEP: No more transitions can fire, stopping');
 					isAutoStepping = false;
 					break;
@@ -660,8 +722,20 @@
 				tokens = calculateTokenPositions(tokensData, graphState);
 			}
 
+			if (message.type === 'step_started') {
+				isStepping = true;
+				// Don't clear stepError here — keep the previous error visible
+				// until this step either succeeds or produces a new error.
+				subprocessLines = [];
+			}
+
 			if (message.type === 'transition_fired') {
+				isStepping = false;
+				stepError = null;
 				logEntries = [message.log_entry, ...logEntries];
+
+				// Resolve auto-step promise: a transition fired
+				if (autoStepResolve) autoStepResolve(true);
 
 				if (!graphState) return;
 
@@ -697,6 +771,29 @@
 				if (!isAnimating) {
 					processAnimationQueue();
 				}
+			}
+
+			if (message.type === 'step_completed') {
+				isStepping = false;
+				stepError = null;
+				if (autoStepResolve) autoStepResolve(false);
+			}
+
+			if (message.type === 'step_error') {
+				isStepping = false;
+				stepError = message.error;
+				if (autoStepResolve) {
+					autoStepResolve(false);
+					autoStepResolve = null;
+				}
+			}
+
+			if (message.type === 'subprocess_output') {
+				subprocessLines = [...subprocessLines, message.text];
+			}
+
+			if (message.type === 'execution_stopped') {
+				isRunning = false;
 			}
 		});
 
@@ -761,13 +858,13 @@
 				{/if}
 
 				<div class="flex items-center gap-2">
-					<span class="px-4 py-2 rounded text-sm font-medium {isRunning ? 'bg-status-info-bg text-status-info' : isAutoStepping ? 'bg-status-warning-bg text-status-warning' : 'bg-muted text-foreground-muted'}">
-						{isRunning ? 'Active' : isAutoStepping ? 'Auto Stepping' : 'Idle'}
+					<span class="px-4 py-2 rounded text-sm font-medium {isRunning ? 'bg-status-info-bg text-status-info' : isAutoStepping ? 'bg-status-warning-bg text-status-warning' : isStepping ? 'bg-status-warning-bg text-status-warning' : 'bg-muted text-foreground-muted'}">
+						{isRunning ? 'Active' : isAutoStepping ? 'Auto Stepping' : isStepping ? 'Stepping...' : 'Idle'}
 					</span>
 				</div>
 
 				<div class="flex items-center gap-2">
-					<button class={btnDefault} onclick={handleStep} disabled={isRunning || isAutoStepping || !selectedNetId} title="Fire a single transition manually.">Step</button>
+					<button class={btnDefault} onclick={handleStep} disabled={isRunning || isAutoStepping || isStepping || !selectedNetId} title="Fire a single transition manually.">Step</button>
 					<button class={isAutoStepping ? btnDanger : btnDefault} onclick={handleAutoStep} disabled={isRunning || !selectedNetId}
 						title={isAutoStepping ? "Stop automatic stepping." : "Automatically fire transitions one at a time with animations."}
 					>{isAutoStepping ? 'Stop' : 'Auto Step'}</button>
@@ -781,7 +878,7 @@
 	{/if}
 
 	{#if graphState}
-		<main class="flex flex-1 overflow-hidden {isDraggingSidebar || isDraggingPanelDivider ? 'cursor-col-resize select-none' : ''}">
+		<main class="flex flex-1 overflow-hidden {isDraggingSidebar || isDraggingRightSidebar || isDraggingPanelDivider ? 'cursor-col-resize select-none' : ''}">
 			<!-- Left sidebar -->
 			{#if !sidebarCollapsed}
 				<aside class="flex shrink-0 bg-card border-r border-border" style="width: {sidebarWidth}px;">
@@ -802,7 +899,7 @@
 							</button>
 							{#if !execLogCollapsed}
 								<div class="flex-1 overflow-hidden flex flex-col">
-									<ExecutionLog entries={logEntries} />
+									<ExecutionLog entries={logEntries} {isStepping} {stepError} {subprocessLines} />
 								</div>
 							{/if}
 						</div>
@@ -881,8 +978,41 @@
 					{activeEdgeIds}
 					selectedTokenId={$selectedTokenId}
 					onTokenSelect={handleTokenSelect}
+					{selectedTransitionId}
+					onTransitionSelect={handleTransitionSelect}
 				/>
 			</div>
+
+			<!-- Right sidebar: Transition Inspector -->
+			{#if !rightSidebarCollapsed}
+				<aside class="flex shrink-0 bg-card border-l border-border" style="width: {rightSidebarWidth}px;">
+					<!-- Resize handle for right sidebar width -->
+					<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+					<div
+						class="w-1.5 bg-muted cursor-col-resize transition-colors hover:bg-accent"
+						onmousedown={handleRightSidebarDragStart}
+						role="separator"
+						aria-orientation="vertical"
+					></div>
+
+					<div class="flex-1 flex flex-col overflow-hidden">
+						<button class="flex items-center gap-2 px-3 py-2 bg-muted border-0 border-b border-border cursor-pointer text-left text-sm font-medium text-foreground w-full transition-colors hover:bg-hover" onclick={toggleRightSidebar}>
+							<span class="text-[0.7rem] text-foreground-muted">▼</span>
+							<span class="flex-1">Transition</span>
+						</button>
+						<div class="flex-1 overflow-hidden flex flex-col">
+							<TransitionInspector transition={selectedTransition} />
+						</div>
+					</div>
+				</aside>
+			{:else}
+				<!-- Collapsed right sidebar tab -->
+				<aside class="flex flex-col bg-card border-l border-border p-2 gap-2">
+					<button class="flex flex-col items-center p-2 border border-border rounded bg-muted cursor-pointer transition-all hover:bg-hover hover:border-accent" onclick={toggleRightSidebar} title="Transition Inspector">
+						<span class="text-sm font-medium text-foreground-muted">fn</span>
+					</button>
+				</aside>
+			{/if}
 		</main>
 	{:else}
 		<div class="flex-1 flex flex-col items-center justify-center p-8">

@@ -2,13 +2,17 @@
 	import { onMount, onDestroy, tick } from 'svelte';
 	import {
 		listWorkers, createWorker, deleteWorker, provisionWorker, destroyWorkerResource,
-		startWorker, stopWorker, healthCheckWorker, getWorker, getWorkerLogHistory,
+		startWorker, stopWorker, healthCheckWorker, getWorker,
 		listNets, createNet, patchNet, loadNet, unloadNet,
-		type Worker, type WorkerDetail, type Net,
+		type Worker, type WorkerDetail, type Net, type NetParam,
 	} from '$lib/api';
 	import AppNav from '$lib/components/AppNav.svelte';
 	import LogViewer from '$lib/components/LogViewer.svelte';
 	import { serverEventsStore } from '$lib/stores/serverEvents';
+	import {
+		workerLogsStore, setNets, seedFromNetErrors, loadHistory as loadLogHistory,
+		clearLogs,
+	} from '$lib/stores/workerLogs';
 	import { netDisplayName, netInstanceLabel, netFullLabel } from '$lib/netHelpers';
 
 	let workers = $state<Worker[]>([]);
@@ -26,29 +30,63 @@
 	let actionInProgress = $state<string | null>(null);
 	let errorMessage = $state('');
 
-	// Per-worker log lines (includes net load logs, provisioning progress, etc.)
+	// Log viewer expand state (log data comes from shared workerLogsStore)
 	let workerLogs = $state<Map<string, string[]>>(new Map());
 	let workerLogsExpanded = $state<Record<string, boolean>>({});
+
+	// Subscribe to the shared log store
+	const unsubscribeLogs = workerLogsStore.subscribe(m => { workerLogs = m; });
 
 
 	// Provisioning progress
 	const PROVISION_STEPS = ['provisioning', 'ready'] as const;
 	let provisionProgress = $state<Map<string, { step: number; total: number; label: string }>>(new Map());
 
-	function formatTs(ts?: string): string {
-		if (!ts) return '';
-		try {
-			const d = new Date(ts);
-			return `[${d.toISOString().slice(11, 19)}] `;
-		} catch {
-			return '';
+	// Per-net inline parameter values and expanded state
+	let netParamValues = $state<Map<string, Record<string, string>>>(new Map());
+	let netParamsExpanded = $state<Record<string, boolean>>({});
+
+
+	function getNetParams(netId: string, workerId?: string): NetParam[] {
+		// Check worker's assigned_nets first (has factory_params_schema from backend)
+		if (workerId && workerDetails.has(workerId)) {
+			const assigned = workerDetails.get(workerId)?.assigned_nets.find(n => n.id === netId);
+			if (assigned?.factory_params_schema?.length) return assigned.factory_params_schema;
+		}
+		// Fall back to global nets list
+		const net = nets.find(n => n.id === netId);
+		return net?.factory_params_schema ?? [];
+	}
+
+	function initParamValues(netId: string, params: NetParam[]): void {
+		if (!netParamValues.has(netId)) {
+			const defaults: Record<string, string> = {};
+			for (const p of params) defaults[p.name] = p.default ?? '';
+			netParamValues.set(netId, defaults);
+			netParamValues = netParamValues;
 		}
 	}
 
-	function appendWorkerLog(workerId: string, message: string, ts?: string) {
-		const lines = workerLogs.get(workerId) || [];
-		workerLogs.set(workerId, [...lines, `${formatTs(ts)}${message}`]);
-		workerLogs = workerLogs;
+	function getParamValues(netId: string): Record<string, string> {
+		return netParamValues.get(netId) ?? {};
+	}
+
+	function coerceParamValue(value: string, type: string | null): unknown {
+		if (type === 'int') return parseInt(value, 10);
+		if (type === 'float') return parseFloat(value);
+		if (type === 'bool') return value.toLowerCase() === 'true';
+		return value;
+	}
+
+	function buildFactoryParams(netId: string, params: NetParam[]): Record<string, unknown> | undefined {
+		if (params.length === 0) return undefined;
+		const values = netParamValues.get(netId) ?? {};
+		const result: Record<string, unknown> = {};
+		for (const p of params) {
+			const raw = values[p.name] ?? '';
+			if (raw !== '') result[p.name] = coerceParamValue(raw, p.type);
+		}
+		return Object.keys(result).length > 0 ? result : undefined;
 	}
 
 	// Delete confirmation state (per-worker so timers don't interfere)
@@ -108,6 +146,7 @@
 
 	async function refreshNets() {
 		nets = await listNets();
+		setNets(nets); // keep shared log store's net cache in sync
 	}
 
 	async function refreshAll() {
@@ -159,37 +198,20 @@
 
 	const unsubscribeSSE = serverEventsStore.subscribe((event) => {
 		if (!event) return;
-		const ts = event.ts;
 
-		if (event.type === 'net_load_log') {
-			const net = nets.find(n => n.id === event.net_id);
-			if (net?.worker_id) {
-				appendWorkerLog(net.worker_id, `[${net.name}] ${event.message}`, ts);
-			}
-			return;
-		}
-
-		if (event.type === 'net_state_changed') {
-			const net = nets.find(n => n.id === event.net_id);
-			if (net?.worker_id) {
-				appendWorkerLog(net.worker_id, `[${net.name}] State → ${event.load_state}`, ts);
-			}
-		}
+		// Log lines are handled by the shared workerLogsStore — we only
+		// need to react to events for UI concerns (expand, progress, refresh).
 
 		if (event.type === 'worker_provision_log') {
 			const wid = event.worker_id;
-			appendWorkerLog(wid, `[provision] ${event.message}`, ts);
 			// Auto-expand log viewer during provisioning
 			if (!workerLogsExpanded[wid]) {
 				workerLogsExpanded = { ...workerLogsExpanded, [wid]: true };
 			}
-			return;
 		}
 
 		if (event.type === 'worker_state_changed') {
 			const wid = event.worker_id;
-			appendWorkerLog(wid, `[worker] Status → ${event.status}${event.status_detail ? ` (${event.status_detail})` : ''}`, ts);
-
 			// Update provisioning progress
 			if (event.status === 'provisioning') {
 				provisionProgress.set(wid, { step: 1, total: 3, label: 'Creating machine...' });
@@ -276,7 +298,6 @@
 	async function handleProvision(workerId: string) {
 		provisionProgress.set(workerId, { step: 1, total: 3, label: 'Creating machine...' });
 		provisionProgress = provisionProgress;
-		appendWorkerLog(workerId, '[provision] Provisioning started...');
 		// Auto-expand log viewer so the user sees progress
 		workerLogsExpanded = { ...workerLogsExpanded, [workerId]: true };
 		await withAction(workerId, async () => {
@@ -398,10 +419,28 @@
 		});
 	}
 
-	async function handleLoadNet(netId: string) {
+	async function handleLoadNet(netId: string, workerId?: string) {
 		if (!await checkNetForLoad(netId)) return;
+		const params = getNetParams(netId, workerId ?? undefined);
+		const factoryParams = buildFactoryParams(netId, params);
 		await withAction(netId, async () => {
-			await loadNet(netId);
+			await loadNet(netId, factoryParams);
+			await refreshNets();
+		});
+	}
+
+	async function handleReloadNet(netId: string, workerId?: string) {
+		// Unload then load with current param values
+		const net = nets.find(n => n.id === netId);
+		if (!net) return;
+		await withAction(netId, async () => {
+			if (net.load_state === 'loaded') {
+				await unloadNet(netId);
+				await refreshNets();
+			}
+			const params = getNetParams(netId, workerId ?? undefined);
+			const factoryParams = buildFactoryParams(netId, params);
+			await loadNet(netId, factoryParams);
 			await refreshNets();
 		});
 	}
@@ -496,55 +535,15 @@
 		cancelEditNetName();
 	}
 
-	function formatHistoryEvent(evt: Record<string, any>): string {
-		const ts = evt.ts ? formatTs(evt.ts) : '';
-		if (evt.type === 'net_load_log') {
-			const netName = nets.find(n => n.id === evt.net_id)?.name ?? evt.net_id;
-			return `${ts}[${netName}] ${evt.message ?? ''}`;
-		}
-		if (evt.type === 'worker_provision_log') {
-			return `${ts}[provision] ${evt.message ?? ''}`;
-		}
-		return `${ts}${evt.message ?? JSON.stringify(evt)}`;
-	}
-
-	async function loadLogHistory() {
-		for (const w of workers) {
-			if (w.status === 'ready' || w.status === 'provisioning' || w.status === 'error') {
-				try {
-					const history = await getWorkerLogHistory(w.id);
-					if (history.length > 0) {
-						const existing = workerLogs.get(w.id) || [];
-						if (existing.length === 0) {
-							workerLogs.set(w.id, history.map(formatHistoryEvent));
-						}
-					}
-				} catch {
-					// Worker may not be reachable — ignore
-				}
-			}
-		}
-		workerLogs = workerLogs;
-	}
-
-	function seedLogsFromNetErrors() {
-		for (const net of nets) {
-			if (net.load_state === 'error' && net.load_error && net.worker_id) {
-				const lines = workerLogs.get(net.worker_id) || [];
-				const errorLine = `[${net.name}] Load error: ${net.load_error}`;
-				if (!lines.includes(errorLine)) {
-					lines.push(errorLine);
-					workerLogs.set(net.worker_id, lines);
-				}
-			}
-		}
-		workerLogs = workerLogs;
-	}
-
 	onMount(async () => {
 		await refreshAll();
-		await loadLogHistory();
-		seedLogsFromNetErrors();
+		// Load history for all active workers via the shared store
+		for (const w of workers) {
+			if (w.status === 'ready' || w.status === 'provisioning' || w.status === 'error') {
+				loadLogHistory(w.id);
+			}
+		}
+		seedFromNetErrors(nets);
 		startPolling();
 		document.addEventListener('visibilitychange', handleVisibilityChange);
 	});
@@ -552,6 +551,7 @@
 	onDestroy(() => {
 		stopPolling();
 		unsubscribeSSE();
+		unsubscribeLogs();
 		cancelAllDeleteCountdowns();
 		if (sseDebounceTimer) clearTimeout(sseDebounceTimer);
 		if (typeof document !== 'undefined') {
@@ -747,13 +747,15 @@
 					{#if expandedWorkerIds[worker.id]}
 						<div class="px-4 py-3 border-t border-border bg-muted">
 							<div>
-								<h4 class="mb-2 text-sm font-semibold text-foreground">Assigned Nets</h4>
+								<h4 class="mb-2 text-sm font-semibold text-foreground">Assigned Nets &amp; Parameters</h4>
 								{#if netsForWorker(worker.id).length === 0}
 									<p class="text-foreground-faint text-sm mb-2">No nets assigned</p>
 								{:else}
 									<ul class="list-none m-0 p-0 mb-3">
 										{#each netsForWorker(worker.id) as net (net.id)}
 											{@const badge = loadStateBadge(net.load_state)}
+											{@const params = getNetParams(net.id, worker.id)}
+											{@const hasParams = params.length > 0}
 											<li class="py-1.5 border-b border-border-light last:border-b-0">
 												<div class="flex items-center gap-3 flex-wrap">
 												{#if editingNetId === net.id}
@@ -792,7 +794,7 @@
 														<span title={worker.status !== 'ready' ? 'Provision the worker before loading a net' : ''}>
 															<button
 																class="px-2.5 py-1 border border-green-600 rounded bg-green-600 text-white text-xs font-medium cursor-pointer transition-all hover:bg-green-700 hover:border-green-700 disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none"
-																onclick={() => handleLoadNet(net.id)}
+																onclick={() => handleLoadNet(net.id, worker.id)}
 																disabled={worker.status !== 'ready' || actionInProgress === net.id}
 															>
 																Load
@@ -807,6 +809,56 @@
 														Unassign
 													</button>
 												</div>
+												</div>
+												<!-- Inline collapsible parameters -->
+												<div class="mt-1.5">
+													<button
+														class="text-xs text-foreground-muted flex items-center gap-1 bg-transparent border-0 cursor-pointer px-0 py-0.5 hover:text-foreground"
+														onclick={(e) => { e.stopPropagation(); initParamValues(net.id, params); netParamsExpanded = { ...netParamsExpanded, [net.id]: !netParamsExpanded[net.id] }; }}
+													>
+														<span class="text-[0.6em]">{netParamsExpanded[net.id] ? '\u25BC' : '\u25B6'}</span>
+														Parameters ({params.length})
+													</button>
+													{#if netParamsExpanded[net.id]}
+														<div class="mt-1.5 pl-3 border-l-2 border-border-light flex flex-col gap-1.5">
+															{#if hasParams}
+																{@const values = getParamValues(net.id)}
+																{#each params as param}
+																	<div class="flex items-center gap-2">
+																		<label for="np-{net.id}-{param.name}" class="text-xs text-foreground-muted min-w-[80px] shrink-0">
+																			{param.name}
+																			{#if param.type}<span class="text-foreground-faint">({param.type})</span>{/if}
+																			{#if param.required}<span class="text-red-400">*</span>{/if}
+																		</label>
+																		<input
+																			id="np-{net.id}-{param.name}"
+																			type="text"
+																			value={values[param.name] ?? ''}
+																			oninput={(e) => {
+																				const v = netParamValues.get(net.id) ?? {};
+																				v[param.name] = e.currentTarget.value;
+																				netParamValues.set(net.id, v);
+																				netParamValues = netParamValues;
+																			}}
+																			placeholder={param.default ?? ''}
+																			class="flex-1 max-w-[200px] px-2 py-1 border border-border rounded bg-surface text-foreground text-xs focus:outline-none focus:border-accent"
+																		/>
+																	</div>
+																{/each}
+																{#if net.load_state === 'loaded'}
+																	<button
+																		class="mt-1 self-start px-2.5 py-1 border border-accent rounded bg-card text-accent text-xs font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+																		onclick={() => handleReloadNet(net.id, worker.id)}
+																		disabled={actionInProgress === net.id}
+																	>
+																		Reload with new params
+																	</button>
+																{/if}
+															{:else}
+																<p class="text-xs text-foreground-faint">No parameters defined (factory_params_schema is empty)</p>
+															{/if}
+														</div>
+													{/if}
 												</div>
 												</li>
 										{/each}
@@ -857,10 +909,7 @@
 									onToggle={() => {
 										workerLogsExpanded = { ...workerLogsExpanded, [worker.id]: !workerLogsExpanded[worker.id] };
 									}}
-									onClear={() => {
-										workerLogs.delete(worker.id);
-										workerLogs = workerLogs;
-									}}
+									onClear={() => clearLogs(worker.id)}
 								/>
 							</div>
 
@@ -873,4 +922,5 @@
 			{/each}
 		</div>
 	{/if}
+
 </div>

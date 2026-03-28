@@ -20,6 +20,8 @@
 	export let activeEdgeIds: Set<string> = new Set();
 	export let selectedTokenId: string | null = null;
 	export let onTokenSelect: ((tokenId: string | null) => void) | null = null;
+	export let selectedTransitionId: string | null = null;
+	export let onTransitionSelect: ((transitionId: string | null) => void) | null = null;
 
 	let viewBox = '0 0 1000 800';
 	let scale = 1;
@@ -75,14 +77,21 @@
 	function handleSvgClick(event: MouseEvent) {
 		// Only clear selection if clicking directly on the SVG background
 		// (not on a token or other element)
-		if (event.target === svgElement && onTokenSelect) {
-			onTokenSelect(null);
+		if (event.target === svgElement) {
+			if (onTokenSelect) onTokenSelect(null);
+			if (onTransitionSelect) onTransitionSelect(null);
 		}
 	}
 
 	function handleTokenSelect(tokenId: string) {
 		if (onTokenSelect) {
 			onTokenSelect(tokenId);
+		}
+	}
+
+	function handleTransitionSelect(transitionId: string) {
+		if (onTransitionSelect) {
+			onTransitionSelect(transitionId);
 		}
 	}
 
@@ -248,7 +257,7 @@
 			<!-- Transitions layer -->
 			<g class="transitions">
 				{#each graphState.transitions as transition (transition.id)}
-					<Transition {...transition} isFiring={transition.id === firingTransitionId} />
+					<Transition {...transition} isFiring={transition.id === firingTransitionId} isSelected={transition.id === selectedTransitionId} onSelect={handleTransitionSelect} />
 				{/each}
 			</g>
 		{/if}

@@ -3,6 +3,9 @@
 	import type { LogEntry } from '$lib/types';
 
 	export let entries: LogEntry[] = [];
+	export let isStepping: boolean = false;
+	export let stepError: string | null = null;
+	export let subprocessLines: string[] = [];
 
 	let logContainer: HTMLDivElement;
 	let autoScroll = true;
@@ -25,6 +28,27 @@
 </script>
 
 <div class="execution-log" bind:this={logContainer} on:scroll={checkScrollPosition}>
+	{#if stepError}
+		<div class="step-error">
+			<span class="error-label">Step Error</span>
+			<pre class="error-text">{stepError}</pre>
+		</div>
+	{/if}
+
+	{#if isStepping}
+		<div class="step-status">
+			<span class="spinner"></span>
+			<span>Executing transition...</span>
+		</div>
+		{#if subprocessLines.length > 0}
+			<div class="subprocess-output">
+				{#each subprocessLines as line}
+					<div class="output-line">{line}</div>
+				{/each}
+			</div>
+		{/if}
+	{/if}
+
 	{#each entries as entry (entry.timestamp)}
 		<div class="log-entry">
 			<span class="timestamp">{formatTimestamp(entry.timestamp)}</span>
@@ -36,7 +60,7 @@
 		</div>
 	{/each}
 
-	{#if entries.length === 0}
+	{#if entries.length === 0 && !isStepping && !stepError}
 		<div class="empty">No transitions executed yet</div>
 	{/if}
 </div>
@@ -80,5 +104,67 @@
 		padding: 2rem;
 		text-align: center;
 		color: var(--text-tertiary);
+	}
+
+	.step-status {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.5rem;
+		font-family: monospace;
+		font-size: 0.85em;
+		color: var(--text-secondary);
+		border-bottom: 1px solid var(--border-light);
+	}
+
+	.spinner {
+		display: inline-block;
+		width: 12px;
+		height: 12px;
+		border: 2px solid var(--text-tertiary);
+		border-top-color: var(--button-border);
+		border-radius: 50%;
+		animation: spin 0.8s linear infinite;
+	}
+
+	@keyframes spin {
+		to { transform: rotate(360deg); }
+	}
+
+	.subprocess-output {
+		padding: 0.25rem 0.5rem;
+		font-family: monospace;
+		font-size: 0.75em;
+		border-bottom: 1px solid var(--border-light);
+		max-height: 200px;
+		overflow-y: auto;
+		background: rgba(0, 0, 0, 0.15);
+	}
+
+	.output-line {
+		padding: 1px 0;
+		color: var(--text-tertiary);
+		white-space: pre-wrap;
+		word-break: break-all;
+	}
+
+	.step-error {
+		padding: 0.5rem;
+		border-bottom: 1px solid var(--border-light);
+		font-family: monospace;
+		font-size: 0.85em;
+	}
+
+	.error-label {
+		color: #ef4444;
+		font-weight: bold;
+	}
+
+	.error-text {
+		margin-top: 0.25rem;
+		color: #ef4444;
+		white-space: pre-wrap;
+		word-break: break-all;
+		font-size: 0.9em;
 	}
 </style>

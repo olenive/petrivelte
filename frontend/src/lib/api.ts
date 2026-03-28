@@ -268,7 +268,7 @@ export async function getExecutionState(netId: string): Promise<any> {
 	return res.json();
 }
 
-export async function executionStep(netId: string): Promise<{ fired: number; transition_name: string | null }> {
+export async function executionStep(netId: string): Promise<{ status: string }> {
 	const res = await post(`/api/nets/${netId}/execution/step`);
 	if (!res.ok) throw new Error('Failed to step');
 	return res.json();
@@ -307,7 +307,7 @@ export interface Worker {
 }
 
 export interface WorkerDetail extends Worker {
-	assigned_nets: Array<{ id: string; name: string; entry_module: string; entry_function: string; load_state: string }>;
+	assigned_nets: Array<{ id: string; name: string; entry_module: string; entry_function: string; load_state: string; factory_params_schema: NetParam[] | null }>;
 }
 
 export async function listWorkers(): Promise<Worker[]> {
