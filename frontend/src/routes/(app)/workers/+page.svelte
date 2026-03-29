@@ -4,7 +4,8 @@
 		listWorkers, createWorker, deleteWorker, provisionWorker, destroyWorkerResource,
 		startWorker, stopWorker, healthCheckWorker, getWorker,
 		listNets, createNet, patchNet, loadNet, unloadNet,
-		type Worker, type WorkerDetail, type Net, type NetParam,
+		listNetSecrets, setNetSecrets,
+		type Worker, type WorkerDetail, type Net, type NetParam, type SecretMetadata,
 	} from '$lib/api';
 	import AppNav from '$lib/components/AppNav.svelte';
 	import LogViewer from '$lib/components/LogViewer.svelte';
@@ -45,6 +46,13 @@
 	// Per-net inline parameter values and expanded state
 	let netParamValues = $state<Map<string, Record<string, string>>>(new Map());
 	let netParamsExpanded = $state<Record<string, boolean>>({});
+
+	// Secrets dialog state
+	let showSecretsDialog = $state(false);
+	let secretsNetId = $state<string | null>(null);
+	let secretEntries = $state<Array<{ key: string; value: string; isExisting: boolean }>>([]);
+	let secretsSaving = $state(false);
+	let secretsError = $state<string | null>(null);
 
 
 	function getNetParams(netId: string, workerId?: string): NetParam[] {
@@ -453,6 +461,55 @@
 		});
 	}
 
+	// -- Secrets dialog handlers --
+
+	async function handleOpenSecrets(netId: string) {
+		secretsNetId = netId;
+		secretsError = null;
+		try {
+			const existing = await listNetSecrets(netId);
+			secretEntries = existing.map(s => ({ key: s.key, value: '', isExisting: true }));
+			if (secretEntries.length === 0) {
+				secretEntries = [{ key: '', value: '', isExisting: false }];
+			}
+			showSecretsDialog = true;
+		} catch (e: any) {
+			console.error('Failed to load secrets:', e);
+		}
+	}
+
+	function addSecretRow() {
+		secretEntries = [...secretEntries, { key: '', value: '', isExisting: false }];
+	}
+
+	function removeSecretRow(index: number) {
+		secretEntries = secretEntries.filter((_, i) => i !== index);
+	}
+
+	async function handleSecretsSave() {
+		if (!secretsNetId) return;
+		secretsSaving = true;
+		secretsError = null;
+		try {
+			const toSave = secretEntries
+				.filter(e => e.key.trim() !== '')
+				.map(e => ({
+					key: e.key.trim(),
+					value: e.isExisting && e.value === '' ? null : e.value,
+				}));
+			await setNetSecrets(secretsNetId, toSave);
+			showSecretsDialog = false;
+		} catch (e: any) {
+			secretsError = e.message ?? 'Failed to save secrets';
+		} finally {
+			secretsSaving = false;
+		}
+	}
+
+	function handleSecretsCancel() {
+		showSecretsDialog = false;
+	}
+
 	function loadStateBadge(state: string): { label: string; color: string } {
 		switch (state) {
 			case 'loaded': return { label: 'Loaded', color: 'var(--status-ready)' };
@@ -802,6 +859,13 @@
 														</span>
 													{/if}
 													<button
+														class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-xs font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+														onclick={() => handleOpenSecrets(net.id)}
+														title="Manage environment secrets for this net"
+													>
+														Secrets
+													</button>
+													<button
 														class="px-2.5 py-1 border border-destructive rounded bg-transparent text-destructive text-xs font-medium cursor-pointer transition-all hover:bg-destructive-hover hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
 														onclick={() => handleUnassignNet(net.id)}
 														disabled={actionInProgress === net.id}
@@ -924,3 +988,52 @@
 	{/if}
 
 </div>
+
+{#if showSecretsDialog}
+	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+	<div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onkeydown={(e) => e.key === 'Escape' && handleSecretsCancel()} onclick={handleSecretsCancel}>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="bg-card border border-border rounded-lg shadow-lg p-6 min-w-[480px] max-w-[600px]" onclick={(e) => e.stopPropagation()}>
+			<h3 class="text-base font-semibold text-foreground mb-1">Environment Secrets</h3>
+			<p class="text-xs text-foreground-muted mb-4">Secrets are encrypted at rest and injected as environment variables when the net loads.</p>
+
+			{#if secretsError}
+				<div class="bg-error-bg text-error text-sm px-3 py-2 rounded mb-3">{secretsError}</div>
+			{/if}
+
+			<div class="flex flex-col gap-2 max-h-[400px] overflow-y-auto">
+				{#each secretEntries as entry, i}
+					<div class="flex items-center gap-2">
+						{#if entry.isExisting}
+							<span class="flex-1 min-w-[160px] px-3 py-2 border border-border rounded bg-surface/50 text-foreground text-sm opacity-70 select-none">{entry.key}</span>
+						{:else}
+							<input
+								type="text"
+								bind:value={entry.key}
+								placeholder="KEY_NAME"
+								class="flex-1 min-w-[160px] px-3 py-2 border border-border rounded bg-surface text-foreground text-sm focus:outline-none focus:border-accent font-mono"
+							/>
+						{/if}
+						<input
+							type="password"
+							bind:value={entry.value}
+							placeholder={entry.isExisting ? 'unchanged' : 'value'}
+							autocomplete="off"
+							class="flex-1 min-w-[160px] px-3 py-2 border border-border rounded bg-surface text-foreground text-sm focus:outline-none focus:border-accent"
+						/>
+						<button type="button" class="text-destructive hover:text-destructive/80 text-sm px-1" onclick={() => removeSecretRow(i)} title="Remove this secret">&times;</button>
+					</div>
+				{/each}
+			</div>
+
+			<button type="button" class="text-accent text-sm mt-2 hover:underline" onclick={addSecretRow}>+ Add secret</button>
+
+			<div class="flex justify-end gap-2 mt-4">
+				<button type="button" class="px-2.5 py-1.5 border border-accent rounded bg-card text-accent text-sm font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground" onclick={handleSecretsCancel}>Cancel</button>
+				<button type="button" class="px-2.5 py-1.5 border border-accent rounded bg-card text-accent text-sm font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed" onclick={handleSecretsSave} disabled={secretsSaving}>
+					{secretsSaving ? 'Saving...' : 'Save'}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}

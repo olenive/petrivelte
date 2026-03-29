@@ -53,6 +53,15 @@ async function patch(path: string, body: unknown): Promise<Response> {
 	});
 }
 
+async function put(path: string, body: unknown): Promise<Response> {
+	return fetch(`${API_URL}${path}`, {
+		method: 'PUT',
+		credentials: 'include',
+		headers: jsonHeaders,
+		body: JSON.stringify(body),
+	});
+}
+
 async function del(path: string): Promise<Response> {
 	return fetch(`${API_URL}${path}`, {
 		method: 'DELETE',
@@ -258,6 +267,36 @@ export async function loadNet(
 export async function unloadNet(netId: string): Promise<void> {
 	const res = await post(`/api/nets/${netId}/unload`);
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to unload net'));
+}
+
+// -- net secrets --
+
+export interface SecretMetadata {
+	key: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export async function listNetSecrets(netId: string): Promise<SecretMetadata[]> {
+	const res = await get(`/api/nets/${netId}/secrets`);
+	if (!res.ok) throw new Error('Failed to list secrets');
+	const data = await res.json();
+	return data.secrets;
+}
+
+export async function setNetSecrets(
+	netId: string,
+	secrets: Array<{ key: string; value: string | null }>,
+): Promise<SecretMetadata[]> {
+	const res = await put(`/api/nets/${netId}/secrets`, { secrets });
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to save secrets'));
+	const data = await res.json();
+	return data.secrets;
+}
+
+export async function deleteNetSecrets(netId: string): Promise<void> {
+	const res = await del(`/api/nets/${netId}/secrets`);
+	if (!res.ok) throw new Error('Failed to delete secrets');
 }
 
 // -- execution (proxied through control plane to worker) --

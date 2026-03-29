@@ -9,7 +9,8 @@
 		logout,
 		listNets, listWorkers, patchNet, loadNet, unloadNet,
 		getExecutionState, executionStep, executionStart, executionStop, executionReset,
-		type Net, type Worker, type NetParam,
+		listNetSecrets, setNetSecrets,
+		type Net, type Worker, type NetParam, type SecretMetadata,
 	} from '$lib/api';
 	import GraphPanel from '$lib/components/GraphPanel.svelte';
 	import ExecutionLog from '$lib/components/ExecutionLog.svelte';
@@ -64,6 +65,12 @@
 	let showParamsDialog = $state(false);
 	let paramsSchema = $state<NetParam[]>([]);
 	let paramValues = $state<Record<string, string>>({});
+
+	// Secrets dialog state
+	let showSecretsDialog = $state(false);
+	let secretEntries = $state<Array<{ key: string; value: string; isExisting: boolean }>>([]);
+	let secretsSaving = $state(false);
+	let secretsError = $state<string | null>(null);
 
 	function getRequiredParams(net: Net | undefined): NetParam[] {
 		if (!net?.factory_params_schema) return [];
@@ -640,6 +647,56 @@
 		showParamsDialog = false;
 	}
 
+	// -- Secrets dialog handlers --
+
+	async function handleOpenSecrets() {
+		if (!selectedNetId) return;
+		secretsError = null;
+		try {
+			const existing = await listNetSecrets(selectedNetId);
+			secretEntries = existing.map(s => ({ key: s.key, value: '', isExisting: true }));
+			if (secretEntries.length === 0) {
+				secretEntries = [{ key: '', value: '', isExisting: false }];
+			}
+			showSecretsDialog = true;
+		} catch (e: any) {
+			console.error('Failed to load secrets:', e);
+		}
+	}
+
+	function addSecretRow() {
+		secretEntries = [...secretEntries, { key: '', value: '', isExisting: false }];
+	}
+
+	function removeSecretRow(index: number) {
+		secretEntries = secretEntries.filter((_, i) => i !== index);
+	}
+
+	async function handleSecretsSave() {
+		if (!selectedNetId) return;
+		secretsSaving = true;
+		secretsError = null;
+		try {
+			const toSave = secretEntries
+				.filter(e => e.key.trim() !== '')
+				.map(e => ({
+					key: e.key.trim(),
+					value: e.isExisting && e.value === '' ? null : e.value,
+				}));
+
+			await setNetSecrets(selectedNetId, toSave);
+			showSecretsDialog = false;
+		} catch (e: any) {
+			secretsError = e.message ?? 'Failed to save secrets';
+		} finally {
+			secretsSaving = false;
+		}
+	}
+
+	function handleSecretsCancel() {
+		showSecretsDialog = false;
+	}
+
 	async function handleUnloadNet() {
 		if (!selectedNetId) return;
 		// Pre-action check: refresh and verify state
@@ -853,6 +910,9 @@
 								style="background: {selectedNet()?.load_state === 'loaded' ? 'var(--status-ready)' : selectedNet()?.load_state === 'error' ? 'var(--status-error)' : 'var(--status-stopped)'}">
 								{selectedNet()?.load_state === 'loaded' ? 'Loaded' : selectedNet()?.load_state === 'error' ? 'Error' : 'Unloaded'}
 							</span>
+						{/if}
+						{#if selectedNetId}
+							<button class={btnSmall} onclick={handleOpenSecrets} title="Manage environment secrets for this net">Secrets</button>
 						{/if}
 					</div>
 				{/if}
@@ -1086,6 +1146,55 @@
 					<button type="submit" class={btnSmall}>Load</button>
 				</div>
 			</form>
+		</div>
+	</div>
+{/if}
+
+{#if showSecretsDialog}
+	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+	<div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onkeydown={(e) => e.key === 'Escape' && handleSecretsCancel()} onclick={handleSecretsCancel}>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="bg-card border border-border rounded-lg shadow-lg p-6 min-w-[480px] max-w-[600px]" onclick={(e) => e.stopPropagation()}>
+			<h3 class="text-base font-semibold text-foreground mb-1">Environment Secrets</h3>
+			<p class="text-xs text-foreground-muted mb-4">Secrets are encrypted at rest and injected as environment variables when the net loads.</p>
+
+			{#if secretsError}
+				<div class="bg-error-bg text-error text-sm px-3 py-2 rounded mb-3">{secretsError}</div>
+			{/if}
+
+			<div class="flex flex-col gap-2 max-h-[400px] overflow-y-auto">
+				{#each secretEntries as entry, i}
+					<div class="flex items-center gap-2">
+						{#if entry.isExisting}
+							<span class="flex-1 min-w-[160px] px-3 py-2 border border-border rounded bg-surface/50 text-foreground text-sm opacity-70 select-none">{entry.key}</span>
+						{:else}
+							<input
+								type="text"
+								bind:value={entry.key}
+								placeholder="KEY_NAME"
+								class="flex-1 min-w-[160px] px-3 py-2 border border-border rounded bg-surface text-foreground text-sm focus:outline-none focus:border-accent font-mono"
+							/>
+						{/if}
+						<input
+							type="password"
+							bind:value={entry.value}
+							placeholder={entry.isExisting ? 'unchanged' : 'value'}
+							autocomplete="off"
+							class="flex-1 min-w-[160px] px-3 py-2 border border-border rounded bg-surface text-foreground text-sm focus:outline-none focus:border-accent"
+						/>
+						<button type="button" class="text-destructive hover:text-destructive/80 text-sm px-1" onclick={() => removeSecretRow(i)} title="Remove this secret">&times;</button>
+					</div>
+				{/each}
+			</div>
+
+			<button type="button" class="text-accent text-sm mt-2 hover:underline" onclick={addSecretRow}>+ Add secret</button>
+
+			<div class="flex justify-end gap-2 mt-4">
+				<button type="button" class={btnSmall} onclick={handleSecretsCancel}>Cancel</button>
+				<button type="button" class={btnSmall} onclick={handleSecretsSave} disabled={secretsSaving}>
+					{secretsSaving ? 'Saving...' : 'Save'}
+				</button>
+			</div>
 		</div>
 	</div>
 {/if}
