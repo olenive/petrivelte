@@ -2,7 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { webSocketStore } from '$lib/stores/webSocket';
+	import { workerEventsStore, connectToWorker, disconnectWorkerEvents } from '$lib/stores/workerEvents';
 	import { selectedTokenId } from '$lib/stores/tokenSelection';
 	import { serverEventsStore } from '$lib/stores/serverEvents';
 	import {
@@ -250,17 +250,20 @@
 		graphState = null;
 		tokens = [];
 		selectedTransitionId = null;
+		// TODO: load logEntries from GET /api/nets/{netId}/execution/history once the endpoint exists
 
-		// Only connect WebSocket and fetch execution state if the net has a ready worker
+		// Only connect event stream and fetch execution state if the net has a ready worker
 		const net = availableNets.find(n => n.id === netId);
 		const worker = net?.worker_id ? workers.find(w => w.id === net.worker_id) : null;
 		if (!worker || worker.status !== 'ready') {
-			webSocketStore.disconnect();
+			disconnectWorkerEvents();
 			return;
 		}
 
-		// Connect WebSocket to this net
-		webSocketStore.connectToNet(netId);
+		// Connect unified event stream for this net's worker. The store
+		// dedupes by worker id so reselecting a net on the same worker
+		// does not drop the existing connection.
+		connectToWorker(worker.id);
 
 		// Fetch execution state
 		try {
@@ -334,12 +337,14 @@
 		while (isAutoStepping) {
 			try {
 				subprocessLines = [];
-				await executionStep(selectedNetId);
-
-				// Wait for WebSocket to tell us whether a transition fired
-				const fired = await new Promise<boolean>((resolve) => {
+				// Register the resolver BEFORE POSTing the step so that a
+				// transition_fired event arriving between POST response and
+				// this line isn't lost (would otherwise hang the loop).
+				const pending = new Promise<boolean>((resolve) => {
 					autoStepResolve = resolve;
 				});
+				await executionStep(selectedNetId);
+				const fired = await pending;
 				autoStepResolve = null;
 
 				if (!fired) {
@@ -750,55 +755,37 @@
 			await fetchNets();
 		})();
 
-		const unsubscribe = webSocketStore.subscribe((message) => {
-			if (!message) return;
+		const unsubscribe = workerEventsStore.subscribe((event) => {
+			if (!event) return;
 
 			// Mark connection as established
 			connectionStatus = 'Connected';
 
-			// Filter messages by selected net
-			if (message.graph_id !== selectedNetId) return;
+			// Only net-scoped events drive this view. Filter to the selected net.
+			if (event.scope !== 'net' || event.net_id !== selectedNetId) return;
 
-			if (message.type === 'graph_state') {
-				graphState = message.data;
+			const { kind, data } = event;
 
-				const tokensData: Array<{id: string, place_id: string, data: any}> = [];
-				if (graphState.places) {
-					for (const place of graphState.places) {
-						if (place.tokens && place.tokens.length > 0) {
-							for (const token of place.tokens) {
-								tokensData.push({
-									id: token.id,
-									place_id: place.id,
-									data: token.data
-								});
-							}
-						}
-					}
-				}
-				tokens = calculateTokenPositions(tokensData, graphState);
-			}
-
-			if (message.type === 'step_started') {
+			if (kind === 'step_started') {
 				isStepping = true;
 				// Don't clear stepError here — keep the previous error visible
 				// until this step either succeeds or produces a new error.
 				subprocessLines = [];
 			}
 
-			if (message.type === 'transition_fired') {
+			if (kind === 'transition_fired') {
 				isStepping = false;
 				stepError = null;
-				logEntries = [message.log_entry, ...logEntries];
+				logEntries = [data.log_entry, ...logEntries];
 
 				// Resolve auto-step promise: a transition fired
 				if (autoStepResolve) autoStepResolve(true);
 
 				if (!graphState) return;
 
-				const newTokens = calculateTokenPositions(message.new_token_positions, graphState);
+				const newTokens = calculateTokenPositions(data.new_token_positions, graphState);
 
-				const transition = graphState.transitions.find(t => t.name === message.transition_name);
+				const transition = graphState.transitions.find(t => t.name === data.transition_name);
 				if (!transition) {
 					tokens = newTokens;
 					return;
@@ -830,33 +817,33 @@
 				}
 			}
 
-			if (message.type === 'step_completed') {
+			if (kind === 'step_completed') {
 				isStepping = false;
 				stepError = null;
 				if (autoStepResolve) autoStepResolve(false);
 			}
 
-			if (message.type === 'step_error') {
+			if (kind === 'step_error') {
 				isStepping = false;
-				stepError = message.error;
+				stepError = data.error;
 				if (autoStepResolve) {
 					autoStepResolve(false);
 					autoStepResolve = null;
 				}
 			}
 
-			if (message.type === 'subprocess_output') {
-				subprocessLines = [...subprocessLines, message.text];
+			if (kind === 'subprocess_output') {
+				subprocessLines = [...subprocessLines, data.text];
 			}
 
-			if (message.type === 'execution_stopped') {
+			if (kind === 'execution_stopped') {
 				isRunning = false;
 			}
 		});
 
 		return () => {
 			unsubscribe();
-			webSocketStore.disconnect();
+			disconnectWorkerEvents();
 		};
 	});
 

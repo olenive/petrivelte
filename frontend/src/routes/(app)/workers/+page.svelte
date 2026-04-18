@@ -12,7 +12,7 @@
 	import { serverEventsStore } from '$lib/stores/serverEvents';
 	import {
 		workerLogsStore, setNets, seedFromNetErrors, loadHistory as loadLogHistory,
-		clearLogs,
+		clearLogs, connectRuntimeLogs,
 	} from '$lib/stores/workerLogs';
 	import { netDisplayName, netInstanceLabel, netFullLabel } from '$lib/netHelpers';
 
@@ -36,12 +36,28 @@
 	let workerLogsExpanded = $state<Record<string, boolean>>({});
 
 	// Subscribe to the shared log store
-	const unsubscribeLogs = workerLogsStore.subscribe(m => { workerLogs = m; });
+	const unsubscribeLogs = workerLogsStore.subscribe(m => {
+		workerLogs = m;
+	});
 
 
 	// Provisioning progress
 	const PROVISION_STEPS = ['provisioning', 'ready'] as const;
 	let provisionProgress = $state<Map<string, { step: number; total: number; label: string }>>(new Map());
+
+	// Net load phase tracking (from net_load_log SSE events)
+	let netLoadPhase = $state<Map<string, string>>(new Map());
+	let netLastEvent = $state<Map<string, number>>(new Map()); // net_id → timestamp ms
+	let netStale = $state<Set<string>>(new Set());
+	let staleCheckTimer: ReturnType<typeof setInterval> | null = null;
+	const STALE_THRESHOLD_MS = 30_000;
+
+	const STEP_LABELS: Record<string, string> = {
+		download: 'downloading code',
+		extract: 'extracting code',
+		dependencies: 'installing dependencies',
+		spawn: 'starting subprocess',
+	};
 
 	// Per-net inline parameter values and expanded state
 	let netParamValues = $state<Map<string, Record<string, string>>>(new Map());
@@ -218,6 +234,27 @@
 			}
 		}
 
+		if (event.type === 'net_load_log') {
+			netLoadPhase.set(event.net_id, event.step);
+			netLoadPhase = new Map(netLoadPhase);
+			netLastEvent.set(event.net_id, Date.now());
+			netLastEvent = new Map(netLastEvent);
+			netStale.delete(event.net_id);
+			netStale = new Set(netStale);
+		}
+
+		if (event.type === 'net_state_changed') {
+			// Clear phase tracking when loading finishes
+			if (event.load_state !== 'loading') {
+				netLoadPhase.delete(event.net_id);
+				netLoadPhase = new Map(netLoadPhase);
+				netLastEvent.delete(event.net_id);
+				netLastEvent = new Map(netLastEvent);
+				netStale.delete(event.net_id);
+				netStale = new Set(netStale);
+			}
+		}
+
 		if (event.type === 'worker_state_changed') {
 			const wid = event.worker_id;
 			// Update provisioning progress
@@ -290,7 +327,7 @@
 	}
 
 	async function handleCreate() {
-		if (!newWorkerName.trim()) return;
+		if (!newWorkerName.trim() || actionInProgress === 'create') return;
 		await withAction('create', async () => {
 			await createWorker({
 				name: newWorkerName.trim(),
@@ -428,10 +465,10 @@
 	}
 
 	async function handleLoadNet(netId: string, workerId?: string) {
-		if (!await checkNetForLoad(netId)) return;
-		const params = getNetParams(netId, workerId ?? undefined);
-		const factoryParams = buildFactoryParams(netId, params);
 		await withAction(netId, async () => {
+			if (!await checkNetForLoad(netId)) return;
+			const params = getNetParams(netId, workerId ?? undefined);
+			const factoryParams = buildFactoryParams(netId, params);
 			await loadNet(netId, factoryParams);
 			await refreshNets();
 		});
@@ -454,8 +491,8 @@
 	}
 
 	async function handleUnloadNet(netId: string) {
-		if (!await checkNetForUnload(netId)) return;
 		await withAction(netId, async () => {
+			if (!await checkNetForUnload(netId)) return;
 			await unloadNet(netId);
 			await refreshNets();
 		});
@@ -510,10 +547,15 @@
 		showSecretsDialog = false;
 	}
 
-	function loadStateBadge(state: string): { label: string; color: string } {
+	function loadStateBadge(state: string, netId?: string): { label: string; color: string } {
 		switch (state) {
 			case 'loaded': return { label: 'Loaded', color: 'var(--status-ready)' };
-			case 'loading': return { label: 'Loading...', color: 'var(--status-provisioning)' };
+			case 'loading': {
+				const step = netId ? netLoadPhase.get(netId) : undefined;
+				const phaseLabel = step ? STEP_LABELS[step] : undefined;
+				const label = phaseLabel ? `Loading... (${phaseLabel})` : 'Loading...';
+				return { label, color: 'var(--status-provisioning)' };
+			}
 			case 'error': return { label: 'Error', color: 'var(--status-error)' };
 			default: return { label: 'Unloaded', color: 'var(--status-stopped)' };
 		}
@@ -592,25 +634,69 @@
 		cancelEditNetName();
 	}
 
-	onMount(async () => {
-		await refreshAll();
-		// Load history for all active workers via the shared store
-		for (const w of workers) {
-			if (w.status === 'ready' || w.status === 'provisioning' || w.status === 'error') {
-				loadLogHistory(w.id);
+	// Cleanup fns for per-worker runtime SSE connections. Reconciled in an
+	// effect below whenever the workers list changes, so newly-provisioned
+	// workers pick up runtime logs without a page reload.
+	const runtimeDisconnects = new Map<string, () => void>();
+	let mounted = $state(false);
+
+	function isActiveStatus(status: string): boolean {
+		return status === 'ready' || status === 'provisioning' || status === 'error';
+	}
+
+	$effect(() => {
+		if (!mounted) return;
+		const activeIds = new Set(workers.filter(w => isActiveStatus(w.status)).map(w => w.id));
+		// Open missing connections
+		for (const id of activeIds) {
+			if (!runtimeDisconnects.has(id)) {
+				loadLogHistory(id);
+				runtimeDisconnects.set(id, connectRuntimeLogs(id));
 			}
 		}
+		// Close connections for workers that are gone or no longer active
+		for (const id of [...runtimeDisconnects.keys()]) {
+			if (!activeIds.has(id)) {
+				runtimeDisconnects.get(id)?.();
+				runtimeDisconnects.delete(id);
+			}
+		}
+	});
+
+	onMount(async () => {
+		await refreshAll();
 		seedFromNetErrors(nets);
 		startPolling();
+		mounted = true; // trigger the reconciliation effect
 		document.addEventListener('visibilitychange', handleVisibilityChange);
+
+		// Stall detection: check every 10s for loading nets with no recent events
+		staleCheckTimer = setInterval(() => {
+			const now = Date.now();
+			let changed = false;
+			for (const net of nets) {
+				if (net.load_state !== 'loading') continue;
+				const last = netLastEvent.get(net.id);
+				if (last && now - last > STALE_THRESHOLD_MS) {
+					if (!netStale.has(net.id)) {
+						netStale.add(net.id);
+						changed = true;
+					}
+				}
+			}
+			if (changed) netStale = new Set(netStale);
+		}, 10_000);
 	});
 
 	onDestroy(() => {
 		stopPolling();
 		unsubscribeSSE();
 		unsubscribeLogs();
+		for (const disconnect of runtimeDisconnects.values()) disconnect();
+		runtimeDisconnects.clear();
 		cancelAllDeleteCountdowns();
 		if (sseDebounceTimer) clearTimeout(sseDebounceTimer);
+		if (staleCheckTimer) clearInterval(staleCheckTimer);
 		if (typeof document !== 'undefined') {
 			document.removeEventListener('visibilitychange', handleVisibilityChange);
 		}
@@ -630,13 +716,22 @@
 
 	<!-- Create Worker Form -->
 	<div class="flex items-center gap-4 p-4 bg-card border border-border rounded-md mb-6 flex-wrap">
-		<input
-			type="text"
-			bind:value={newWorkerName}
-			placeholder="Worker name"
-			onkeydown={(e) => e.key === 'Enter' && handleCreate()}
-			class="flex-1 min-w-[150px] px-3 py-2 border border-border rounded bg-surface text-foreground text-sm"
-		/>
+		<div class="relative flex-1 min-w-[150px]">
+			<input
+				type="text"
+				bind:value={newWorkerName}
+				placeholder="Worker name"
+				aria-required="true"
+				aria-label="Worker name (required)"
+				onkeydown={(e) => e.key === 'Enter' && handleCreate()}
+				class="w-full px-3 py-2 pr-6 border border-border rounded bg-surface text-foreground text-sm"
+			/>
+			<span
+				class="absolute right-2.5 top-1/2 -translate-y-1/2 text-red-400 text-base leading-none pointer-events-none select-none"
+				title="Required"
+				aria-hidden="true"
+			>*</span>
+		</div>
 		<div class="flex gap-3">
 			<label class="flex items-center gap-1 text-sm text-foreground cursor-pointer">
 				<input type="radio" name="worker-category" bind:group={newWorkerCategory} value="ephemeral" />
@@ -674,15 +769,18 @@
 				</select>
 			</label>
 		</div>
-		<span class="inline-block" title={!newWorkerName.trim() ? 'Enter a worker name first' : ''}>
-			<button
-				class="px-5 py-2 border border-accent rounded bg-accent text-accent-foreground font-medium cursor-pointer transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
-				onclick={handleCreate}
-				disabled={!newWorkerName.trim() || actionInProgress === 'create'}
-			>
-				{actionInProgress === 'create' ? 'Creating...' : 'Create Worker'}
-			</button>
-		</span>
+		<button
+			class="px-5 py-2 border border-accent rounded bg-accent text-accent-foreground font-medium cursor-pointer transition-opacity hover:opacity-90 aria-disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:hover:opacity-50"
+			onclick={handleCreate}
+			aria-disabled={!newWorkerName.trim() || actionInProgress === 'create'}
+			title={!newWorkerName.trim()
+				? 'Enter a worker name first'
+				: actionInProgress === 'create'
+					? 'Creating worker…'
+					: ''}
+		>
+			{actionInProgress === 'create' ? 'Creating...' : 'Create Worker'}
+		</button>
 	</div>
 
 	<!-- Worker List -->
@@ -810,7 +908,7 @@
 								{:else}
 									<ul class="list-none m-0 p-0 mb-3">
 										{#each netsForWorker(worker.id) as net (net.id)}
-											{@const badge = loadStateBadge(net.load_state)}
+											{@const badge = loadStateBadge(net.load_state, net.id)}
 											{@const params = getNetParams(net.id, worker.id)}
 											{@const hasParams = params.length > 0}
 											<li class="py-1.5 border-b border-border-light last:border-b-0">
@@ -874,6 +972,13 @@
 													</button>
 												</div>
 												</div>
+												{#if net.load_state === 'error' && net.load_error}
+													<p class="text-red-500 text-xs mt-1">{net.load_error}</p>
+												{/if}
+												{#if net.load_state === 'loading' && netStale.has(net.id)}
+													{@const elapsed = Math.round((Date.now() - (netLastEvent.get(net.id) ?? Date.now())) / 1000)}
+													<p class="text-yellow-500 text-xs mt-1">No updates for {elapsed}s...</p>
+												{/if}
 												<!-- Inline collapsible parameters -->
 												<div class="mt-1.5">
 													<button

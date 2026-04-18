@@ -1,24 +1,35 @@
 <script lang="ts">
-	import { afterUpdate } from 'svelte';
+	import { tick } from 'svelte';
 	import type { LogEntry } from '$lib/types';
 
-	export let entries: LogEntry[] = [];
-	export let isStepping: boolean = false;
-	export let stepError: string | null = null;
-	export let subprocessLines: string[] = [];
+	interface Props {
+		entries?: LogEntry[];
+		isStepping?: boolean;
+		stepError?: string | null;
+		subprocessLines?: string[];
+	}
 
-	let logContainer: HTMLDivElement;
-	let autoScroll = true;
+	let { entries = [], isStepping = false, stepError = null, subprocessLines = [] }: Props = $props();
+
+	let logContainer = $state<HTMLDivElement | null>(null);
+	let autoScroll = $state(true);
 
 	function checkScrollPosition() {
 		if (!logContainer) return;
 		const { scrollTop, scrollHeight, clientHeight } = logContainer;
-		autoScroll = scrollTop + clientHeight >= scrollHeight - 10;
+		autoScroll = scrollTop + clientHeight >= scrollHeight - 30;
 	}
 
-	afterUpdate(() => {
+	$effect(() => {
+		// Track reactive dependencies that indicate new content
+		entries.length;
+		subprocessLines.length;
+		isStepping;
+		stepError;
 		if (autoScroll && logContainer) {
-			logContainer.scrollTop = logContainer.scrollHeight;
+			tick().then(() => {
+				if (logContainer) logContainer.scrollTop = logContainer.scrollHeight;
+			});
 		}
 	});
 
@@ -27,13 +38,17 @@
 	}
 </script>
 
-<div class="execution-log" bind:this={logContainer} on:scroll={checkScrollPosition}>
-	{#if stepError}
-		<div class="step-error">
-			<span class="error-label">Step Error</span>
-			<pre class="error-text">{stepError}</pre>
+<div class="execution-log" bind:this={logContainer} onscroll={checkScrollPosition}>
+	{#each entries as entry (entry.timestamp)}
+		<div class="log-entry">
+			<span class="timestamp">{formatTimestamp(entry.timestamp)}</span>
+			<span class="transition">{entry.transition}</span>
+			<span class="duration">{entry.duration_ms}ms</span>
+			<div class="details">
+				{JSON.stringify(entry.inputs)} → {JSON.stringify(entry.outputs)}
+			</div>
 		</div>
-	{/if}
+	{/each}
 
 	{#if isStepping}
 		<div class="step-status">
@@ -49,16 +64,12 @@
 		{/if}
 	{/if}
 
-	{#each entries as entry (entry.timestamp)}
-		<div class="log-entry">
-			<span class="timestamp">{formatTimestamp(entry.timestamp)}</span>
-			<span class="transition">{entry.transition}</span>
-			<span class="duration">{entry.duration_ms}ms</span>
-			<div class="details">
-				{JSON.stringify(entry.inputs)} → {JSON.stringify(entry.outputs)}
-			</div>
+	{#if stepError}
+		<div class="step-error">
+			<span class="error-label">Step Error</span>
+			<pre class="error-text">{stepError}</pre>
 		</div>
-	{/each}
+	{/if}
 
 	{#if entries.length === 0 && !isStepping && !stepError}
 		<div class="empty">No transitions executed yet</div>
@@ -166,5 +177,7 @@
 		white-space: pre-wrap;
 		word-break: break-all;
 		font-size: 0.9em;
+		max-height: 200px;
+		overflow-y: auto;
 	}
 </style>

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import {
 		getGitHubStatus,
 		getGitHubConnectUrl,
@@ -9,6 +10,7 @@
 		triggerRepoBuild,
 		listDeployments,
 		createWorker,
+		SessionExpiredError,
 		type GitHubStatus,
 		type GitHubRepo,
 		type Deployment,
@@ -27,6 +29,7 @@
 	let actionInProgress = $state<string | null>(null);
 	let errorMessage = $state('');
 	let successMessage = $state('');
+	let buildErrors = $state<Map<string, string>>(new Map());
 
 	// Polling for build status
 	let pollingInterval: ReturnType<typeof setInterval> | null = null;
@@ -80,13 +83,25 @@
 	}
 
 	async function handleTriggerBuild(repoId: string, fullName: string) {
-		await withAction(`build-${repoId}`, async () => {
+		clearMessages();
+		buildErrors = new Map(buildErrors);
+		buildErrors.delete(repoId);
+		actionInProgress = `build-${repoId}`;
+		try {
 			const result = await triggerRepoBuild(repoId);
 			successMessage = `Build triggered for ${fullName} (commit ${result.commit})`;
 			await refreshData();
-			// Start polling for updates
 			startPolling();
-		});
+		} catch (e: any) {
+			if (e instanceof SessionExpiredError) {
+				goto('/login');
+				return;
+			}
+			buildErrors.set(repoId, e.message || 'Failed to trigger build');
+			buildErrors = new Map(buildErrors);
+		} finally {
+			actionInProgress = null;
+		}
 	}
 
 	async function handleCreateWorkerFromDeployment(deployment: Deployment) {
@@ -216,32 +231,37 @@
 			{:else}
 				<div class="flex flex-col gap-2">
 					{#each repos as repo (repo.id)}
-						<div class="flex items-center justify-between p-4 bg-card border border-border rounded-md">
-							<div class="flex items-center gap-3">
-								<span class="font-medium text-foreground">{repo.full_name}</span>
-								<span class="text-xs text-foreground-muted px-2 py-0.5 bg-muted rounded-sm">{repo.default_branch}</span>
-								{#if repo.webhook_active}
-									<span class="text-xs px-2 py-0.5 rounded-sm bg-success-bg text-success">Webhook active</span>
-								{:else}
-									<span class="text-xs px-2 py-0.5 rounded-sm bg-border text-foreground-faint">Manual builds</span>
-								{/if}
+						<div class="p-4 bg-card border border-border rounded-md">
+							<div class="flex items-center justify-between">
+								<div class="flex items-center gap-3">
+									<span class="font-medium text-foreground">{repo.full_name}</span>
+									<span class="text-xs text-foreground-muted px-2 py-0.5 bg-muted rounded-sm">{repo.default_branch}</span>
+									{#if repo.webhook_active}
+										<span class="text-xs px-2 py-0.5 rounded-sm bg-success-bg text-success">Webhook active</span>
+									{:else}
+										<span class="text-xs px-2 py-0.5 rounded-sm bg-border text-foreground-faint">Manual builds</span>
+									{/if}
+								</div>
+								<div class="flex items-center gap-2">
+									<button
+										class="px-3.5 py-1.5 border border-accent rounded bg-card text-accent text-sm font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+										onclick={() => handleTriggerBuild(repo.id, repo.full_name)}
+										disabled={actionInProgress === `build-${repo.id}`}
+									>
+										{actionInProgress === `build-${repo.id}` ? 'Triggering...' : 'Build'}
+									</button>
+									<button
+										class="px-3.5 py-1.5 border border-destructive rounded bg-transparent text-destructive text-sm font-medium cursor-pointer transition-all hover:bg-destructive-hover hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
+										onclick={() => handleDisconnectRepo(repo.id, repo.full_name)}
+										disabled={actionInProgress === repo.id}
+									>
+										Disconnect
+									</button>
+								</div>
 							</div>
-							<div class="flex items-center gap-2">
-								<button
-									class="px-3.5 py-1.5 border border-accent rounded bg-card text-accent text-sm font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
-									onclick={() => handleTriggerBuild(repo.id, repo.full_name)}
-									disabled={actionInProgress === `build-${repo.id}`}
-								>
-									{actionInProgress === `build-${repo.id}` ? 'Triggering...' : 'Build'}
-								</button>
-								<button
-									class="px-3.5 py-1.5 border border-destructive rounded bg-transparent text-destructive text-sm font-medium cursor-pointer transition-all hover:bg-destructive-hover hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
-									onclick={() => handleDisconnectRepo(repo.id, repo.full_name)}
-									disabled={actionInProgress === repo.id}
-								>
-									Disconnect
-								</button>
-							</div>
+							{#if buildErrors.get(repo.id)}
+								<p class="text-red-500 text-sm mt-2">{buildErrors.get(repo.id)}</p>
+							{/if}
 						</div>
 					{/each}
 				</div>

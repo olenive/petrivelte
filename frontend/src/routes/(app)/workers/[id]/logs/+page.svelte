@@ -4,7 +4,7 @@
 	import { getWorker, listNets, type WorkerDetail, type Net } from '$lib/api';
 	import AppNav from '$lib/components/AppNav.svelte';
 	import {
-		workerLogsStore, setNets, loadHistory, clearLogs,
+		workerLogsStore, setNets, loadHistory, clearLogs, connectRuntimeLogs,
 	} from '$lib/stores/workerLogs';
 
 	let workerId = $derived($page.params.id as string);
@@ -17,7 +17,9 @@
 	let errorMessage = $state('');
 
 	// Subscribe to the shared log store
-	const unsubscribeLogs = workerLogsStore.subscribe(m => { allLogs = m; });
+	const unsubscribeLogs = workerLogsStore.subscribe(m => {
+		allLogs = m;
+	});
 
 	function handleScroll() {
 		if (!scrollContainer) return;
@@ -54,13 +56,18 @@
 		}
 	}
 
+	let disconnectRuntime: (() => void) | null = null;
+
 	onMount(async () => {
 		await refreshWorker();
 		await loadHistory(workerId);
+		// Connect to runtime log SSE for subprocess output
+		disconnectRuntime = connectRuntimeLogs(workerId);
 	});
 
 	onDestroy(() => {
 		unsubscribeLogs();
+		disconnectRuntime?.();
 	});
 </script>
 
@@ -97,7 +104,8 @@
 				bind:this={scrollContainer}
 				onscroll={handleScroll}
 				class="flex-1 bg-[#1a1a2e] text-[#c8c8d0] p-4 text-xs font-mono overflow-y-auto whitespace-pre-wrap break-words m-0"
-			>{logLines.join('\n')}</pre>
+			>{#each logLines as line}<span class={/\berror\b/i.test(line) ? 'text-red-400' : ''}>{line}
+</span>{/each}</pre>
 		{/if}
 	</div>
 

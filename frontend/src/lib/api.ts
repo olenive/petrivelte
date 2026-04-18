@@ -13,6 +13,13 @@ const jsonHeaders = { 'Content-Type': 'application/json' };
 
 // -- helpers --
 
+export class SessionExpiredError extends Error {
+	constructor(message = 'Session expired. Please log in again.') {
+		super(message);
+		this.name = 'SessionExpiredError';
+	}
+}
+
 /**
  * Extract a human-readable error message from an API error response.
  * Handles both simple string `detail` and Pydantic validation error arrays.
@@ -411,6 +418,12 @@ export async function getWorkerLogHistory(workerId: string): Promise<Array<Recor
 	return res.json();
 }
 
+export async function getEventsAfter(after: number): Promise<Array<Record<string, any>>> {
+	const res = await get(`/api/events/history?after=${after}`);
+	if (!res.ok) return [];
+	return res.json();
+}
+
 // -- GitHub --
 
 export interface GitHubStatus {
@@ -460,7 +473,10 @@ export async function disconnectGitHubRepo(repoId: string): Promise<void> {
 
 export async function triggerRepoBuild(repoId: string): Promise<{ deployment_id: string; commit: string }> {
 	const res = await post(`/api/github/repos/${repoId}/trigger`);
-	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to trigger build'));
+	if (!res.ok) {
+		if (res.status === 401) throw new SessionExpiredError();
+		throw new Error(extractErrorMessage(await res.json(), 'Failed to trigger build'));
+	}
 	return res.json();
 }
 

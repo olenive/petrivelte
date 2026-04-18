@@ -39,16 +39,6 @@ export interface GraphState {
 	edges: Edge[];
 }
 
-export interface TokenMovement {
-	id: string;
-	from_place: string;
-	to_place: string;
-	from_pos: { x: number; y: number };
-	to_pos: { x: number; y: number };
-	color: string;
-	data: any;
-}
-
 export interface LogEntry {
 	timestamp: number;
 	transition: string;
@@ -57,56 +47,3 @@ export interface LogEntry {
 	outputs: string[];
 }
 
-export interface TransitionFiredMessage {
-	type: 'transition_fired';
-	graph_id: string;
-	transition_name: string;
-	tokens_moved: TokenMovement[];
-	log_entry: LogEntry;
-	new_token_positions: Token[];
-}
-
-export interface GraphStateMessage {
-	type: 'graph_state';
-	graph_id: string;
-	data: GraphState;
-}
-
-export interface StepStartedMessage {
-	type: 'step_started';
-	graph_id: string;
-}
-
-export interface StepCompletedMessage {
-	type: 'step_completed';
-	graph_id: string;
-	fired: number;
-	message: string;
-}
-
-export interface StepErrorMessage {
-	type: 'step_error';
-	graph_id: string;
-	error: string;
-}
-
-export interface SubprocessOutputMessage {
-	type: 'subprocess_output';
-	graph_id: string;
-	text: string;
-}
-
-export interface ExecutionStoppedMessage {
-	type: 'execution_stopped';
-	graph_id: string;
-	reason: string;
-}
-
-export type WebSocketMessage =
-	| GraphStateMessage
-	| TransitionFiredMessage
-	| StepStartedMessage
-	| StepCompletedMessage
-	| StepErrorMessage
-	| SubprocessOutputMessage
-	| ExecutionStoppedMessage;

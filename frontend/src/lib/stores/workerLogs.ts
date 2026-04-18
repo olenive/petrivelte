@@ -11,7 +11,7 @@
  */
 
 import { writable, get } from 'svelte/store';
-import { getWorkerLogHistory, listNets, type Net } from '$lib/api';
+import { API_URL, getWorkerLogHistory, listNets, type Net } from '$lib/api';
 import { serverEventsStore, type ServerEvent } from '$lib/stores/serverEvents';
 
 // ---- internal state ----
@@ -50,15 +50,18 @@ function formatHistoryEvent(evt: Record<string, any>): string {
 		const detail = evt.status_detail ? ` (${evt.status_detail})` : '';
 		return `${ts}[worker] Status → ${evt.status}${detail}`;
 	}
+	if (evt.type === 'net_state_changed') {
+		const label = _nets.find(n => n.id === evt.net_id)?.name ?? evt.net_id;
+		return `${ts}[${label}] State → ${evt.load_state}`;
+	}
 	return `${ts}${evt.message ?? JSON.stringify(evt)}`;
 }
 
 function appendLine(workerId: string, line: string) {
 	_logs.update(m => {
 		const lines = m.get(workerId) || [];
-		lines.push(line);
-		m.set(workerId, lines);
-		return new Map(m); // new reference for reactivity
+		m.set(workerId, [...lines, line]);
+		return new Map(m);
 	});
 }
 
@@ -70,16 +73,20 @@ serverEventsStore.subscribe((event: ServerEvent | null) => {
 
 	if (event.type === 'net_load_log') {
 		const net = _nets.find(n => n.id === event.net_id);
-		if (net?.worker_id) {
-			appendLine(net.worker_id, `${formatTs(ts)}[${net.name}] ${event.message}`);
+		const workerId = event.worker_id ?? net?.worker_id;
+		const label = net?.name ?? event.net_id;
+		if (workerId) {
+			appendLine(workerId, `${formatTs(ts)}[${label}] ${event.message}`);
 		}
 		return;
 	}
 
 	if (event.type === 'net_state_changed') {
 		const net = _nets.find(n => n.id === event.net_id);
-		if (net?.worker_id) {
-			appendLine(net.worker_id, `${formatTs(ts)}[${net.name}] State → ${event.load_state}`);
+		const workerId = event.worker_id ?? net?.worker_id;
+		const label = net?.name ?? event.net_id;
+		if (workerId) {
+			appendLine(workerId, `${formatTs(ts)}[${label}] State → ${event.load_state}`);
 		}
 		return;
 	}
@@ -130,15 +137,21 @@ export async function loadHistory(workerId: string, force = false) {
 	try {
 		const history = await getWorkerLogHistory(workerId);
 		if (history.length > 0) {
-			const current = get(_logs);
-			const existing = current.get(workerId) || [];
-			// Only populate if we have no lines yet (avoid duplicating on re-fetch)
-			if (existing.length === 0) {
-				_logs.update(m => {
-					m.set(workerId, history.map(formatHistoryEvent));
-					return new Map(m);
-				});
-			}
+			const formatted = history.map(formatHistoryEvent);
+			_logs.update(m => {
+				const existing = m.get(workerId) || [];
+				if (existing.length === 0) {
+					m.set(workerId, formatted);
+				} else {
+					// Merge: prepend history lines not already present
+					const existingSet = new Set(existing);
+					const newLines = formatted.filter(l => !existingSet.has(l));
+					if (newLines.length > 0) {
+						m.set(workerId, [...newLines, ...existing]);
+					}
+				}
+				return new Map(m);
+			});
 		}
 	} catch {
 		// History endpoint may not be available — ignore
@@ -157,4 +170,89 @@ export function clearLogs(workerId: string) {
 		return new Map(m);
 	});
 	_historyLoaded.delete(workerId);
+}
+
+// ---- Runtime log SSE (worker subprocess output) ----
+
+interface RuntimeConnection {
+	source: EventSource;
+	lastSeq: number;
+}
+const _runtimeSources = new Map<string, RuntimeConnection>();
+
+function formatRuntimeLine(evt: Record<string, any>): string | null {
+	const ts = formatTs(evt.ts);
+	const data = evt.data ?? {};
+
+	if (evt.scope === 'worker' && evt.kind === 'log') {
+		const text = typeof data.text === 'string' ? data.text : '';
+		if (!text.trim()) return null;
+		return `${ts}[runtime] ${text}`;
+	}
+
+	if (evt.scope === 'net') {
+		const netName = _nets.find(n => n.id === evt.net_id)?.name ?? evt.net_id ?? '';
+		const label = netName ? `[${netName}] ` : '';
+		if (evt.kind === 'subprocess_output') {
+			const text = typeof data.text === 'string' ? data.text : '';
+			if (!text.trim()) return null;
+			return `${ts}${label}${text}`;
+		}
+		if (evt.kind === 'step_error') {
+			return `${ts}${label}step error: ${data.error ?? ''}`;
+		}
+		if (evt.kind === 'execution_stopped') {
+			return `${ts}${label}execution stopped: ${data.reason ?? ''}`;
+		}
+	}
+	return null;
+}
+
+/**
+ * Connect to the unified worker event SSE stream and append log-like events
+ * to the worker's log store. Returns a cleanup function.
+ *
+ * Tracks the last seq seen so that when EventSource auto-reconnects the
+ * server can skip events we've already received.
+ */
+export function connectRuntimeLogs(workerId: string): () => void {
+	// Avoid duplicate connections
+	const existing = _runtimeSources.get(workerId);
+	if (existing) existing.source.close();
+
+	const conn: RuntimeConnection = { source: null as unknown as EventSource, lastSeq: 0 };
+
+	const open = () => {
+		const url = `${API_URL}/api/workers/${workerId}/events?after=${conn.lastSeq}`;
+		const source = new EventSource(url, { withCredentials: true });
+		conn.source = source;
+		_runtimeSources.set(workerId, conn);
+
+		source.onmessage = (event) => {
+			try {
+				const parsed = JSON.parse(event.data) as Record<string, any>;
+				const seq = typeof parsed.seq === 'number' ? parsed.seq : 0;
+				// Worker restart resets seq; discard local tracker in that case.
+				if (seq <= conn.lastSeq) conn.lastSeq = 0;
+				conn.lastSeq = Math.max(conn.lastSeq, seq);
+				const line = formatRuntimeLine(parsed);
+				if (line) appendLine(workerId, line);
+			} catch {
+				// ignore malformed events
+			}
+		};
+
+		source.onerror = () => {
+			if (source.readyState === EventSource.CLOSED) {
+				_runtimeSources.delete(workerId);
+			}
+		};
+	};
+
+	open();
+
+	return () => {
+		conn.source?.close();
+		_runtimeSources.delete(workerId);
+	};
 }
