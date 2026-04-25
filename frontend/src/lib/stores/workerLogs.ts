@@ -242,6 +242,22 @@ export function connectRuntimeLogs(workerId: string): () => void {
 			}
 		};
 
+		// Server proxy couldn't reach the worker upstream. Surface it in the
+		// log and stop reconnecting — EventSource would otherwise retry the
+		// dead stream indefinitely.
+		source.addEventListener('worker_unavailable', (event: MessageEvent) => {
+			let reason = 'unreachable';
+			try {
+				const parsed = JSON.parse(event.data) as { reason?: string };
+				if (parsed.reason) reason = parsed.reason;
+			} catch {
+				// ignore malformed payload
+			}
+			appendLine(workerId, `${formatTs(new Date().toISOString())}[runtime] Worker unavailable (${reason}). Stream closed.`);
+			source.close();
+			_runtimeSources.delete(workerId);
+		});
+
 		source.onerror = () => {
 			if (source.readyState === EventSource.CLOSED) {
 				_runtimeSources.delete(workerId);

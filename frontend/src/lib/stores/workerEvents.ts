@@ -74,6 +74,29 @@ function connectSSE() {
 		}
 	};
 
+	// Server proxy emits this when it can't reach the worker upstream. Stop
+	// reconnecting — something explicit has to bring the worker back
+	// (refresh, manual restart, scheduled wake).
+	eventSource.addEventListener('worker_unavailable', (event: MessageEvent) => {
+		let reason = 'unreachable';
+		try {
+			const parsed = JSON.parse(event.data) as { worker_id?: string; reason?: string };
+			if (parsed.reason) reason = parsed.reason;
+		} catch {
+			// ignore malformed payload
+		}
+		set({
+			seq: lastSeq,
+			scope: 'worker',
+			net_id: null,
+			kind: 'worker_unavailable',
+			ts: new Date().toISOString(),
+			data: { reason },
+		});
+		cleanup();
+		currentWorkerId = null;
+	});
+
 	eventSource.onerror = () => {
 		if (eventSource?.readyState === EventSource.CLOSED) {
 			eventSource = null;

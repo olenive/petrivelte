@@ -26,6 +26,8 @@
 	let newWorkerCategory = $state<'ephemeral' | 'persistent'>('ephemeral');
 	let newWorkerMemory = $state(512);
 	let newWorkerCpus = $state(1);
+	let nameInputEl = $state<HTMLInputElement | null>(null);
+	let nameError = $state('');
 
 	// Loading/error state
 	let actionInProgress = $state<string | null>(null);
@@ -327,7 +329,13 @@
 	}
 
 	async function handleCreate() {
-		if (!newWorkerName.trim() || actionInProgress === 'create') return;
+		if (actionInProgress === 'create') return;
+		if (!newWorkerName.trim()) {
+			nameError = 'Please enter a worker name.';
+			nameInputEl?.focus();
+			return;
+		}
+		nameError = '';
 		await withAction('create', async () => {
 			await createWorker({
 				name: newWorkerName.trim(),
@@ -715,23 +723,19 @@
 	{/if}
 
 	<!-- Create Worker Form -->
-	<div class="flex items-center gap-4 p-4 bg-card border border-border rounded-md mb-6 flex-wrap">
-		<div class="relative flex-1 min-w-[150px]">
-			<input
-				type="text"
-				bind:value={newWorkerName}
-				placeholder="Worker name"
-				aria-required="true"
-				aria-label="Worker name (required)"
-				onkeydown={(e) => e.key === 'Enter' && handleCreate()}
-				class="w-full px-3 py-2 pr-6 border border-border rounded bg-surface text-foreground text-sm"
-			/>
-			<span
-				class="absolute right-2.5 top-1/2 -translate-y-1/2 text-red-400 text-base leading-none pointer-events-none select-none"
-				title="Required"
-				aria-hidden="true"
-			>*</span>
-		</div>
+	<div class="p-4 bg-card border border-border rounded-md mb-6">
+	<div class="flex items-center gap-4 flex-wrap">
+		<input
+			type="text"
+			bind:value={newWorkerName}
+			bind:this={nameInputEl}
+			placeholder="Worker name (required)"
+			aria-required="true"
+			aria-invalid={nameError ? 'true' : undefined}
+			oninput={() => { if (nameError) nameError = ''; }}
+			onkeydown={(e) => e.key === 'Enter' && handleCreate()}
+			class="flex-1 min-w-[150px] px-3 py-2 border rounded bg-surface text-foreground text-sm transition-colors {nameError ? 'border-red-500 ring-1 ring-red-500' : 'border-border'}"
+		/>
 		<div class="flex gap-3">
 			<label class="flex items-center gap-1 text-sm text-foreground cursor-pointer">
 				<input type="radio" name="worker-category" bind:group={newWorkerCategory} value="ephemeral" />
@@ -772,15 +776,15 @@
 		<button
 			class="px-5 py-2 border border-accent rounded bg-accent text-accent-foreground font-medium cursor-pointer transition-opacity hover:opacity-90 aria-disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:hover:opacity-50"
 			onclick={handleCreate}
-			aria-disabled={!newWorkerName.trim() || actionInProgress === 'create'}
-			title={!newWorkerName.trim()
-				? 'Enter a worker name first'
-				: actionInProgress === 'create'
-					? 'Creating worker…'
-					: ''}
+			aria-disabled={actionInProgress === 'create'}
+			title={actionInProgress === 'create' ? 'Creating worker…' : ''}
 		>
 			{actionInProgress === 'create' ? 'Creating...' : 'Create Worker'}
 		</button>
+	</div>
+	{#if nameError}
+		<p class="text-red-500 text-sm mt-2" role="alert">{nameError}</p>
+	{/if}
 	</div>
 
 	<!-- Worker List -->

@@ -53,6 +53,7 @@
 	let isRunning = $state(false);
 	let isAutoStepping = $state(false);
 	let isStepping = $state(false);
+	let isResetting = $state(false);
 	let stepError = $state<string | null>(null);
 	let subprocessLines = $state<string[]>([]);
 	let selectedTransitionId = $state<string | null>(null);
@@ -366,23 +367,17 @@
 	}
 
 	async function handleReset() {
-		if (!selectedNetId) return;
+		if (!selectedNetId || isResetting) return;
+		isResetting = true;
 		try {
 			await executionReset(selectedNetId);
-			// Clear execution log and animation state (tokens will be updated by WebSocket graph_state message)
-			logEntries = [];
-			animationQueue = [];
-			animationTimeouts.forEach(t => clearTimeout(t));
-			animationTimeouts = [];
-			animationStage = 'idle';
-			consumingTokens = [];
-			producingTokens = [];
-			transitionPosition = null;
-			firingTransitionId = null;
-			activeEdgeIds = new Set();
-			isAnimating = false;
+			// Tokens, log entries, and animation state are cleared by the
+			// `net_reset` event handler below. That path runs for every open
+			// tab/client, keeping them in sync.
 		} catch (error) {
 			console.error('Reset failed:', error);
+		} finally {
+			isResetting = false;
 		}
 	}
 
@@ -839,6 +834,37 @@
 			if (kind === 'execution_stopped') {
 				isRunning = false;
 			}
+
+			if (kind === 'net_reset') {
+				// Worker reset the net — rebuild tokens and drop any stale log
+				// entries / in-flight animations. This handler runs in every
+				// tab/client subscribed to the worker, not just the one that
+				// clicked Reset.
+				animationTimeouts.forEach(t => clearTimeout(t));
+				animationTimeouts = [];
+				animationQueue = [];
+				animationStage = 'idle';
+				consumingTokens = [];
+				producingTokens = [];
+				transitionPosition = null;
+				firingTransitionId = null;
+				activeEdgeIds = new Set();
+				isAnimating = false;
+				isStepping = false;
+				stepError = null;
+				subprocessLines = [];
+				logEntries = [];
+
+				const state = data as GraphState;
+				graphState = state;
+				const tokensData: Array<{id: string, place_id: string, data: any}> = [];
+				for (const place of state.places ?? []) {
+					for (const token of place.tokens ?? []) {
+						tokensData.push({ id: token.id, place_id: place.id, data: token.data });
+					}
+				}
+				tokens = calculateTokenPositions(tokensData, state);
+			}
 		});
 
 		return () => {
@@ -911,14 +937,14 @@
 				</div>
 
 				<div class="flex items-center gap-2">
-					<button class={btnDefault} onclick={handleStep} disabled={isRunning || isAutoStepping || isStepping || !selectedNetId} title="Fire a single transition manually.">Step</button>
-					<button class={isAutoStepping ? btnDanger : btnDefault} onclick={handleAutoStep} disabled={isRunning || !selectedNetId}
+					<button class={btnDefault} onclick={handleStep} disabled={isRunning || isAutoStepping || isStepping || isResetting || !selectedNetId} title="Fire a single transition manually.">Step</button>
+					<button class={isAutoStepping ? btnDanger : btnDefault} onclick={handleAutoStep} disabled={isRunning || isResetting || !selectedNetId}
 						title={isAutoStepping ? "Stop automatic stepping." : "Automatically fire transitions one at a time with animations."}
 					>{isAutoStepping ? 'Stop' : 'Auto Step'}</button>
-					<button class={isRunning ? btnDanger : btnDefault} onclick={handleActivateDeactivate} disabled={isAutoStepping || !selectedNetId}
+					<button class={isRunning ? btnDanger : btnDefault} onclick={handleActivateDeactivate} disabled={isAutoStepping || isResetting || !selectedNetId}
 						title={isRunning ? "Stop continuous execution." : "Start continuous execution."}
 					>{isRunning ? 'Deactivate' : 'Activate'}</button>
-					<button class={btnDefault} onclick={handleReset} disabled={isRunning || isAutoStepping || !selectedNetId} title="Reset the Petri net to its initial state.">Reset</button>
+					<button class={btnDefault} onclick={handleReset} disabled={isRunning || isAutoStepping || isResetting || !selectedNetId} title="Reset the Petri net to its initial state.">{isResetting ? 'Resetting…' : 'Reset'}</button>
 				</div>
 			{/if}
 		</div>
