@@ -13,11 +13,19 @@
 
 	let logContainer = $state<HTMLDivElement | null>(null);
 	let autoScroll = $state(true);
+	let subprocessContainer = $state<HTMLDivElement | null>(null);
+	let subprocessAutoScroll = $state(true);
 
 	function checkScrollPosition() {
 		if (!logContainer) return;
 		const { scrollTop, scrollHeight, clientHeight } = logContainer;
 		autoScroll = scrollTop + clientHeight >= scrollHeight - 30;
+	}
+
+	function checkSubprocessScrollPosition() {
+		if (!subprocessContainer) return;
+		const { scrollTop, scrollHeight, clientHeight } = subprocessContainer;
+		subprocessAutoScroll = scrollTop + clientHeight >= scrollHeight - 30;
 	}
 
 	$effect(() => {
@@ -29,6 +37,11 @@
 		if (autoScroll && logContainer) {
 			tick().then(() => {
 				if (logContainer) logContainer.scrollTop = logContainer.scrollHeight;
+			});
+		}
+		if (subprocessAutoScroll && subprocessContainer) {
+			tick().then(() => {
+				if (subprocessContainer) subprocessContainer.scrollTop = subprocessContainer.scrollHeight;
 			});
 		}
 	});
@@ -56,7 +69,7 @@
 			<span>Executing transition...</span>
 		</div>
 		{#if subprocessLines.length > 0}
-			<div class="subprocess-output">
+			<div class="subprocess-output" bind:this={subprocessContainer} onscroll={checkSubprocessScrollPosition}>
 				{#each subprocessLines as line}
 					<div class="output-line">{line}</div>
 				{/each}

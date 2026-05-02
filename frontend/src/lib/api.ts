@@ -215,6 +215,7 @@ export interface Net {
 	load_state: 'unloaded' | 'loaded' | 'loading' | 'error';
 	load_error: string | null;
 	factory_params_schema: NetParam[] | null;
+	step_wall_clock_timeout_seconds: number | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -249,7 +250,9 @@ export async function createNet(body: {
 
 export async function patchNet(
 	netId: string,
-	body: Partial<Pick<Net, 'name' | 'display_name' | 'entry_module' | 'entry_function' | 'worker_id'>>,
+	body: Partial<Pick<Net,
+		'name' | 'display_name' | 'entry_module' | 'entry_function' | 'worker_id' | 'step_wall_clock_timeout_seconds'
+	>>,
 ): Promise<Net> {
 	const res = await patch(`/api/nets/${netId}`, body);
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to update net'));

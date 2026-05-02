@@ -79,7 +79,8 @@
 					bind:this={scrollContainer}
 					onscroll={handleScroll}
 					class="bg-[#1a1a2e] text-[#c8c8d0] p-3 text-xs font-mono max-h-[250px] overflow-y-auto whitespace-pre-wrap break-words m-0 rounded-none"
-				>{lines.join('\n')}</pre>
+				>{#each lines as line}<span class={/\berror\b/i.test(line) ? 'text-red-400' : ''}>{line}
+</span>{/each}</pre>
 			{/if}
 		</div>
 	{/if}

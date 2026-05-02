@@ -73,6 +73,12 @@
 	let secretsSaving = $state(false);
 	let secretsError = $state<string | null>(null);
 
+	// Settings dialog state
+	let showSettingsDialog = $state(false);
+	let settingsTimeoutInput = $state('');  // empty string = unbounded
+	let settingsSaving = $state(false);
+	let settingsError = $state<string | null>(null);
+
 	function getRequiredParams(net: Net | undefined): NetParam[] {
 		if (!net?.factory_params_schema) return [];
 		return net.factory_params_schema;
@@ -697,6 +703,49 @@
 		showSecretsDialog = false;
 	}
 
+	// -- Settings dialog handlers --
+
+	function handleOpenSettings() {
+		if (!selectedNetId) return;
+		const net = selectedNet();
+		settingsTimeoutInput = net?.step_wall_clock_timeout_seconds == null
+			? ''
+			: String(net.step_wall_clock_timeout_seconds);
+		settingsError = null;
+		showSettingsDialog = true;
+	}
+
+	async function handleSettingsSave() {
+		if (!selectedNetId) return;
+		const trimmed = settingsTimeoutInput.trim();
+		let value: number | null;
+		if (trimmed === '') {
+			value = null;
+		} else {
+			const parsed = Number(trimmed);
+			if (!Number.isFinite(parsed) || parsed < 1 || !Number.isInteger(parsed)) {
+				settingsError = 'Timeout must be a positive whole number of seconds, or empty for unbounded.';
+				return;
+			}
+			value = parsed;
+		}
+		settingsSaving = true;
+		settingsError = null;
+		try {
+			const updated = await patchNet(selectedNetId, { step_wall_clock_timeout_seconds: value });
+			availableNets = availableNets.map(n => n.id === updated.id ? updated : n);
+			showSettingsDialog = false;
+		} catch (e: any) {
+			settingsError = e.message ?? 'Failed to save settings';
+		} finally {
+			settingsSaving = false;
+		}
+	}
+
+	function handleSettingsCancel() {
+		showSettingsDialog = false;
+	}
+
 	async function handleUnloadNet() {
 		if (!selectedNetId) return;
 		// Pre-action check: refresh and verify state
@@ -926,6 +975,7 @@
 						{/if}
 						{#if selectedNetId}
 							<button class={btnSmall} onclick={handleOpenSecrets} title="Manage environment secrets for this net">Secrets</button>
+							<button class={btnSmall} onclick={handleOpenSettings} title="Per-net settings (timeouts, etc.)">Settings</button>
 						{/if}
 					</div>
 				{/if}
@@ -1206,6 +1256,47 @@
 				<button type="button" class={btnSmall} onclick={handleSecretsCancel}>Cancel</button>
 				<button type="button" class={btnSmall} onclick={handleSecretsSave} disabled={secretsSaving}>
 					{secretsSaving ? 'Saving...' : 'Save'}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+{#if showSettingsDialog}
+	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+	<div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onkeydown={(e) => e.key === 'Escape' && handleSettingsCancel()} onclick={handleSettingsCancel}>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="bg-card border border-border rounded-lg shadow-lg p-6 min-w-[480px] max-w-[600px]" onclick={(e) => e.stopPropagation()}>
+			<h3 class="text-base font-semibold text-foreground mb-1">Net Settings</h3>
+			<p class="text-xs text-foreground-muted mb-4">Per-net configuration that applies whenever this net runs.</p>
+
+			{#if settingsError}
+				<div class="bg-error-bg text-error text-sm px-3 py-2 rounded mb-3">{settingsError}</div>
+			{/if}
+
+			<div class="flex flex-col gap-2">
+				<label class="text-sm text-foreground" for="step-timeout-input">Step wall-clock timeout (seconds)</label>
+				<input
+					id="step-timeout-input"
+					type="number"
+					min="1"
+					step="1"
+					bind:value={settingsTimeoutInput}
+					placeholder="empty = unbounded"
+					class="px-3 py-2 border border-border rounded bg-surface text-foreground text-sm focus:outline-none focus:border-accent"
+				/>
+				<p class="text-xs text-foreground-muted">
+					Maximum total time a single Step (one transition) may run before the worker kills it.
+					Leave empty for unbounded — recommended for monitoring nets and long CPU-heavy work.
+					The worker emits internal heartbeats so silent CPU work won't be killed by the inactivity check;
+					this knob is only for capping truly stuck work.
+				</p>
+			</div>
+
+			<div class="flex justify-end gap-2 mt-4">
+				<button type="button" class={btnSmall} onclick={handleSettingsCancel}>Cancel</button>
+				<button type="button" class={btnSmall} onclick={handleSettingsSave} disabled={settingsSaving}>
+					{settingsSaving ? 'Saving...' : 'Save'}
 				</button>
 			</div>
 		</div>
