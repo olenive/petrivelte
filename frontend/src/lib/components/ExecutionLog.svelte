@@ -68,13 +68,14 @@
 			<span class="spinner"></span>
 			<span>Executing transition...</span>
 		</div>
-		{#if subprocessLines.length > 0}
-			<div class="subprocess-output" bind:this={subprocessContainer} onscroll={checkSubprocessScrollPosition}>
-				{#each subprocessLines as line}
-					<div class="output-line">{line}</div>
-				{/each}
-			</div>
-		{/if}
+	{/if}
+
+	{#if subprocessLines.length > 0}
+		<div class="subprocess-output" bind:this={subprocessContainer} onscroll={checkSubprocessScrollPosition}>
+			{#each subprocessLines as line}
+				<div class="output-line">{line}</div>
+			{/each}
+		</div>
 	{/if}
 
 	{#if stepError}

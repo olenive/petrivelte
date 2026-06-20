@@ -13,6 +13,7 @@
 import { writable, get } from 'svelte/store';
 import { API_URL, getWorkerLogHistory, listNets, type Net } from '$lib/api';
 import { serverEventsStore, type ServerEvent } from '$lib/stores/serverEvents';
+import { setWorkerMemory, type WorkerMemorySnapshot } from '$lib/stores/workerMemory';
 
 // ---- internal state ----
 
@@ -40,7 +41,7 @@ function formatTs(ts?: string): string {
 function formatHistoryEvent(evt: Record<string, any>): string {
 	const ts = evt.ts ? formatTs(evt.ts) : '';
 	if (evt.type === 'net_load_log') {
-		const netName = _nets.find(n => n.id === evt.net_id)?.name ?? evt.net_id;
+		const netName = _nets.find(n => n.id === evt.net_id)?.instance_name ?? evt.net_id;
 		return `${ts}[${netName}] ${evt.message ?? ''}`;
 	}
 	if (evt.type === 'worker_provision_log') {
@@ -51,7 +52,7 @@ function formatHistoryEvent(evt: Record<string, any>): string {
 		return `${ts}[worker] Status → ${evt.status}${detail}`;
 	}
 	if (evt.type === 'net_state_changed') {
-		const label = _nets.find(n => n.id === evt.net_id)?.name ?? evt.net_id;
+		const label = _nets.find(n => n.id === evt.net_id)?.instance_name ?? evt.net_id;
 		return `${ts}[${label}] State → ${evt.load_state}`;
 	}
 	return `${ts}${evt.message ?? JSON.stringify(evt)}`;
@@ -74,7 +75,7 @@ serverEventsStore.subscribe((event: ServerEvent | null) => {
 	if (event.type === 'net_load_log') {
 		const net = _nets.find(n => n.id === event.net_id);
 		const workerId = event.worker_id ?? net?.worker_id;
-		const label = net?.name ?? event.net_id;
+		const label = net?.instance_name ?? event.net_id;
 		if (workerId) {
 			appendLine(workerId, `${formatTs(ts)}[${label}] ${event.message}`);
 		}
@@ -84,7 +85,7 @@ serverEventsStore.subscribe((event: ServerEvent | null) => {
 	if (event.type === 'net_state_changed') {
 		const net = _nets.find(n => n.id === event.net_id);
 		const workerId = event.worker_id ?? net?.worker_id;
-		const label = net?.name ?? event.net_id;
+		const label = net?.instance_name ?? event.net_id;
 		if (workerId) {
 			appendLine(workerId, `${formatTs(ts)}[${label}] State → ${event.load_state}`);
 		}
@@ -118,7 +119,7 @@ export function seedFromNetErrors(nets: Net[]) {
 	for (const net of nets) {
 		if (net.load_state === 'error' && net.load_error && net.worker_id) {
 			const lines = current.get(net.worker_id) || [];
-			const errorLine = `[${net.name}] Load error: ${net.load_error}`;
+			const errorLine = `[${net.instance_name}] Load error: ${net.load_error}`;
 			if (!lines.includes(errorLine)) {
 				appendLine(net.worker_id, errorLine);
 			}
@@ -175,10 +176,31 @@ export function clearLogs(workerId: string) {
 // ---- Runtime log SSE (worker subprocess output) ----
 
 interface RuntimeConnection {
-	source: EventSource;
+	source: EventSource | null;
 	lastSeq: number;
+	reconnectTimer: ReturnType<typeof setTimeout> | null;
+	reconnectDelay: number;
+	failuresSinceOpen: number; // consecutive failed attempts with no successful open
+	stopped: boolean; // set by the cleanup fn to halt all further reconnects
 }
 const _runtimeSources = new Map<string, RuntimeConnection>();
+
+// Auto-reconnect backoff. Without this the inline log panel silently goes
+// stale after any transient drop (a CP timeout, an autosuspend bounce) while
+// a freshly-opened tab looks live — a confusing UX.
+const _RUNTIME_RECONNECT_BASE_MS = 1000;
+const _RUNTIME_RECONNECT_MAX_MS = 30000;
+// 'worker_unavailable' means the proxy can't reach the worker (e.g. it
+// autosuspended). It returns when something wakes it, so retry on a steady,
+// longer cadence rather than giving up permanently.
+const _RUNTIME_UNAVAILABLE_RETRY_MS = 15000;
+// Give up after this many consecutive attempts that never open the stream.
+// EventSource hides the HTTP status, so a persistent rejection (e.g. the
+// endpoint 400s because the worker isn't 'ready') looks like a normal drop —
+// without a cap we'd retry it forever and spam the console. The counter
+// resets on every successful open, so a flapping-but-reachable worker is
+// retried indefinitely; only a never-opening one is abandoned.
+const _RUNTIME_MAX_FAILURES = 6;
 
 function formatRuntimeLine(evt: Record<string, any>): string | null {
 	const ts = formatTs(evt.ts);
@@ -191,7 +213,7 @@ function formatRuntimeLine(evt: Record<string, any>): string | null {
 	}
 
 	if (evt.scope === 'net') {
-		const netName = _nets.find(n => n.id === evt.net_id)?.name ?? evt.net_id ?? '';
+		const netName = _nets.find(n => n.id === evt.net_id)?.instance_name ?? evt.net_id ?? '';
 		const label = netName ? `[${netName}] ` : '';
 		if (evt.kind === 'subprocess_output') {
 			const text = typeof data.text === 'string' ? data.text : '';
@@ -216,17 +238,64 @@ function formatRuntimeLine(evt: Record<string, any>): string | null {
  * server can skip events we've already received.
  */
 export function connectRuntimeLogs(workerId: string): () => void {
-	// Avoid duplicate connections
+	// Replace any existing connection (and stop its reconnect loop) so we
+	// never leak two streams for one worker.
 	const existing = _runtimeSources.get(workerId);
-	if (existing) existing.source.close();
+	if (existing) {
+		existing.stopped = true;
+		if (existing.reconnectTimer) clearTimeout(existing.reconnectTimer);
+		existing.source?.close();
+	}
 
-	const conn: RuntimeConnection = { source: null as unknown as EventSource, lastSeq: 0 };
+	const conn: RuntimeConnection = {
+		source: null,
+		lastSeq: 0,
+		reconnectTimer: null,
+		reconnectDelay: _RUNTIME_RECONNECT_BASE_MS,
+		failuresSinceOpen: 0,
+		stopped: false,
+	};
+	_runtimeSources.set(workerId, conn);
+
+	const scheduleReconnect = (delay: number) => {
+		if (conn.stopped || conn.reconnectTimer) return;
+		conn.reconnectTimer = setTimeout(() => {
+			conn.reconnectTimer = null;
+			open();
+		}, delay);
+	};
+
+	// A failed attempt: count it, and either retry or give up if the stream
+	// has never opened despite repeated tries (likely a persistent rejection
+	// such as the worker not being 'ready' — retrying just spams the console).
+	const failAndReconnect = (delay: number) => {
+		conn.source = null;
+		conn.failuresSinceOpen += 1;
+		if (conn.failuresSinceOpen > _RUNTIME_MAX_FAILURES) {
+			appendLine(
+				workerId,
+				`${formatTs(new Date().toISOString())}[runtime] Log stream unavailable after ` +
+					`${_RUNTIME_MAX_FAILURES} attempts — stopped. Reload to retry.`,
+			);
+			conn.stopped = true;
+			return;
+		}
+		scheduleReconnect(delay);
+	};
 
 	const open = () => {
+		if (conn.stopped) return;
 		const url = `${API_URL}/api/workers/${workerId}/events?after=${conn.lastSeq}`;
 		const source = new EventSource(url, { withCredentials: true });
 		conn.source = source;
-		_runtimeSources.set(workerId, conn);
+
+		source.onopen = () => {
+			// Healthy again — reset the backoff and the give-up counter so the
+			// next drop retries fast and a flapping-but-reachable worker is
+			// never abandoned.
+			conn.reconnectDelay = _RUNTIME_RECONNECT_BASE_MS;
+			conn.failuresSinceOpen = 0;
+		};
 
 		source.onmessage = (event) => {
 			try {
@@ -235,6 +304,12 @@ export function connectRuntimeLogs(workerId: string): () => void {
 				// Worker restart resets seq; discard local tracker in that case.
 				if (seq <= conn.lastSeq) conn.lastSeq = 0;
 				conn.lastSeq = Math.max(conn.lastSeq, seq);
+				// Worker-scoped memory_stats events feed the memory gauge —
+				// they aren't log lines, so they bypass formatRuntimeLine.
+				if (parsed.scope === 'worker' && parsed.kind === 'memory_stats' && parsed.data) {
+					setWorkerMemory(workerId, parsed.data as WorkerMemorySnapshot);
+					return;
+				}
 				const line = formatRuntimeLine(parsed);
 				if (line) appendLine(workerId, line);
 			} catch {
@@ -242,9 +317,9 @@ export function connectRuntimeLogs(workerId: string): () => void {
 			}
 		};
 
-		// Server proxy couldn't reach the worker upstream. Surface it in the
-		// log and stop reconnecting — EventSource would otherwise retry the
-		// dead stream indefinitely.
+		// Proxy couldn't reach the worker upstream (often an autosuspend
+		// bounce). Note it, then retry on a steady cadence — the worker comes
+		// back when it's woken, and the panel should recover on its own.
 		source.addEventListener('worker_unavailable', (event: MessageEvent) => {
 			let reason = 'unreachable';
 			try {
@@ -253,14 +328,17 @@ export function connectRuntimeLogs(workerId: string): () => void {
 			} catch {
 				// ignore malformed payload
 			}
-			appendLine(workerId, `${formatTs(new Date().toISOString())}[runtime] Worker unavailable (${reason}). Stream closed.`);
+			appendLine(workerId, `${formatTs(new Date().toISOString())}[runtime] Worker unavailable (${reason}). Retrying…`);
 			source.close();
-			_runtimeSources.delete(workerId);
+			failAndReconnect(_RUNTIME_UNAVAILABLE_RETRY_MS);
 		});
 
 		source.onerror = () => {
+			// CLOSED → the browser gave up; reconnect with backoff ourselves.
+			// CONNECTING → the browser is already retrying; leave it alone.
 			if (source.readyState === EventSource.CLOSED) {
-				_runtimeSources.delete(workerId);
+				failAndReconnect(conn.reconnectDelay);
+				conn.reconnectDelay = Math.min(conn.reconnectDelay * 2, _RUNTIME_RECONNECT_MAX_MS);
 			}
 		};
 	};
@@ -268,6 +346,11 @@ export function connectRuntimeLogs(workerId: string): () => void {
 	open();
 
 	return () => {
+		conn.stopped = true;
+		if (conn.reconnectTimer) {
+			clearTimeout(conn.reconnectTimer);
+			conn.reconnectTimer = null;
+		}
 		conn.source?.close();
 		_runtimeSources.delete(workerId);
 	};

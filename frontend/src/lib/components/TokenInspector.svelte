@@ -1,7 +1,9 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import type { Token, Place } from '$lib/types';
+	import { getToken, type TokenView } from '$lib/api';
 
+	export let netId: string | null = null;
 	export let tokens: Token[] = [];
 	export let places: Place[] = [];
 	export let selectedTokenId: string | null = null;
@@ -9,6 +11,14 @@
 
 	// Tab index: 0 = "All Tokens", 1+ = individual places
 	let selectedTabIndex = 0;
+
+	// Full-view cache: only fetched on selection. Keyed by token id.
+	// Cleared whenever the token set changes so we don't show stale data
+	// for an id whose underlying token was consumed and replaced.
+	let fullView: TokenView | null = null;
+	let fullViewError: string | null = null;
+	let fullViewLoading = false;
+	let fullViewTokenId: string | null = null;
 
 	interface PlaceWithTokens {
 		place: Place;
@@ -19,6 +29,15 @@
 		place,
 		tokens: tokens.filter((t) => t.place_id === place.id)
 	})) as PlaceWithTokens[];
+
+	// Live token id set — invalidate full-view cache when the selected
+	// token disappears (consumed/produced) so we don't render stale JSON.
+	$: liveIds = new Set(tokens.map((t) => t.id));
+	$: if (fullViewTokenId && !liveIds.has(fullViewTokenId)) {
+		fullView = null;
+		fullViewError = null;
+		fullViewTokenId = null;
+	}
 
 	// When selectedTokenId changes externally, find the containing place and switch tab
 	$: if (selectedTokenId) {
@@ -37,12 +56,48 @@
 				}
 			});
 		}
+		void loadFullView(selectedTokenId);
+	} else {
+		fullView = null;
+		fullViewError = null;
+		fullViewTokenId = null;
+	}
+
+	async function loadFullView(tokenId: string) {
+		if (!netId) return;
+		if (fullViewTokenId === tokenId && (fullView || fullViewLoading)) return;
+		fullViewTokenId = tokenId;
+		fullView = null;
+		fullViewError = null;
+		fullViewLoading = true;
+		try {
+			const view = await getToken(netId, tokenId);
+			// Skip stale responses if the user moved on
+			if (fullViewTokenId === tokenId) {
+				fullView = view;
+			}
+		} catch (err) {
+			if (fullViewTokenId === tokenId) {
+				fullViewError = err instanceof Error ? err.message : String(err);
+			}
+		} finally {
+			if (fullViewTokenId === tokenId) {
+				fullViewLoading = false;
+			}
+		}
 	}
 
 	function handleTokenCardClick(tokenId: string) {
 		if (onTokenSelect) {
 			onTokenSelect(tokenId);
 		}
+	}
+
+	function formatFullView(view: TokenView): string {
+		if (view.kind === 'json') {
+			return JSON.stringify(view.value, null, 2);
+		}
+		return view.text;
 	}
 </script>
 
@@ -88,8 +143,24 @@
 									data-token-card-id={token.id}
 									on:click={() => handleTokenCardClick(token.id)}
 								>
-									<div class="token-id">{token.id}</div>
-									<pre>{JSON.stringify(token.data, null, 2)}</pre>
+									<div class="token-header">
+										<span class="token-id">{token.id}</span>
+										<span class="token-type">{token.type_name}</span>
+									</div>
+									{#if token.id === selectedTokenId}
+										{#if fullViewLoading}
+											<div class="muted">Loading…</div>
+										{:else if fullViewError}
+											<pre class="error">Failed to load full view: {fullViewError}</pre>
+											<pre>{token.preview}</pre>
+										{:else if fullView && fullView.id === token.id}
+											<pre>{formatFullView(fullView)}</pre>
+										{:else}
+											<pre>{token.preview}</pre>
+										{/if}
+									{:else}
+										<pre>{token.preview}</pre>
+									{/if}
 								</button>
 							{/each}
 						</div>
@@ -114,8 +185,24 @@
 						data-token-card-id={token.id}
 						on:click={() => handleTokenCardClick(token.id)}
 					>
-						<div class="token-id">{token.id}</div>
-						<pre>{JSON.stringify(token.data, null, 2)}</pre>
+						<div class="token-header">
+							<span class="token-id">{token.id}</span>
+							<span class="token-type">{token.type_name}</span>
+						</div>
+						{#if token.id === selectedTokenId}
+							{#if fullViewLoading}
+								<div class="muted">Loading…</div>
+							{:else if fullViewError}
+								<pre class="error">Failed to load full view: {fullViewError}</pre>
+								<pre>{token.preview}</pre>
+							{:else if fullView && fullView.id === token.id}
+								<pre>{formatFullView(fullView)}</pre>
+							{:else}
+								<pre>{token.preview}</pre>
+							{/if}
+						{:else}
+							<pre>{token.preview}</pre>
+						{/if}
 					</button>
 				{/each}
 			{:else}
@@ -221,11 +308,33 @@
 		box-shadow: 0 0 8px var(--token-selection-glow);
 	}
 
+	.token-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		gap: 0.5rem;
+		margin-bottom: 0.25rem;
+	}
+
 	.token-id {
 		font-weight: bold;
-		margin-bottom: 0.25rem;
 		font-size: 0.8em;
 		color: var(--button-border);
+	}
+
+	.token-type {
+		font-size: 0.75em;
+		color: var(--text-secondary);
+	}
+
+	.muted {
+		font-size: 0.8em;
+		color: var(--text-secondary);
+		padding: 0.25rem 0;
+	}
+
+	pre.error {
+		color: #ef4444;
 	}
 
 	pre {

@@ -5,18 +5,22 @@
 	import { workerEventsStore, connectToWorker, disconnectWorkerEvents } from '$lib/stores/workerEvents';
 	import { selectedTokenId } from '$lib/stores/tokenSelection';
 	import { serverEventsStore } from '$lib/stores/serverEvents';
+	import { workerMemoryStore, type WorkerMemorySnapshot } from '$lib/stores/workerMemory';
 	import {
 		logout,
 		listNets, listWorkers, patchNet, loadNet, unloadNet,
-		getExecutionState, executionStep, executionStart, executionStop, executionReset,
-		listNetSecrets, setNetSecrets,
+		getExecutionState, executionStep, executionStart, executionStop, executionReset, executionInject,
+		listNetSecrets, setNetSecrets, getNetLogHistory,
 		type Net, type Worker, type NetParam, type SecretMetadata,
 	} from '$lib/api';
 	import GraphPanel from '$lib/components/GraphPanel.svelte';
 	import ExecutionLog from '$lib/components/ExecutionLog.svelte';
+	import LogViewer from '$lib/components/LogViewer.svelte';
 	import TokenInspector from '$lib/components/TokenInspector.svelte';
 	import TransitionInspector from '$lib/components/TransitionInspector.svelte';
 	import AppNav from '$lib/components/AppNav.svelte';
+	import DataLoadState from '$lib/components/DataLoadState.svelte';
+	import { portal } from '$lib/actions/portal';
 	import type { GraphState, Token, LogEntry, Transition } from '$lib/types';
 	import { netFullLabel } from '$lib/netHelpers';
 
@@ -49,13 +53,39 @@
 
 	// Net selection and execution state
 	let availableNets = $state<Net[]>([]);
+	// Tracks the first-fetch outcome so the "No nets" empty state only
+	// appears after we actually know the answer.
+	let netsLoaded = $state(false);
+	let netsError = $state<string | null>(null);
 	let selectedNetId = $state<string | null>(null);
 	let isRunning = $state(false);
+	// True while an Activate/Deactivate request is in flight and we await the
+	// worker's authoritative reply. Drives the button spinner so the (now
+	// non-optimistic) toggle doesn't look unresponsive during the round-trip.
+	let isToggling = $state(false);
 	let isAutoStepping = $state(false);
 	let isStepping = $state(false);
 	let isResetting = $state(false);
 	let stepError = $state<string | null>(null);
+	// Human-in-the-loop token injection: drop a typed token into a place to
+	// drive an end-to-end test (e.g. synthetic traffic into the anomaly monitor).
+	let showInject = $state(false);
+	let injectPlaceName = $state('');
+	let injectTokenJson = $state('{}');
+	let isInjecting = $state(false);
+	let injectError = $state<string | null>(null);
+	let injectNotice = $state<string | null>(null);
+	// Reason the net's continuous execution stopped on an error (a raised
+	// transition). Cleared when the user next acts. A normal end-of-run
+	// ("no_enabled_transitions") is not shown here.
+	let executionStoppedReason = $state<string | null>(null);
 	let subprocessLines = $state<string[]>([]);
+	// Durable, net-wide subprocess log: seeded from the worker's rotating
+	// file (survives restarts) and appended live. Distinct from
+	// subprocessLines, which is the ephemeral current-step view that clears
+	// on every step.
+	let netLogLines = $state<string[]>([]);
+	let netLogExpanded = $state(false);
 	let selectedTransitionId = $state<string | null>(null);
 
 	// Worker state
@@ -72,6 +102,9 @@
 	let secretEntries = $state<Array<{ key: string; value: string; isExisting: boolean }>>([]);
 	let secretsSaving = $state(false);
 	let secretsError = $state<string | null>(null);
+	// In-flight flag — prevents rapid-fire clicks from queueing N copies of
+	// the same slow GET while a previous one is still pending.
+	let secretsLoading = $state(false);
 
 	// Settings dialog state
 	let showSettingsDialog = $state(false);
@@ -241,13 +274,31 @@
 		try {
 			// Only show nets assigned to a worker — templates (worker_id=null) can't be executed.
 			availableNets = await listNets({ assigned: true });
+			netsError = null;
 
-			// Auto-select first net if none selected
+			// Auto-select: honor a ?net=<id> deep link (e.g. from the "Open
+			// Petri net view" button on the Workers page), else first net.
 			if (availableNets.length > 0 && !selectedNetId) {
-				await selectNet(availableNets[0].id);
+				const wanted = $page.url.searchParams.get('net');
+				const target = wanted && availableNets.some(n => n.id === wanted)
+					? wanted
+					: availableNets[0].id;
+				await selectNet(target);
 			}
-		} catch (error) {
+		} catch (error: any) {
 			console.error('Failed to fetch nets:', error);
+			netsError = error?.message ?? String(error);
+		} finally {
+			netsLoaded = true;
+		}
+	}
+
+	function formatNetLogEntry(entry: { ts: string | null; text: string }): string {
+		if (!entry.ts) return entry.text;
+		try {
+			return `[${new Date(entry.ts).toISOString().slice(11, 19)}] ${entry.text}`;
+		} catch {
+			return entry.text;
 		}
 	}
 
@@ -256,6 +307,8 @@
 		isRunning = false;
 		graphState = null;
 		tokens = [];
+		netLogLines = [];
+		executionStoppedReason = null;
 		selectedTransitionId = null;
 		// TODO: load logEntries from GET /api/nets/{netId}/execution/history once the endpoint exists
 
@@ -272,12 +325,33 @@
 		// does not drop the existing connection.
 		connectToWorker(worker.id);
 
+		// Seed the durable net-log panel from the worker's rotating file so
+		// history survives subprocess/worker restarts. Guard against a slow
+		// response landing after the user switched nets.
+		getNetLogHistory(netId)
+			.then((entries) => {
+				if (selectedNetId !== netId) return;
+				netLogLines = entries.map(formatNetLogEntry);
+			})
+			.catch(() => {});
+
 		// Fetch execution state
+		await refreshGraphState(netId);
+	}
+
+	// Pull the worker's current graph state and recompute token positions. Used
+	// on net selection and after an inject, so the acting tab updates without
+	// waiting on the broadcast round-trip.
+	async function refreshGraphState(netId: string) {
 		try {
 			const stateData = await getExecutionState(netId);
+			if (selectedNetId !== netId) return;
 			graphState = stateData;
+			// Server-derived: adopt the worker's actual continuous-execution
+			// state rather than leaving the optimistic flag from a prior session.
+			isRunning = !!stateData?.running;
 
-			const tokensData: Array<{id: string, place_id: string, data: any}> = [];
+			const tokensData: TokenSummary[] = [];
 			if (graphState?.places) {
 				for (const place of graphState.places) {
 					if (place.tokens && place.tokens.length > 0) {
@@ -285,7 +359,9 @@
 							tokensData.push({
 								id: token.id,
 								place_id: place.id,
-								data: token.data
+								color: token.color,
+								preview: token.preview,
+								type_name: token.type_name,
 							});
 						}
 					}
@@ -300,6 +376,7 @@
 	async function handleStep() {
 		if (!selectedNetId) return;
 		stepError = null;
+		executionStoppedReason = null;
 		subprocessLines = [];
 		try {
 			await executionStep(selectedNetId);
@@ -308,17 +385,51 @@
 		}
 	}
 
+	// Pull the worker's authoritative running flag and adopt it. Returns the
+	// reconciled value, or null when the fetch failed / the user switched nets
+	// mid-flight — callers treat null as "leave the current value alone" so a
+	// transient worker blip doesn't flip the button to a wrong state.
+	async function refreshRunningState(netId: string): Promise<boolean | null> {
+		try {
+			const state = await getExecutionState(netId);
+			if (selectedNetId !== netId) return null;
+			// Only adopt an authoritative boolean. A worker that predates the
+			// `running` flag omits it — treat that as "no info" and leave the
+			// optimistic value untouched rather than wrongly forcing it off.
+			if (typeof state?.running !== 'boolean') return null;
+			isRunning = state.running;
+			return isRunning;
+		} catch {
+			return null;
+		}
+	}
+
 	async function handleActivateDeactivate() {
-		if (!selectedNetId) return;
+		if (!selectedNetId || isToggling) return;
+		const netId = selectedNetId;
+		// Don't optimistically flip isRunning: start/stop returns before the
+		// engine loop has necessarily settled, and a dropped event stream can't
+		// be relied on to correct a wrong guess. Reconcile from the worker
+		// instead; the spinner covers the round-trip.
+		const target = !isRunning;
+		isToggling = true;
 		try {
 			if (isRunning) {
-				await executionStop(selectedNetId);
+				await executionStop(netId);
 			} else {
-				await executionStart(selectedNetId);
+				executionStoppedReason = null;  // fresh run — drop any prior stop
+				await executionStart(netId);
 			}
-			isRunning = !isRunning;
+			// Optimistic flip first (keeps pre-`running`-flag workers correct),
+			// then let the authoritative state override it where available.
+			isRunning = target;
+			await refreshRunningState(netId);
 		} catch (error) {
 			console.error('Activate/Deactivate failed:', error);
+			// Best-effort reconcile so the button still reflects reality.
+			await refreshRunningState(netId);
+		} finally {
+			if (selectedNetId === netId) isToggling = false;
 		}
 	}
 
@@ -341,6 +452,14 @@
 		isAutoStepping = true;
 		console.log('AUTO STEP: Starting...');
 
+		// A single failed step is usually a transient backend blip (a 30s
+		// timeout under load, a flycast drop) — NOT a reason to abandon a
+		// long-running net. Tolerate consecutive failures with backoff and
+		// only give up after several in a row, mirroring the worker
+		// health-check hysteresis. A success resets the counter.
+		const MAX_CONSECUTIVE_STEP_FAILURES = 5;
+		let consecutiveFailures = 0;
+
 		while (isAutoStepping) {
 			try {
 				subprocessLines = [];
@@ -353,6 +472,8 @@
 				await executionStep(selectedNetId);
 				const fired = await pending;
 				autoStepResolve = null;
+				consecutiveFailures = 0;
+				stepError = null;
 
 				if (!fired) {
 					console.log('AUTO STEP: No more transitions can fire, stopping');
@@ -363,9 +484,24 @@
 				// Wait for animation to complete (600ms total)
 				await new Promise(resolve => setTimeout(resolve, 650));
 			} catch (error) {
-				console.error('AUTO STEP: Step failed:', error);
-				isAutoStepping = false;
-				break;
+				// Clean up the dangling resolver from this iteration.
+				autoStepResolve = null;
+				consecutiveFailures += 1;
+				console.warn(
+					`AUTO STEP: step failed (${consecutiveFailures}/${MAX_CONSECUTIVE_STEP_FAILURES}):`,
+					error,
+				);
+				if (consecutiveFailures >= MAX_CONSECUTIVE_STEP_FAILURES) {
+					console.error('AUTO STEP: too many consecutive failures, stopping');
+					stepError = `Repeat Step stopped after ${MAX_CONSECUTIVE_STEP_FAILURES} consecutive failures. The backend may be degraded — press Repeat Step to resume.`;
+					isAutoStepping = false;
+					break;
+				}
+				// Transient — surface a soft notice and back off before retrying
+				// (0.5s, 1s, 2s, 4s, capped at 5s), then keep stepping.
+				stepError = `Step failed (retrying ${consecutiveFailures}/${MAX_CONSECUTIVE_STEP_FAILURES})…`;
+				const backoffMs = Math.min(500 * 2 ** (consecutiveFailures - 1), 5000);
+				await new Promise(resolve => setTimeout(resolve, backoffMs));
 			}
 		}
 
@@ -387,6 +523,31 @@
 		}
 	}
 
+	async function handleInject() {
+		if (!selectedNetId || isInjecting || !injectPlaceName) return;
+		injectError = null;
+		injectNotice = null;
+		let token: unknown;
+		try {
+			token = JSON.parse(injectTokenJson);
+		} catch {
+			injectError = 'Token must be valid JSON.';
+			return;
+		}
+		isInjecting = true;
+		try {
+			await executionInject(selectedNetId, injectPlaceName, token);
+			injectNotice = `Injected into ${injectPlaceName}.`;
+			// New token positions arrive via the worker's graph_state broadcast;
+			// refresh now so the injecting tab updates immediately too.
+			await refreshGraphState(selectedNetId);
+		} catch (error) {
+			injectError = error instanceof Error ? error.message : 'Inject failed.';
+		} finally {
+			isInjecting = false;
+		}
+	}
+
 	async function handleNetSelect(event: Event) {
 		const target = event.target as HTMLSelectElement;
 		const netId = target.value;
@@ -401,19 +562,25 @@
 		}
 	}
 
-	function calculateTokenPositions(tokensData: Array<{id: string, place_id: string, data: any}>, state: GraphState): Token[] {
+	type TokenSummary = {
+		id: string;
+		place_id: string;
+		color: string;
+		preview: string;
+		type_name: string;
+	};
+
+	function calculateTokenPositions(tokensData: TokenSummary[], state: GraphState): Token[] {
 		if (!state.places) return [];
 
-		// Group tokens by place_id
-		const tokensByPlace = new Map<string, Array<{id: string, data: any}>>();
+		const tokensByPlace = new Map<string, TokenSummary[]>();
 		for (const token of tokensData) {
 			if (!tokensByPlace.has(token.place_id)) {
 				tokensByPlace.set(token.place_id, []);
 			}
-			tokensByPlace.get(token.place_id)!.push({id: token.id, data: token.data});
+			tokensByPlace.get(token.place_id)!.push(token);
 		}
 
-		// Calculate positions for each place's tokens
 		const positionedTokens: Token[] = [];
 		for (const [placeId, placeTokens] of tokensByPlace) {
 			const place = state.places.find(p => p.id === placeId);
@@ -432,30 +599,14 @@
 					place_id: placeId,
 					x: place.x + offsetX,
 					y: place.y + offsetY,
-					color: getTokenColor(token.data),
-					data: token.data
+					color: token.color,
+					preview: token.preview,
+					type_name: token.type_name,
 				});
 			});
 		}
 
 		return positionedTokens;
-	}
-
-	function getTokenColor(tokenData: any): string {
-		if (tokenData && tokenData.color) {
-			const colorMap: Record<string, string> = {
-				red: '#ef4444',
-				blue: '#3b82f6',
-				green: '#22c55e',
-				yellow: '#eab308',
-				purple: '#a855f7',
-				orange: '#f97316',
-				pink: '#ec4899',
-				gray: '#6b7280'
-			};
-			return colorMap[tokenData.color.toLowerCase()] || '#6b7280';
-		}
-		return '#6b7280'; // Gray default
 	}
 
 	function processAnimationQueue() {
@@ -571,6 +722,43 @@
 		return availableNets.find(n => n.id === selectedNetId);
 	}
 
+	// Subscribe to per-worker memory snapshots streamed over the same SSE
+	// connection that workerEventsStore opens — no extra connection.
+	let workerMemoryByWorker = $state<Map<string, WorkerMemorySnapshot>>(new Map());
+	const unsubscribeMemory = workerMemoryStore.subscribe(m => {
+		workerMemoryByWorker = m;
+	});
+
+	let selectedWorkerMemory = $derived.by(() => {
+		const w = selectedNetWorker();
+		return w ? workerMemoryByWorker.get(w.id) ?? null : null;
+	});
+
+	let memoryBarPercent = $derived.by(() => {
+		const snap = selectedWorkerMemory;
+		const w = selectedNetWorker();
+		if (!snap || !w) return 0;
+		const limit = snap.container_total_mb ?? w.memory_mb;
+		if (!limit) return 0;
+		const used = (snap.parent_rss_mb ?? 0) + snap.nets.reduce((s, n) => s + n.rss_mb, 0);
+		return Math.min(100, (used / limit) * 100);
+	});
+
+	let memoryBarText = $derived.by(() => {
+		const snap = selectedWorkerMemory;
+		const w = selectedNetWorker();
+		if (!snap || !w) return '';
+		const limit = Math.round(snap.container_total_mb ?? w.memory_mb);
+		const used = Math.round((snap.parent_rss_mb ?? 0) + snap.nets.reduce((s, n) => s + n.rss_mb, 0));
+		return `${used} / ${limit} MB`;
+	});
+
+	function memoryBarColor(percent: number): string {
+		if (percent >= 85) return '#ef4444';
+		if (percent >= 60) return '#eab308';
+		return '#22c55e';
+	}
+
 	function selectedNetWorker(): Worker | undefined {
 		const net = selectedNet();
 		if (!net?.worker_id) return undefined;
@@ -657,6 +845,8 @@
 
 	async function handleOpenSecrets() {
 		if (!selectedNetId) return;
+		if (secretsLoading) return;
+		secretsLoading = true;
 		secretsError = null;
 		try {
 			const existing = await listNetSecrets(selectedNetId);
@@ -667,6 +857,8 @@
 			showSecretsDialog = true;
 		} catch (e: any) {
 			console.error('Failed to load secrets:', e);
+		} finally {
+			secretsLoading = false;
 		}
 	}
 
@@ -768,17 +960,43 @@
 		}
 	}
 
+	// Periodic reconcile of isRunning against the worker. Makes the button
+	// self-heal even when the event stream drops the execution_stopped that
+	// would otherwise clear it (the wedged-"Deactivate" bug), and forces it
+	// off for a net that isn't loaded — an unloaded net can't be running.
+	let runningPollTimer: ReturnType<typeof setInterval> | null = null;
+	const RUNNING_POLL_MS = 5000;
+
+	function reconcileRunningPoll() {
+		const netId = selectedNetId;
+		// Only correct a *believed-running* state — that's the wedged
+		// "Deactivate" case. An idle/stopped net polls nothing, and live token
+		// updates already arrive via the event stream, so this stays cheap.
+		if (!netId || isToggling || !isRunning) return;
+		const net = availableNets.find(n => n.id === netId);
+		if (!net || net.load_state !== 'loaded') {
+			isRunning = false;  // an unloaded/errored net cannot be running
+			return;
+		}
+		const worker = net.worker_id ? workers.find(w => w.id === net.worker_id) : null;
+		if (!worker || worker.status !== 'ready') return;  // can't observe; retry later
+		refreshRunningState(netId);
+	}
+
 	// -- SSE listener: refresh nets/workers on state change events (debounced) --
 	let sseDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 	const unsubscribeSSE = serverEventsStore.subscribe((event) => {
 		if (!event) return;
+		// Pure log events carry no state — skip the REST refetch. Only
+		// state-change events warrant pulling fresh net/worker lists.
+		if (event.type === 'worker_provision_log' || event.type === 'net_load_log') return;
 		if (sseDebounceTimer) clearTimeout(sseDebounceTimer);
 		sseDebounceTimer = setTimeout(() => {
 			sseDebounceTimer = null;
 			listNets({ assigned: true }).then(n => availableNets = n).catch(() => {});
 			listWorkers().then(w => workers = w).catch(() => {});
-		}, 500);
+		}, 2000);
 	});
 
 	async function handleLogout() {
@@ -787,9 +1005,25 @@
 		goto('/login');
 	}
 
+	onDestroy(() => {
+		unsubscribeSSE();
+		unsubscribeMemory();
+		if (sseDebounceTimer) {
+			clearTimeout(sseDebounceTimer);
+			sseDebounceTimer = null;
+		}
+		if (runningPollTimer) {
+			clearInterval(runningPollTimer);
+			runningPollTimer = null;
+		}
+	});
+
 	onMount(() => {
 		// Load saved panel layout
 		loadPanelLayout();
+
+		// Self-healing reconcile of the Activate/Deactivate state.
+		runningPollTimer = setInterval(reconcileRunningPoll, RUNNING_POLL_MS);
 
 		// Load workers first — selectNet() (called from fetchNets) needs workers
 		// to determine if a net has a ready worker and set graphState.
@@ -878,10 +1112,26 @@
 
 			if (kind === 'subprocess_output') {
 				subprocessLines = [...subprocessLines, data.text];
+				// Also accumulate into the durable, net-wide panel (not cleared
+				// per step). ts comes from the event so it matches file replay.
+				netLogLines = [...netLogLines, formatNetLogEntry({ ts: event.ts, text: data.text })];
 			}
 
 			if (kind === 'execution_stopped') {
 				isRunning = false;
+				// Loud, legible stop: show error stops only. A normal end-of-run
+				// (no enabled transitions) is not an error, so don't alarm on it.
+				// Accept the legacy 'deadlock' sentinel too, so an old worker
+				// mid-deploy doesn't trip a spurious banner.
+				if (
+					data.reason &&
+					data.reason !== 'no_enabled_transitions' &&
+					data.reason !== 'deadlock'
+				) {
+					executionStoppedReason = data.error_type
+						? `${data.error_type}: ${data.message ?? ''}`.trim()
+						: String(data.reason);
+				}
 			}
 
 			if (kind === 'net_reset') {
@@ -901,15 +1151,43 @@
 				isAnimating = false;
 				isStepping = false;
 				stepError = null;
+				executionStoppedReason = null;
 				subprocessLines = [];
 				logEntries = [];
 
 				const state = data as GraphState;
 				graphState = state;
-				const tokensData: Array<{id: string, place_id: string, data: any}> = [];
+				const tokensData: TokenSummary[] = [];
 				for (const place of state.places ?? []) {
 					for (const token of place.tokens ?? []) {
-						tokensData.push({ id: token.id, place_id: place.id, data: token.data });
+						tokensData.push({
+							id: token.id,
+							place_id: place.id,
+							color: token.color,
+							preview: token.preview,
+							type_name: token.type_name,
+						});
+					}
+				}
+				tokens = calculateTokenPositions(tokensData, state);
+			}
+
+			if (kind === 'graph_state') {
+				// A non-reset state refresh (e.g. a token was injected). Rebuild
+				// tokens in every subscribed tab without disturbing logs or any
+				// in-flight step animation.
+				const state = data as GraphState;
+				graphState = state;
+				const tokensData: TokenSummary[] = [];
+				for (const place of state.places ?? []) {
+					for (const token of place.tokens ?? []) {
+						tokensData.push({
+							id: token.id,
+							place_id: place.id,
+							color: token.color,
+							preview: token.preview,
+							type_name: token.type_name,
+						});
 					}
 				}
 				tokens = calculateTokenPositions(tokensData, state);
@@ -974,29 +1252,102 @@
 							</span>
 						{/if}
 						{#if selectedNetId}
-							<button class={btnSmall} onclick={handleOpenSecrets} title="Manage environment secrets for this net">Secrets</button>
+							<button
+								class={btnSmall}
+								onclick={handleOpenSecrets}
+								disabled={secretsLoading}
+								title={secretsLoading ? 'Loading secrets…' : 'Manage environment secrets for this net'}
+							>{secretsLoading ? 'Loading…' : 'Secrets'}</button>
 							<button class={btnSmall} onclick={handleOpenSettings} title="Per-net settings (timeouts, etc.)">Settings</button>
 						{/if}
 					</div>
 				{/if}
 
 				<div class="flex items-center gap-2">
-					<span class="px-4 py-2 rounded text-sm font-medium {isRunning ? 'bg-status-info-bg text-status-info' : isAutoStepping ? 'bg-status-warning-bg text-status-warning' : isStepping ? 'bg-status-warning-bg text-status-warning' : 'bg-muted text-foreground-muted'}">
-						{isRunning ? 'Active' : isAutoStepping ? 'Auto Stepping' : isStepping ? 'Stepping...' : 'Idle'}
+					<span class="px-4 py-2 rounded text-sm font-medium {isToggling ? 'bg-status-warning-bg text-status-warning' : isRunning ? 'bg-status-info-bg text-status-info' : isAutoStepping ? 'bg-status-warning-bg text-status-warning' : isStepping ? 'bg-status-warning-bg text-status-warning' : 'bg-muted text-foreground-muted'}">
+						{isToggling ? 'Working…' : isRunning ? 'Active' : isAutoStepping ? 'Repeating' : isStepping ? 'Stepping...' : 'Idle'}
 					</span>
 				</div>
 
+				{#if selectedWorkerMemory}
+					<div
+						class="flex items-center gap-2 min-w-[180px]"
+						title="Worker memory: parent {Math.round(selectedWorkerMemory.parent_rss_mb ?? 0)} MB + nets {Math.round(selectedWorkerMemory.nets.reduce((s, n) => s + n.rss_mb, 0))} MB"
+					>
+						<span class="text-xs text-foreground-muted">Mem</span>
+						<div class="flex-1 h-2 bg-muted rounded overflow-hidden min-w-[80px]">
+							<div
+								class="h-full transition-all"
+								style="width: {memoryBarPercent}%; background: {memoryBarColor(memoryBarPercent)}"
+							></div>
+						</div>
+						<span class="text-xs text-foreground-muted whitespace-nowrap">{memoryBarText}</span>
+					</div>
+				{/if}
+
 				<div class="flex items-center gap-2">
-					<button class={btnDefault} onclick={handleStep} disabled={isRunning || isAutoStepping || isStepping || isResetting || !selectedNetId} title="Fire a single transition manually.">Step</button>
-					<button class={isAutoStepping ? btnDanger : btnDefault} onclick={handleAutoStep} disabled={isRunning || isResetting || !selectedNetId}
-						title={isAutoStepping ? "Stop automatic stepping." : "Automatically fire transitions one at a time with animations."}
-					>{isAutoStepping ? 'Stop' : 'Auto Step'}</button>
-					<button class={isRunning ? btnDanger : btnDefault} onclick={handleActivateDeactivate} disabled={isAutoStepping || isResetting || !selectedNetId}
-						title={isRunning ? "Stop continuous execution." : "Start continuous execution."}
-					>{isRunning ? 'Deactivate' : 'Activate'}</button>
-					<button class={btnDefault} onclick={handleReset} disabled={isRunning || isAutoStepping || isResetting || !selectedNetId} title="Reset the Petri net to its initial state.">{isResetting ? 'Resetting…' : 'Reset'}</button>
+					<button class={btnDefault} onclick={handleStep} disabled={isRunning || isAutoStepping || isStepping || isResetting || isToggling || !selectedNetId} title="Fire a single transition manually.">Step</button>
+					<button class={isAutoStepping ? btnDanger : btnDefault} onclick={handleAutoStep} disabled={isRunning || isResetting || isToggling || !selectedNetId}
+						title={isAutoStepping ? "Stop repeating steps." : "Repeatedly fires one transition at a time (with animation), like clicking Step over and over. Driven by this browser tab — closing or disconnecting it stops the run. To run the net independently of the browser, use Activate."}
+					>{isAutoStepping ? 'Stop' : 'Repeat Step'}</button>
+					<button class={isRunning ? btnDanger : btnDefault} onclick={handleActivateDeactivate} disabled={isAutoStepping || isResetting || isToggling || !selectedNetId}
+						title={isRunning ? "Stop continuous execution on the worker." : "Run continuously on the worker. Keeps running even if you close this window; reopen the net to observe it again."}
+					>{#if isToggling}<span class="inline-flex items-center gap-2"><span class="inline-block w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" aria-hidden="true"></span>{isRunning ? 'Deactivating…' : 'Activating…'}</span>{:else}{isRunning ? 'Deactivate' : 'Activate'}{/if}</button>
+					<button class={btnDefault} onclick={handleReset} disabled={isRunning || isAutoStepping || isResetting || isToggling || !selectedNetId} title="Reset the Petri net to its initial state.">{isResetting ? 'Resetting…' : 'Reset'}</button>
+					<button class={showInject ? btnDanger : btnDefault} onclick={() => (showInject = !showInject)} disabled={!selectedNetId}
+						title="Inject a typed token into a place — e.g. synthetic traffic to drive an end-to-end alert test.">{showInject ? 'Close Inject' : 'Inject…'}</button>
 				</div>
 			{/if}
+		</div>
+	{/if}
+
+	{#if showInject && selectedNetId}
+		<div class="flex flex-col gap-2 px-4 py-3 bg-card border-y border-border">
+			<div class="flex items-end gap-3 flex-wrap">
+				<label class="flex flex-col gap-1 text-xs text-foreground-muted">
+					Place
+					<select bind:value={injectPlaceName}
+						class="px-3 py-1.5 border border-border rounded bg-background text-foreground text-sm min-w-[180px]">
+						<option value="" disabled>Select a place…</option>
+						{#each graphState?.places ?? [] as place (place.id)}
+							<option value={place.name}>{place.name} · {place.type_name}</option>
+						{/each}
+					</select>
+				</label>
+				<label class="flex flex-col gap-1 text-xs text-foreground-muted flex-1 min-w-[240px]">
+					Token (JSON)
+					<input bind:value={injectTokenJson} spellcheck="false"
+						placeholder={'{"deviation": 1.2}'}
+						class="px-3 py-1.5 border border-border rounded bg-background text-foreground text-sm font-mono" />
+				</label>
+				<button class={btnDefault} onclick={handleInject}
+					disabled={isInjecting || !injectPlaceName || !selectedNetId}>{isInjecting ? 'Injecting…' : 'Inject'}</button>
+			</div>
+			<p class="text-xs text-foreground-faint">
+				The worker validates the token against the place's declared type. For the
+				anomaly monitor, inject <span class="font-mono">{'{"deviation": 1.2}'}</span>
+				into <span class="font-mono">SyntheticRequests</span>, then Activate to run the
+				chain through to the alert.
+			</p>
+			{#if injectError}
+				<p class="text-xs text-destructive">{injectError}</p>
+			{/if}
+			{#if injectNotice}
+				<p class="text-xs text-status-info">{injectNotice}</p>
+			{/if}
+		</div>
+	{/if}
+
+	{#if executionStoppedReason}
+		<div class="flex items-start gap-2 px-4 py-2 bg-destructive/10 border-y border-destructive/40 text-destructive text-sm">
+			<span class="font-medium shrink-0">Execution stopped:</span>
+			<span class="flex-1 break-words font-mono text-xs leading-relaxed">{executionStoppedReason}</span>
+			<span class="text-foreground-faint text-xs shrink-0">See Net Logs for the full traceback.</span>
+			<button
+				type="button"
+				class="text-destructive/70 hover:text-destructive text-xs cursor-pointer bg-transparent border-0 shrink-0"
+				onclick={() => (executionStoppedReason = null)}
+			>✕</button>
 		</div>
 	{/if}
 
@@ -1055,6 +1406,7 @@
 							{#if !tokenInspectorCollapsed}
 								<div class="flex-1 overflow-hidden flex flex-col">
 									<TokenInspector
+										netId={selectedNetId}
 										{tokens}
 										places={graphState.places}
 										selectedTokenId={$selectedTokenId}
@@ -1062,6 +1414,20 @@
 									/>
 								</div>
 							{/if}
+						</div>
+
+						<!-- Durable net log panel — seeded from the worker's
+						     rotating file, so output survives subprocess/worker
+						     restarts (unlike the per-step Execution Log view). -->
+						<div class="flex-none p-2 border-t border-border">
+							<LogViewer
+								lines={netLogLines}
+								expanded={netLogExpanded}
+								title="Net Logs"
+								fullPageUrl={selectedNetWorker() ? `/workers/${selectedNetWorker()!.id}/logs` : undefined}
+								onToggle={() => (netLogExpanded = !netLogExpanded)}
+								onClear={() => (netLogLines = [])}
+							/>
 						</div>
 					</div>
 
@@ -1139,7 +1505,18 @@
 		</main>
 	{:else}
 		<div class="flex-1 flex flex-col items-center justify-center p-8">
-			{#if availableNets.length > 0}
+			<DataLoadState
+				loading={!netsLoaded}
+				error={netsError}
+				isEmpty={availableNets.length === 0}
+				loadingMessage="Loading nets…"
+			>
+				{#snippet empty()}
+					<div class="text-center">
+						<h2 class="text-lg font-semibold text-foreground mb-2">No nets found</h2>
+						<p class="text-sm text-foreground-muted">Deploy your code to create nets. <a href="/deployments" class="text-accent hover:underline">Go to Deployments</a></p>
+					</div>
+				{/snippet}
 				<div class="text-center">
 					<h2 class="text-lg font-semibold text-foreground mb-2">Select a net</h2>
 					<p class="text-sm text-foreground-muted mb-4">Choose a net and ensure its worker is ready to view the graph.</p>
@@ -1163,21 +1540,16 @@
 						{/if}
 					{/if}
 				</div>
-			{:else}
-				<div class="text-center">
-					<h2 class="text-lg font-semibold text-foreground mb-2">No nets found</h2>
-					<p class="text-sm text-foreground-muted">Deploy your code to create nets. <a href="/deployments" class="text-accent hover:underline">Go to Deployments</a></p>
-				</div>
-			{/if}
+			</DataLoadState>
 		</div>
 	{/if}
 </div>
 
 {#if showParamsDialog}
 	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-	<div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onkeydown={(e) => e.key === 'Escape' && handleParamsCancel()} onclick={handleParamsCancel}>
+	<div use:portal class="modal-scrim fixed inset-0 flex items-center justify-center z-[9999]" onkeydown={(e) => e.key === 'Escape' && handleParamsCancel()} onclick={handleParamsCancel}>
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
-		<div class="bg-card border border-border rounded-lg shadow-lg p-6 min-w-[360px] max-w-[480px]" onclick={(e) => e.stopPropagation()}>
+		<div class="modal-card border border-border rounded-lg shadow-lg p-6 min-w-[360px] max-w-[480px]" onclick={(e) => e.stopPropagation()}>
 			<h3 class="text-base font-semibold text-foreground mb-1">Factory Parameters</h3>
 			<p class="text-xs text-foreground-muted mb-4">This net requires parameters before loading.</p>
 
@@ -1215,9 +1587,9 @@
 
 {#if showSecretsDialog}
 	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-	<div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onkeydown={(e) => e.key === 'Escape' && handleSecretsCancel()} onclick={handleSecretsCancel}>
+	<div use:portal class="modal-scrim fixed inset-0 flex items-center justify-center z-[9999]" onkeydown={(e) => e.key === 'Escape' && handleSecretsCancel()} onclick={handleSecretsCancel}>
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
-		<div class="bg-card border border-border rounded-lg shadow-lg p-6 min-w-[480px] max-w-[600px]" onclick={(e) => e.stopPropagation()}>
+		<div class="modal-card border border-border rounded-lg shadow-lg p-6 min-w-[480px] max-w-[600px]" onclick={(e) => e.stopPropagation()}>
 			<h3 class="text-base font-semibold text-foreground mb-1">Environment Secrets</h3>
 			<p class="text-xs text-foreground-muted mb-4">Secrets are encrypted at rest and injected as environment variables when the net loads.</p>
 
@@ -1264,9 +1636,9 @@
 
 {#if showSettingsDialog}
 	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-	<div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onkeydown={(e) => e.key === 'Escape' && handleSettingsCancel()} onclick={handleSettingsCancel}>
+	<div use:portal class="modal-scrim fixed inset-0 flex items-center justify-center z-[9999]" onkeydown={(e) => e.key === 'Escape' && handleSettingsCancel()} onclick={handleSettingsCancel}>
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
-		<div class="bg-card border border-border rounded-lg shadow-lg p-6 min-w-[480px] max-w-[600px]" onclick={(e) => e.stopPropagation()}>
+		<div class="modal-card border border-border rounded-lg shadow-lg p-6 min-w-[480px] max-w-[600px]" onclick={(e) => e.stopPropagation()}>
 			<h3 class="text-base font-semibold text-foreground mb-1">Net Settings</h3>
 			<p class="text-xs text-foreground-muted mb-4">Per-net configuration that applies whenever this net runs.</p>
 

@@ -16,10 +16,17 @@ import { API_URL, getEventsAfter } from '$lib/api';
 export type ServerEvent =
 	| { seq?: number; type: 'worker_state_changed'; worker_id: string; status: string; status_detail?: string | null; ts?: string }
 	| { seq?: number; type: 'net_state_changed'; net_id: string; worker_id?: string; load_state: string; ts?: string }
+	| { seq?: number; type: 'notebook_state_changed'; notebook_id: string; worker_id?: string | null; load_state: string; load_error?: string | null; ts?: string }
+	| { seq?: number; type: 'notebook_error'; notebook_id: string; error_id?: string; exception_type?: string; top_frame_location?: string | null; occurrence_count?: number; dismissed_all?: boolean; ts?: string }
 	| { seq?: number; type: 'net_load_log'; net_id: string; worker_id?: string; step: string; message: string; ts?: string }
 	| { seq?: number; type: 'worker_provision_log'; worker_id: string; step: string; message: string; ts?: string };
 
+export type ConnectionState = 'connecting' | 'connected' | 'disconnected';
+
 const { subscribe, set } = writable<ServerEvent | null>(null);
+
+const connection = writable<ConnectionState>('disconnected');
+export const connectionStateStore = { subscribe: connection.subscribe };
 
 let eventSource: EventSource | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -57,11 +64,13 @@ async function replayMissedEvents() {
 function connectSSE() {
 	cleanup();
 
+	connection.set('connecting');
 	const url = `${API_URL}/api/events`;
 	eventSource = new EventSource(url, { withCredentials: true });
 
 	eventSource.onopen = async () => {
 		reconnectDelay = 1000;
+		connection.set('connected');
 		await replayMissedEvents();
 		hadConnection = true;
 	};
@@ -85,6 +94,7 @@ function connectSSE() {
 
 	eventSource.onerror = (err) => {
 		console.warn('[SSE] onerror', { readyState: eventSource?.readyState, err });
+		connection.set('disconnected');
 		if (eventSource?.readyState === EventSource.CLOSED) {
 			eventSource = null;
 			scheduleReconnect();
@@ -108,6 +118,7 @@ export function disconnectServerEvents() {
 	cleanup();
 	lastSeq = 0;
 	hadConnection = false;
+	connection.set('disconnected');
 	set(null);
 }
 

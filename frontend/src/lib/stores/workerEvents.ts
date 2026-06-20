@@ -15,6 +15,7 @@
 
 import { writable } from 'svelte/store';
 import { API_URL } from '$lib/api';
+import { setWorkerMemory, type WorkerMemorySnapshot } from '$lib/stores/workerMemory';
 
 export interface WorkerEvent {
 	seq: number;
@@ -68,6 +69,11 @@ function connectSSE() {
 				lastSeq = 0;
 			}
 			lastSeq = Math.max(lastSeq, parsed.seq);
+			// Memory snapshots feed a dedicated store; downstream consumers
+			// don't need to filter for kind=memory_stats themselves.
+			if (parsed.scope === 'worker' && parsed.kind === 'memory_stats' && workerId) {
+				setWorkerMemory(workerId, parsed.data as WorkerMemorySnapshot);
+			}
 			set(parsed);
 		} catch {
 			// ignore unparseable messages (e.g. keepalive comments)

@@ -5,21 +5,37 @@
 		startWorker, stopWorker, healthCheckWorker, getWorker,
 		listNets, createNet, patchNet, loadNet, unloadNet,
 		listNetSecrets, setNetSecrets,
+		listDeployments,
 		type Worker, type WorkerDetail, type Net, type NetParam, type SecretMetadata,
+		type Deployment,
 	} from '$lib/api';
 	import AppNav from '$lib/components/AppNav.svelte';
+	import DataLoadState from '$lib/components/DataLoadState.svelte';
+	import { portal } from '$lib/actions/portal';
 	import LogViewer from '$lib/components/LogViewer.svelte';
 	import { serverEventsStore } from '$lib/stores/serverEvents';
 	import {
 		workerLogsStore, setNets, seedFromNetErrors, loadHistory as loadLogHistory,
 		clearLogs, connectRuntimeLogs,
 	} from '$lib/stores/workerLogs';
-	import { netDisplayName, netInstanceLabel, netFullLabel } from '$lib/netHelpers';
+	import { netDisplayName, suggestInstanceName } from '$lib/netHelpers';
+	import { workerMemoryStore, type WorkerMemorySnapshot } from '$lib/stores/workerMemory';
 
 	let workers = $state<Worker[]>([]);
 	let nets = $state<Net[]>([]);
+	let deployments = $state<Deployment[]>([]);
 	let expandedWorkerIds = $state<Record<string, boolean>>({});
 	let workerDetails = $state<Map<string, WorkerDetail>>(new Map());
+	// Tracks the first fetch outcome so we can distinguish "haven't fetched
+	// yet" from "fetched and was empty" — the empty state must only render
+	// after we know the answer.
+	let workersLoaded = $state(false);
+	let workersError = $state<string | null>(null);
+
+	// Per-worker draft state for the "instantiate net on this worker" form.
+	let assignDraftDefName = $state<Record<string, string>>({});
+	let assignDraftInstanceName = $state<Record<string, string>>({});
+	let assignDraftError = $state<Record<string, string>>({});
 
 	// Create form state
 	let newWorkerName = $state('');
@@ -41,6 +57,33 @@
 	const unsubscribeLogs = workerLogsStore.subscribe(m => {
 		workerLogs = m;
 	});
+
+	// Live per-worker memory snapshots (populated by connectRuntimeLogs from
+	// the same SSE stream — no extra connections).
+	let workerMemory = $state<Map<string, WorkerMemorySnapshot>>(new Map());
+	const unsubscribeMemory = workerMemoryStore.subscribe(m => {
+		workerMemory = m;
+	});
+
+	function memoryBarColor(percent: number): string {
+		if (percent >= 85) return '#ef4444';  // red
+		if (percent >= 60) return '#eab308';  // amber
+		return '#22c55e';  // green
+	}
+
+	function netRssMb(workerId: string, netId: string): number | null {
+		const snap = workerMemory.get(workerId);
+		if (!snap) return null;
+		const entry = snap.nets.find(n => n.net_id === netId);
+		return entry?.rss_mb ?? null;
+	}
+
+	function netPeakRssMb(workerId: string, netId: string): number | null {
+		const snap = workerMemory.get(workerId);
+		if (!snap) return null;
+		const entry = snap.nets.find(n => n.net_id === netId);
+		return entry?.peak_rss_mb ?? null;
+	}
 
 
 	// Provisioning progress
@@ -71,6 +114,9 @@
 	let secretEntries = $state<Array<{ key: string; value: string; isExisting: boolean }>>([]);
 	let secretsSaving = $state(false);
 	let secretsError = $state<string | null>(null);
+	// Per-net flag: true while listNetSecrets is in flight. Prevents
+	// rapid-fire clicks from queueing N copies of the same slow GET.
+	let secretsLoading = $state<Record<string, boolean>>({});
 
 
 	function getNetParams(netId: string, workerId?: string): NetParam[] {
@@ -167,7 +213,16 @@
 	}
 
 	async function refreshWorkers() {
-		workers = await listWorkers();
+		try {
+			workers = await listWorkers();
+			workersError = null;
+		} catch (e: any) {
+			// Hold the previous list on screen and surface the error
+			// rather than blanking the page.
+			workersError = e?.message ?? String(e);
+		} finally {
+			workersLoaded = true;
+		}
 	}
 
 	async function refreshNets() {
@@ -175,8 +230,63 @@
 		setNets(nets); // keep shared log store's net cache in sync
 	}
 
+	async function refreshDeployments() {
+		try {
+			deployments = await listDeployments();
+		} catch {
+			// non-fatal — deployments only feed the "instantiate net" picker
+		}
+	}
+
 	async function refreshAll() {
-		await Promise.all([refreshWorkers(), refreshNets()]);
+		await Promise.all([refreshWorkers(), refreshNets(), refreshDeployments()]);
+	}
+
+	interface InstantiableDefinition {
+		deployment_id: string;
+		repo_label: string;        // shortened git_url, used for disambiguation when needed
+		name: string;
+		module: string;
+		function: string;
+	}
+
+	// All definitions the user can instantiate. Per (repo, definition_name) we
+	// keep only the most recent successful deployment — repeated builds at the
+	// same commit don't multiply options. The worker doesn't constrain which
+	// deployment a net comes from; code is downloaded per-net at load time via
+	// the net's own deployment_id.
+	function availableDefinitions(): InstantiableDefinition[] {
+		const seen = new Map<string, InstantiableDefinition>();
+		// Iterate newest first so the first entry per (repo, name) wins.
+		const sorted = [...deployments].sort(
+			(a, b) => b.created_at.localeCompare(a.created_at),
+		);
+		for (const dep of sorted) {
+			if (dep.build_status !== 'success' || !dep.discovered_nets) continue;
+			const repoLabel = (dep.git_url || '').replace(/^https?:\/\//, '').replace(/\.git$/, '');
+			for (const def of dep.discovered_nets) {
+				const key = `${repoLabel}::${def.name}`;
+				if (seen.has(key)) continue;
+				seen.set(key, {
+					deployment_id: dep.id,
+					repo_label: repoLabel,
+					name: def.name,
+					module: def.module,
+					function: def.function,
+				});
+			}
+		}
+		// If any definition_name is shared across multiple repos, mark it for
+		// disambiguation; otherwise show just the name.
+		const out = [...seen.values()];
+		const nameCounts = new Map<string, number>();
+		for (const d of out) nameCounts.set(d.name, (nameCounts.get(d.name) ?? 0) + 1);
+		return out;
+	}
+
+	function definitionLabel(def: InstantiableDefinition, all: InstantiableDefinition[]): string {
+		const sameName = all.filter(d => d.name === def.name);
+		return sameName.length > 1 ? `${def.name} · ${def.repo_label}` : def.name;
 	}
 
 	// -- Polling --
@@ -276,11 +386,15 @@
 			}
 		}
 
+		// Pure log events carry no state — skip the REST refetch. Only
+		// state-change events warrant pulling fresh worker/net lists.
+		if (event.type === 'worker_provision_log' || event.type === 'net_load_log') return;
+
 		if (sseDebounceTimer) clearTimeout(sseDebounceTimer);
 		sseDebounceTimer = setTimeout(() => {
 			sseDebounceTimer = null;
 			refreshAll();
-		}, 500);
+		}, 2000);
 	});
 
 	// -- Pre-action state checks --
@@ -431,26 +545,57 @@
 		}
 	}
 
-	async function handleAssignNet(workerId: string, netId: string) {
-		if (!netId) return;
-		await refreshNets();
-		const net = nets.find(n => n.id === netId);
-		if (!net) {
-			errorMessage = 'Net not found.';
+	async function handleAssignNet(workerId: string) {
+		// assignDraftDefName stores `${deployment_id}::${definition_name}` so a
+		// definition name that exists in multiple deployments stays unambiguous.
+		const picked = (assignDraftDefName[workerId] ?? '').trim();
+		const instanceName = (assignDraftInstanceName[workerId] ?? '').trim();
+		assignDraftError[workerId] = '';
+		if (!picked) {
+			assignDraftError[workerId] = 'Pick a definition.';
 			return;
 		}
+		if (!instanceName) {
+			assignDraftError[workerId] = 'Instance name is required.';
+			return;
+		}
+		const sep = picked.indexOf('::');
+		if (sep < 0) {
+			assignDraftError[workerId] = 'Invalid definition selection.';
+			return;
+		}
+		const deploymentId = picked.slice(0, sep);
+		const definitionName = picked.slice(sep + 2);
 		await withAction(workerId, async () => {
-			await createNet({
-				name: net.name,
-				entry_module: net.entry_module,
-				entry_function: net.entry_function,
-				deployment_id: net.deployment_id ?? undefined,
-				worker_id: workerId,
-			});
-			await refreshNets();
-			const detail = await getWorker(workerId);
-			workerDetails.set(workerId, detail);
-			workerDetails = workerDetails;
+			try {
+				// The POST response IS the canonical row. Splice it into ``nets``
+				// directly so the row appears instantly; a follow-up listNets()
+				// would race against PG primary→replica lag and silently miss the
+				// insert, leaving the UI showing "No nets assigned" until the
+				// next user-driven refresh.
+				const created = await createNet({
+					deployment_id: deploymentId,
+					definition_name: definitionName,
+					instance_name: instanceName,
+					worker_id: workerId,
+				});
+				nets = [created, ...nets.filter((n) => n.id !== created.id)];
+				setNets(nets);
+				assignDraftDefName[workerId] = '';
+				assignDraftInstanceName[workerId] = '';
+				assignDraftError[workerId] = '';
+				// Background reconciliation — don't await; the UI is already
+				// authoritative from the response above.
+				refreshNets().catch(() => {});
+				getWorker(workerId)
+					.then((detail) => {
+						workerDetails.set(workerId, detail);
+						workerDetails = workerDetails;
+					})
+					.catch(() => {});
+			} catch (e: any) {
+				assignDraftError[workerId] = e.message || 'Failed to create instance';
+			}
 		});
 	}
 
@@ -509,6 +654,11 @@
 	// -- Secrets dialog handlers --
 
 	async function handleOpenSecrets(netId: string) {
+		// In-flight guard. Without this, every click queues another GET while
+		// the previous one is pending — which serialised against a slow
+		// control plane and the user kept clicking thinking nothing happened.
+		if (secretsLoading[netId]) return;
+		secretsLoading = { ...secretsLoading, [netId]: true };
 		secretsNetId = netId;
 		secretsError = null;
 		try {
@@ -520,6 +670,10 @@
 			showSecretsDialog = true;
 		} catch (e: any) {
 			console.error('Failed to load secrets:', e);
+		} finally {
+			const next = { ...secretsLoading };
+			delete next[netId];
+			secretsLoading = next;
 		}
 	}
 
@@ -631,10 +785,9 @@
 		if (!trimmed) { cancelEditNetName(); return; }
 		const net = nets.find(n => n.id === netId);
 		if (!net) { cancelEditNetName(); return; }
-		// If display name matches the template name, clear it (set to null)
-		const newDisplayName = trimmed === net.name ? null : trimmed;
+		if (trimmed === net.instance_name) { cancelEditNetName(); return; }
 		try {
-			await patchNet(netId, { display_name: newDisplayName });
+			await patchNet(netId, { instance_name: trimmed });
 			await refreshNets();
 		} catch (e: any) {
 			errorMessage = e.message || 'Failed to rename net';
@@ -655,10 +808,12 @@
 	$effect(() => {
 		if (!mounted) return;
 		const activeIds = new Set(workers.filter(w => isActiveStatus(w.status)).map(w => w.id));
-		// Open missing connections
+		// The runtime SSE stream only exists once a worker is 'ready' — the
+		// endpoint 400s otherwise. History (/logs/history) is fine at any status.
+		const readyIds = new Set(workers.filter(w => w.status === 'ready').map(w => w.id));
 		for (const id of activeIds) {
-			if (!runtimeDisconnects.has(id)) {
-				loadLogHistory(id);
+			loadLogHistory(id); // self-guards against re-fetching
+			if (readyIds.has(id) && !runtimeDisconnects.has(id)) {
 				runtimeDisconnects.set(id, connectRuntimeLogs(id));
 			}
 		}
@@ -700,6 +855,7 @@
 		stopPolling();
 		unsubscribeSSE();
 		unsubscribeLogs();
+		unsubscribeMemory();
 		for (const disconnect of runtimeDisconnects.values()) disconnect();
 		runtimeDisconnects.clear();
 		cancelAllDeleteCountdowns();
@@ -788,12 +944,18 @@
 	</div>
 
 	<!-- Worker List -->
-	{#if workers.length === 0}
-		<div class="text-center text-foreground-muted p-8">
-			<p>No workers yet. Create one above.</p>
-			<p class="text-sm mt-2">Tip: You can also create workers from successful deployments on the <a href="/deployments" class="text-accent hover:underline">Deployments</a> page.</p>
-		</div>
-	{:else}
+	<DataLoadState
+		loading={!workersLoaded}
+		error={workersError}
+		isEmpty={workers.length === 0}
+		loadingMessage="Loading workers…"
+	>
+		{#snippet empty()}
+			<div class="text-center text-foreground-muted p-8">
+				<p>No workers yet. Create one above.</p>
+				<p class="text-sm mt-2">Tip: You can also create workers from successful deployments on the <a href="/deployments" class="text-accent hover:underline">Deployments</a> page.</p>
+			</div>
+		{/snippet}
 		<div class="flex flex-col gap-2">
 			{#each workers as worker (worker.id)}
 				<div class="border border-border rounded-md bg-card overflow-hidden">
@@ -905,6 +1067,31 @@
 
 					{#if expandedWorkerIds[worker.id]}
 						<div class="px-4 py-3 border-t border-border bg-muted">
+							{#if workerMemory.get(worker.id)}
+								{@const snap = workerMemory.get(worker.id)!}
+								{@const limitMb = snap.container_total_mb ?? worker.memory_mb}
+								{@const totalUsedMb = (snap.parent_rss_mb ?? 0) + snap.nets.reduce((sum, n) => sum + n.rss_mb, 0)}
+								{@const percent = limitMb > 0 ? Math.min(100, (totalUsedMb / limitMb) * 100) : 0}
+								<div class="mb-3">
+									<div class="flex items-center justify-between text-xs text-foreground-muted mb-1">
+										<span>Memory</span>
+										<span>
+											{Math.round(totalUsedMb)} MB / {Math.round(limitMb)} MB ({Math.round(percent)}%)
+										</span>
+									</div>
+									<div class="w-full h-2 bg-card rounded overflow-hidden">
+										<div
+											class="h-full transition-all"
+											style="width: {percent}%; background: {memoryBarColor(percent)}"
+										></div>
+									</div>
+									{#if percent >= 85}
+										<p class="text-red-500 text-xs mt-1">
+											Approaching memory limit — risk of worker OOM kill.
+										</p>
+									{/if}
+								</div>
+							{/if}
 							<div>
 								<h4 class="mb-2 text-sm font-semibold text-foreground">Assigned Nets &amp; Parameters</h4>
 								{#if netsForWorker(worker.id).length === 0}
@@ -917,6 +1104,20 @@
 											{@const hasParams = params.length > 0}
 											<li class="py-1.5 border-b border-border-light last:border-b-0">
 												<div class="flex items-center gap-3 flex-wrap">
+													<a
+														href="/nets?net={net.id}"
+														class="shrink-0 inline-flex items-center text-foreground-muted hover:text-accent"
+														title="Open Petri net view"
+														aria-label="Open Petri net view"
+													>
+														<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+															<circle cx="5" cy="6" r="2.5" />
+															<circle cx="5" cy="18" r="2.5" />
+															<circle cx="19" cy="12" r="2.5" />
+															<line x1="7.2" y1="7.1" x2="16.8" y2="10.9" />
+															<line x1="7.2" y1="16.9" x2="16.8" y2="13.1" />
+														</svg>
+													</a>
 												{#if editingNetId === net.id}
 													<input
 														type="text"
@@ -935,11 +1136,24 @@
 														onclick={(e) => { e.stopPropagation(); startEditNetName(net); }}
 														title="Click to rename"
 													>
-														{netDisplayName(net)} {netInstanceLabel(net, nets)}
+														{netDisplayName(net)}
 													</button>
 												{/if}
 												<span class="text-xs px-2 py-0.5 rounded-full text-white font-medium" style="background: {badge.color}">{badge.label}</span>
-												<span class="text-xs text-foreground-faint font-mono">{net.entry_module}:{net.entry_function}</span>
+												<span class="text-xs text-foreground-faint font-mono" title="Definition · entry module:function">
+													{net.definition_name}
+													{#if net.entry_module && net.entry_function}
+														· {net.entry_module}:{net.entry_function}
+													{/if}
+												</span>
+												{#if netRssMb(worker.id, net.id) !== null}
+													<span class="text-xs text-foreground-muted font-mono" title="Resident memory (current / peak)">
+														{Math.round(netRssMb(worker.id, net.id)!)} MB
+														{#if netPeakRssMb(worker.id, net.id) !== null && netPeakRssMb(worker.id, net.id)! > netRssMb(worker.id, net.id)!}
+															<span class="text-foreground-faint">(peak {Math.round(netPeakRssMb(worker.id, net.id)!)})</span>
+														{/if}
+													</span>
+												{/if}
 												<div class="flex gap-1.5 ml-auto">
 													{#if net.load_state === 'loaded'}
 														<button
@@ -963,9 +1177,12 @@
 													<button
 														class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-xs font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
 														onclick={() => handleOpenSecrets(net.id)}
-														title="Manage environment secrets for this net"
+														disabled={secretsLoading[net.id]}
+														title={secretsLoading[net.id]
+															? 'Loading secrets…'
+															: 'Manage environment secrets for this net'}
 													>
-														Secrets
+														{secretsLoading[net.id] ? 'Loading…' : 'Secrets'}
 													</button>
 													<button
 														class="px-2.5 py-1 border border-destructive rounded bg-transparent text-destructive text-xs font-medium cursor-pointer transition-all hover:bg-destructive-hover hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1038,24 +1255,56 @@
 									</ul>
 								{/if}
 
-								<!-- Assign Net Dropdown -->
-								{#if nets.length > 0}
-								{@const uniqueNets = nets
-									.reduce((acc, n) => {
-										if (!acc.some(x => x.name === n.name)) acc.push(n);
-										return acc;
-									}, [] as typeof nets)}
-									<div class="mt-2">
+								<!-- Instantiate net on this worker -->
+								{#if true}
+								{@const definitions = availableDefinitions()}
+								{#if definitions.length > 0}
+									<div class="mt-2 flex flex-wrap items-start gap-2">
 										<select
 											class="px-3 py-1.5 border border-border rounded bg-card text-foreground text-sm"
-											onchange={(e) => { handleAssignNet(worker.id, e.currentTarget.value); e.currentTarget.value = ''; }}
+											value={assignDraftDefName[worker.id] ?? ''}
+											onchange={(e) => {
+												assignDraftDefName[worker.id] = e.currentTarget.value;
+												// Prefill a stable, editable instance name (the definition
+												// name) so re-creating reuses the net's identity and keeps
+												// notebook bindings alive. Only when the user hasn't typed one.
+												if (!((assignDraftInstanceName[worker.id] ?? '').trim())) {
+													const v = e.currentTarget.value;
+													const sep = v.indexOf('::');
+													const defName = sep >= 0 ? v.slice(sep + 2) : v;
+													if (defName) assignDraftInstanceName[worker.id] = suggestInstanceName(defName);
+												}
+											}}
 										>
-											<option value="">Assign a net...</option>
-											{#each uniqueNets as net (net.id)}
-													<option value={net.id}>{net.name}</option>
+											<option value="">Pick a definition...</option>
+											{#each definitions as def}
+												<option value="{def.deployment_id}::{def.name}">
+													{definitionLabel(def, definitions)}
+												</option>
 											{/each}
 										</select>
+										<input
+											type="text"
+											placeholder="Instance name"
+											class="px-3 py-1.5 border border-border rounded bg-card text-foreground text-sm w-48"
+											value={assignDraftInstanceName[worker.id] ?? ''}
+											oninput={(e) => { assignDraftInstanceName[worker.id] = e.currentTarget.value; }}
+											onkeydown={(e) => { if (e.key === 'Enter') handleAssignNet(worker.id); }}
+										/>
+										<button
+											class="px-3 py-1.5 border border-accent rounded bg-card text-accent text-sm font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+											onclick={() => handleAssignNet(worker.id)}
+											disabled={actionInProgress === worker.id}
+										>
+											Add instance
+										</button>
+										{#if assignDraftError[worker.id]}
+											<span class="w-full text-xs text-red-500">{assignDraftError[worker.id]}</span>
+										{/if}
 									</div>
+								{:else}
+									<p class="mt-2 text-xs text-foreground-faint">No net definitions discovered in any of your deployments yet — push code to populate.</p>
+								{/if}
 								{/if}
 							</div>
 
@@ -1094,15 +1343,15 @@
 				</div>
 			{/each}
 		</div>
-	{/if}
+	</DataLoadState>
 
 </div>
 
 {#if showSecretsDialog}
 	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-	<div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onkeydown={(e) => e.key === 'Escape' && handleSecretsCancel()} onclick={handleSecretsCancel}>
+	<div use:portal class="modal-scrim fixed inset-0 flex items-center justify-center z-[9999]" onkeydown={(e) => e.key === 'Escape' && handleSecretsCancel()} onclick={handleSecretsCancel}>
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
-		<div class="bg-card border border-border rounded-lg shadow-lg p-6 min-w-[480px] max-w-[600px]" onclick={(e) => e.stopPropagation()}>
+		<div class="modal-card border border-border rounded-lg shadow-lg p-6 min-w-[480px] max-w-[600px]" onclick={(e) => e.stopPropagation()}>
 			<h3 class="text-base font-semibold text-foreground mb-1">Environment Secrets</h3>
 			<p class="text-xs text-foreground-muted mb-4">Secrets are encrypted at rest and injected as environment variables when the net loads.</p>
 

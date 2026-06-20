@@ -88,7 +88,7 @@
 			</span>
 			{#if worker.assigned_nets.length > 0}
 				<span class="text-xs text-foreground-muted">
-					Nets: {worker.assigned_nets.map(n => n.name).join(', ')}
+					Nets: {worker.assigned_nets.map(n => n.instance_name).join(', ')}
 				</span>
 			{/if}
 		</div>

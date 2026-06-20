@@ -172,3 +172,33 @@ body.dark-theme {
 	--status-text-info: #67e8f9;
 }
 
+
+/* ============================================
+   Modal overlay + card
+
+   Used by ``use:portal`` modals across the app (wiring, workers,
+   nets, etc.). Defined here as global rules so that:
+
+   1. A modal portaled into <body> keeps its styles even though Svelte's
+      scoped-CSS hashes no longer apply.
+   2. New modals get the right look automatically by using the
+      `.modal-scrim` / `.modal-card` classes.
+
+   Backgrounds are hard-coded (not via CSS variables) because xyflow's
+   transform-based stacking context can otherwise make var() resolution
+   look transparent on portaled elements. See the regression note in
+   wiring/+page.svelte for context.
+   ============================================ */
+
+.modal-scrim {
+	background: rgba(0, 0, 0, 0.7);
+}
+.modal-card {
+	background: #ffffff;
+	color: #1a1a1a;
+}
+body.dark-theme .modal-card {
+	background: #1a1a1a;
+	color: #f0f0f0;
+}
+

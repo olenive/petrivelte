@@ -4,6 +4,7 @@
 	import '$lib/theme.css';
 	import { loadTheme } from '$lib/theme';
 	import { connectServerEvents, disconnectServerEvents } from '$lib/stores/serverEvents';
+	import SlowRequestToast from '$lib/components/SlowRequestToast.svelte';
 
 	let { children } = $props();
 
@@ -22,3 +23,4 @@
 </svelte:head>
 
 {@render children()}
+<SlowRequestToast />

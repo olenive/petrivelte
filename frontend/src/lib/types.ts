@@ -4,7 +4,14 @@ export interface Place {
 	x: number;
 	y: number;
 	type_name: string;
-	tokens?: Token[];
+	tokens?: PlaceToken[];
+}
+
+export interface PlaceToken {
+	id: string;
+	preview: string;
+	type_name: string;
+	color: string;
 }
 
 export interface Transition {
@@ -30,7 +37,8 @@ export interface Token {
 	x: number;
 	y: number;
 	color: string;
-	data: any;
+	preview: string;
+	type_name: string;
 }
 
 export interface GraphState {

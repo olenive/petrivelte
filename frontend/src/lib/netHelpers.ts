@@ -1,29 +1,39 @@
 import type { Net } from '$lib/api';
 
 /**
- * The display name for a net: `display_name` if set, otherwise `name`.
+ * The display name for a net instance. Always `instance_name` — the schema
+ * enforces uniqueness within (user, definition_name) so no disambiguation
+ * suffix is needed.
  */
 export function netDisplayName(net: Net): string {
-	return net.display_name ?? net.name;
+	return net.instance_name;
 }
 
 /**
- * Instance label like "(2/3)" for nets that share the same template name.
- * Returns empty string if there's only one instance.
+ * Kept for backwards-compatibility with callers that still call it. Returns
+ * empty string — the instance/definition disambiguation now happens via
+ * `instance_name` (unique) + `definition_name` (the kind).
  */
-export function netInstanceLabel(net: Net, allNets: Net[]): string {
-	const siblings = allNets.filter(n => n.name === net.name && n.entry_module === net.entry_module);
-	if (siblings.length <= 1) return '';
-	const sorted = siblings.sort((a, b) => a.created_at.localeCompare(b.created_at));
-	const index = sorted.findIndex(n => n.id === net.id) + 1;
-	return `(${index}/${siblings.length})`;
+export function netInstanceLabel(_net: Net, _allNets: Net[]): string {
+	return '';
 }
 
 /**
- * Full label for a net: display name + instance label.
+ * Full label for a net: just the instance name. Use `definition_name` as a
+ * separate secondary line when the kind matters.
  */
-export function netFullLabel(net: Net, allNets: Net[]): string {
-	const name = netDisplayName(net);
-	const instance = netInstanceLabel(net, allNets);
-	return instance ? `${name} ${instance}` : name;
+export function netFullLabel(net: Net, _allNets: Net[]): string {
+	return net.instance_name;
+}
+
+/**
+ * A stable, deterministic default instance name, suggested when the user picks
+ * a definition. Defaulting to the definition name (instead of a timestamp)
+ * means re-creating the net — e.g. after a redeploy — reuses the same identity
+ * (user, definition_name, instance_name) via the backend upsert, so notebook
+ * bindings (which reference the net_id) stay alive instead of orphaning. The
+ * user can edit it (e.g. append `-TW`) to run several instances of one kind.
+ */
+export function suggestInstanceName(definitionName: string): string {
+	return definitionName.trim();
 }

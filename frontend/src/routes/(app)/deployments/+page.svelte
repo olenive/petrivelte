@@ -16,10 +16,15 @@
 		type Deployment,
 	} from '$lib/api';
 	import AppNav from '$lib/components/AppNav.svelte';
+	import DataLoadState from '$lib/components/DataLoadState.svelte';
 
 	let github = $state<GitHubStatus | null>(null);
 	let repos = $state<GitHubRepo[]>([]);
 	let deployments = $state<Deployment[]>([]);
+	// Track first-fetch outcome so the empty state only renders after
+	// we actually have an answer from the server.
+	let deploymentsLoaded = $state(false);
+	let deploymentsError = $state<string | null>(null);
 
 	// Connect repo form
 	let newRepoFullName = $state('');
@@ -58,8 +63,12 @@
 				repos = await listGitHubRepos();
 				deployments = await listDeployments();
 			}
+			deploymentsError = null;
 		} catch (e: any) {
 			console.error('Failed to refresh data:', e);
+			deploymentsError = e?.message ?? String(e);
+		} finally {
+			deploymentsLoaded = true;
 		}
 	}
 
@@ -272,9 +281,13 @@
 		<section>
 			<h2 class="text-lg font-medium text-foreground mb-4">Deployments</h2>
 
-			{#if deployments.length === 0}
-				<p class="text-center text-foreground-muted p-4">No deployments yet. Connect a repo and trigger a build.</p>
-			{:else}
+			<DataLoadState
+				loading={!deploymentsLoaded}
+				error={deploymentsError}
+				isEmpty={deployments.length === 0}
+				loadingMessage="Loading deployments…"
+				emptyMessage="No deployments yet. Connect a repo and trigger a build."
+			>
 				<div class="flex flex-col gap-3">
 					{#each deployments as deployment (deployment.id)}
 						<div class="p-4 bg-card border border-border rounded-md">
@@ -324,7 +337,7 @@
 						</div>
 					{/each}
 				</div>
-			{/if}
+			</DataLoadState>
 		</section>
 	{/if}
 </div>

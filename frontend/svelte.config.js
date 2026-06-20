@@ -40,6 +40,31 @@ function buildConnectSrc() {
 	return Array.from(sources);
 }
 
+// The notebook page mounts an <iframe> whose src points at the control
+// plane API (e.g. https://petrify-fly-app.fly.dev/api/notebooks/...).
+// Without an explicit frame-src directive, the browser falls back to
+// default-src 'self' and blocks the cross-origin iframe.
+function buildFrameSrc() {
+	const sources = new Set(["'self'"]);
+	const apiOrigin = process.env.PUBLIC_API_URL ? parseOrigin(process.env.PUBLIC_API_URL) : null;
+	const isProduction = process.env.NODE_ENV === 'production';
+
+	if (apiOrigin) {
+		sources.add(apiOrigin);
+	}
+
+	if (isProduction) {
+		if (!apiOrigin) {
+			sources.add('https:');
+		}
+	} else {
+		sources.add('http://localhost:8000');
+		sources.add('http://127.0.0.1:8000');
+	}
+
+	return Array.from(sources);
+}
+
 /** @type {import('@sveltejs/kit').Config} */
 const config = {
 	kit: {
@@ -57,6 +82,7 @@ const config = {
 				'img-src': ["'self'", 'data:', 'blob:'],
 				'font-src': ["'self'", 'data:'],
 				'connect-src': buildConnectSrc(),
+				'frame-src': buildFrameSrc(),
 			},
 		},
 	}
