@@ -2,6 +2,7 @@
 	import { tick } from 'svelte';
 	import type { Token, Place } from '$lib/types';
 	import { getToken, type TokenView } from '$lib/api';
+	import { placeTokenCount } from '$lib/netHelpers';
 
 	export let netId: string | null = null;
 	export let tokens: Token[] = [];
@@ -29,6 +30,21 @@
 		place,
 		tokens: tokens.filter((t) => t.place_id === place.id)
 	})) as PlaceWithTokens[];
+
+	// `tokens` is the worker's capped per-place sample, so its length is not
+	// the marking size. Label counts from `token_count` and say plainly when
+	// there is more than we're showing — a silent truncation would hide
+	// exactly the runaway place you'd want to notice.
+	$: totalCount = places.reduce((sum, place) => sum + placeTokenCount(place), 0);
+
+	function hiddenCount(place: Place, shown: number): number {
+		return Math.max(0, placeTokenCount(place) - shown);
+	}
+
+	function placeTabLabel(place: Place, shown: number): string {
+		const total = placeTokenCount(place);
+		return total > shown ? `${shown} of ${total}` : `${total}`;
+	}
 
 	// Live token id set — invalidate full-view cache when the selected
 	// token disappears (consumed/produced) so we don't render stale JSON.
@@ -110,7 +126,7 @@
 			class:active={selectedTabIndex === 0}
 			on:click={() => (selectedTabIndex = 0)}
 		>
-			All ({tokens.length})
+			All ({totalCount})
 		</button>
 		<!-- Individual place tabs -->
 		{#each tokensByPlace as { place, tokens: placeTokens }, i}
@@ -119,7 +135,7 @@
 				class:active={selectedTabIndex === i + 1}
 				on:click={() => (selectedTabIndex = i + 1)}
 			>
-				{place.name} ({placeTokens.length})
+				{place.name} ({placeTabLabel(place, placeTokens.length)})
 			</button>
 		{/each}
 	</div>
@@ -163,6 +179,11 @@
 									{/if}
 								</button>
 							{/each}
+							{#if hiddenCount(place, placeTokens.length) > 0}
+								<div class="truncated">
+									{hiddenCount(place, placeTokens.length)} more not shown
+								</div>
+							{/if}
 						</div>
 					{/if}
 				{/each}
@@ -205,6 +226,11 @@
 						{/if}
 					</button>
 				{/each}
+				{#if hiddenCount(place, placeTokens.length) > 0}
+					<div class="truncated">
+						{hiddenCount(place, placeTokens.length)} more not shown
+					</div>
+				{/if}
 			{:else}
 				<div class="empty">No tokens in this place</div>
 			{/if}
@@ -347,6 +373,16 @@
 	.empty {
 		padding: 1.5rem;
 		text-align: center;
+		color: var(--text-tertiary);
+	}
+
+	/* The worker sends a capped sample per place; say so rather than letting
+	   the list just stop. */
+	.truncated {
+		padding: 0.5rem;
+		text-align: center;
+		font-size: 0.75rem;
+		font-style: italic;
 		color: var(--text-tertiary);
 	}
 </style>

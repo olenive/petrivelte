@@ -37,3 +37,31 @@ export function netFullLabel(net: Net, _allNets: Net[]): string {
 export function suggestInstanceName(definitionName: string): string {
 	return definitionName.trim();
 }
+
+/**
+ * Above this many tokens in one place, the graph draws the count instead of
+ * individual dots.
+ *
+ * Seven is where dots stop meaning anything: the layout lays them on a ring of
+ * radius `min(20, count * 3)`, which pins at 20px from seven tokens up, so
+ * every further token is squeezed onto the same small circle. Past that point
+ * a number is strictly more informative than a smear.
+ */
+export const TOKEN_DOT_LIMIT = 7;
+
+/**
+ * How many tokens a place actually holds.
+ *
+ * `place.tokens` is a capped sample — the worker truncates per-place token
+ * detail so the IPC payload stays bounded by the net's shape rather than its
+ * runtime — so counts must come from `token_count`. The fallback covers
+ * workers predating that field.
+ */
+export function placeTokenCount(place: { token_count?: number; tokens?: unknown[] }): number {
+	return place.token_count ?? place.tokens?.length ?? 0;
+}
+
+/** True when a place should render as a count rather than as token dots. */
+export function placeShowsCount(place: { token_count?: number; tokens?: unknown[] }): boolean {
+	return placeTokenCount(place) >= TOKEN_DOT_LIMIT;
+}

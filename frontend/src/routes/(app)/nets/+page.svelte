@@ -22,12 +22,40 @@
 	import DataLoadState from '$lib/components/DataLoadState.svelte';
 	import { portal } from '$lib/actions/portal';
 	import type { GraphState, Token, LogEntry, Transition } from '$lib/types';
-	import { netFullLabel } from '$lib/netHelpers';
+	import { netFullLabel, placeShowsCount, placeTokenCount } from '$lib/netHelpers';
 
 	let graphState = $state<GraphState | null>(null);
 	let tokens = $state<Token[]>([]);
 	let logEntries = $state<LogEntry[]>([]);
 	let connectionStatus = $state('Connecting...');
+
+	// `tokens` holds only what the worker sends for rendering, and that is
+	// capped per place so the IPC payload can't grow with the marking. Counts
+	// must therefore come from each place's `token_count`, or a net with a
+	// large place would report the cap instead of its real size. Falls back to
+	// the rendered length for workers predating the cap.
+	let totalTokenCount = $derived(
+		graphState?.places?.reduce((sum, place) => sum + placeTokenCount(place), 0)
+			?? tokens.length,
+	);
+
+	// The inspector needs its own list rather than the positioned `tokens`:
+	// that one omits places rendered as a count, and is swapped out mid-
+	// animation. This is the worker's capped sample for every place, which is
+	// exactly what's inspectable.
+	let inspectorTokens = $derived<Token[]>(
+		(graphState?.places ?? []).flatMap((place) =>
+			(place.tokens ?? []).map((t) => ({
+				id: t.id,
+				place_id: place.id,
+				x: place.x,
+				y: place.y,
+				color: t.color,
+				preview: t.preview,
+				type_name: t.type_name,
+			})),
+		),
+	);
 
 	// Animation state
 	type AnimationStage = 'idle' | 'consuming' | 'producing';
@@ -585,6 +613,12 @@
 		for (const [placeId, placeTokens] of tokensByPlace) {
 			const place = state.places.find(p => p.id === placeId);
 			if (!place) continue;
+			// Past TOKEN_DOT_LIMIT the ring radius has pinned and the dots are an
+			// unreadable smear, so PlaceText draws the count instead and we lay
+			// out nothing. Individual tokens in such a place therefore don't
+			// animate in or out — animating one token into a pile of hundreds
+			// conveys nothing anyway.
+			if (placeShowsCount(place)) continue;
 
 			const tokenCount = placeTokens.length;
 			const stackRadius = Math.min(20, tokenCount * 3);
@@ -1401,13 +1435,13 @@
 							<button class="flex items-center gap-2 px-3 py-2 bg-muted border-0 border-b border-border cursor-pointer text-left text-sm font-medium text-foreground w-full transition-colors hover:bg-hover" onclick={toggleTokenInspector}>
 								<span class="text-[0.7rem] text-foreground-muted">{tokenInspectorCollapsed ? '▶' : '▼'}</span>
 								<span class="flex-1">All Tokens</span>
-								<span class="bg-hover text-foreground-muted px-1.5 py-0.5 rounded-full text-xs">{tokens.length}</span>
+								<span class="bg-hover text-foreground-muted px-1.5 py-0.5 rounded-full text-xs">{totalTokenCount}</span>
 							</button>
 							{#if !tokenInspectorCollapsed}
 								<div class="flex-1 overflow-hidden flex flex-col">
 									<TokenInspector
 										netId={selectedNetId}
-										{tokens}
+										tokens={inspectorTokens}
 										places={graphState.places}
 										selectedTokenId={$selectedTokenId}
 										onTokenSelect={handleTokenSelect}
@@ -1449,7 +1483,7 @@
 					</button>
 					<button class="flex flex-col items-center p-2 border border-border rounded bg-muted cursor-pointer transition-all hover:bg-hover hover:border-accent" onclick={toggleTokenInspector} title="All Tokens">
 						<span class="text-xl">🔘</span>
-						<span class="text-[0.7rem] text-foreground-muted">{tokens.length}</span>
+						<span class="text-[0.7rem] text-foreground-muted">{totalTokenCount}</span>
 					</button>
 				</aside>
 			{/if}
