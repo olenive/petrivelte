@@ -820,6 +820,39 @@ export async function unloadNotebook(id: string): Promise<{ status: string }> {
 	return res.json();
 }
 
+/** Server-side view of how long a notebook took to load.
+ *
+ * `load` is the spawn on the worker; `burst` summarises the last page open,
+ * which is ~100 proxied asset requests. Both are held in memory on the
+ * control plane, so both are null after a CP restart and `burst` is null
+ * until the notebook page has been opened once.
+ */
+export interface NotebookTimings {
+	load: {
+		total_s: number;
+		phases: Record<string, number>;
+		at: number;
+	} | null;
+	burst: {
+		count: number;
+		errors: number;
+		queued: number;
+		wall_s: number;
+		p50_s: number;
+		p95_s: number;
+		max_s: number;
+		max_queue_wait_s: number;
+		at: number;
+	} | null;
+	burst_in_progress: boolean;
+}
+
+export async function getNotebookTimings(id: string): Promise<NotebookTimings> {
+	const res = await get(`/api/notebooks/${id}/timings`);
+	if (!res.ok) throw new Error('Failed to get notebook timings');
+	return res.json();
+}
+
 export async function bindNotebookSlot(
 	notebookId: string,
 	slotName: string,

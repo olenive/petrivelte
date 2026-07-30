@@ -7,9 +7,11 @@
 	import {
 		API_URL,
 		getNotebook,
+		getNotebookTimings,
 		loadNotebook,
 		unloadNotebook,
 		type Notebook,
+		type NotebookTimings,
 	} from '$lib/api';
 	import { serverEventsStore } from '$lib/stores/serverEvents';
 
@@ -36,6 +38,72 @@
 	let initialising = $state(true);
 	let busy = $state(false);
 	let errorMessage = $state<string | null>(null);
+	let timings = $state<NotebookTimings | null>(null);
+	let timingsPoll: ReturnType<typeof setTimeout> | null = null;
+
+	// The backend closes a page-load burst only after ~2s of network quiet, so
+	// a single fetch on iframe load would always read it as still in progress.
+	// Poll a handful of times and then stop — this is instrumentation, and it
+	// should never turn into an indefinite background loop.
+	const TIMINGS_POLL_ATTEMPTS = 6;
+	const TIMINGS_POLL_INTERVAL_MS = 1500;
+
+	async function refreshTimings(attemptsLeft = TIMINGS_POLL_ATTEMPTS) {
+		try {
+			timings = await getNotebookTimings(notebookId);
+		} catch {
+			// A timings failure must never surface as a notebook error — the
+			// notebook itself is fine, we just have no numbers to show.
+			return;
+		}
+		const settled = timings?.burst && !timings.burst_in_progress;
+		if (!settled && attemptsLeft > 1) {
+			timingsPoll = setTimeout(
+				() => refreshTimings(attemptsLeft - 1),
+				TIMINGS_POLL_INTERVAL_MS,
+			);
+		}
+	}
+
+	function fmtSeconds(s: number): string {
+		return s >= 10 ? `${s.toFixed(0)}s` : `${s.toFixed(1)}s`;
+	}
+
+	// Compact enough to sit in the slim header; the full breakdown lives in the
+	// title tooltip so the common case stays glanceable.
+	let timingsLabel = $derived.by(() => {
+		if (!timings) return null;
+		const parts: string[] = [];
+		if (timings.load) parts.push(`${fmtSeconds(timings.load.total_s)} load`);
+		if (timings.burst_in_progress) {
+			parts.push('measuring page…');
+		} else if (timings.burst) {
+			parts.push(`${timings.burst.count} reqs ${fmtSeconds(timings.burst.wall_s)}`);
+		}
+		return parts.length ? parts.join(' · ') : null;
+	});
+
+	let timingsDetail = $derived.by(() => {
+		if (!timings) return '';
+		const lines: string[] = [];
+		if (timings.load) {
+			const phases = Object.entries(timings.load.phases)
+				.sort((a, b) => b[1] - a[1])
+				.map(([name, seconds]) => `${name}=${seconds.toFixed(1)}s`)
+				.join(' ');
+			lines.push(`Load: ${timings.load.total_s.toFixed(1)}s (${phases})`);
+		}
+		const b = timings.burst;
+		if (b) {
+			lines.push(
+				`Last page open: ${b.count} requests in ${b.wall_s.toFixed(1)}s`,
+				`  p50 ${(b.p50_s * 1000).toFixed(0)}ms · p95 ${(b.p95_s * 1000).toFixed(0)}ms · max ${b.max_s.toFixed(1)}s`,
+				`  ${b.queued} queued (max wait ${b.max_queue_wait_s.toFixed(1)}s) · ${b.errors} errors`,
+			);
+		}
+		lines.push('Measured on the control plane; resets when it restarts.');
+		return lines.join('\n');
+	});
 
 	// The iframe src points at the control plane API. The proxy chain
 	//   browser -> control plane -> flycast -> worker -> notebook subprocess
@@ -76,7 +144,10 @@
 		};
 	});
 
-	onDestroy(unsubscribeEvents);
+	onDestroy(() => {
+		unsubscribeEvents();
+		if (timingsPoll) clearTimeout(timingsPoll);
+	});
 
 	async function initialise() {
 		initialising = true;
@@ -176,6 +247,14 @@
 					· {notebook.bindings.length} binding{notebook.bindings.length === 1 ? '' : 's'}
 				</span>
 			{/if}
+			{#if timingsLabel}
+				<span
+					class="text-foreground-muted text-xs font-mono whitespace-nowrap"
+					title={timingsDetail}
+				>
+					· {timingsLabel}
+				</span>
+			{/if}
 		{/if}
 	</div>
 	<div class="flex items-center gap-2">
@@ -210,10 +289,13 @@
 	</div>
 {:else if notebook && notebook.load_state === 'loaded' && iframeSrc}
 	<!-- Full-viewport iframe under the slim header -->
+	<!-- onload fires once Marimo's document is in; the asset burst is still
+	     settling at that point, which is why refreshTimings polls. -->
 	<iframe
 		src={iframeSrc}
 		title={notebook.instance_name}
 		class="w-full h-[calc(100vh-104px)] border-0 block"
+		onload={() => refreshTimings()}
 	></iframe>
 {:else if notebook && notebook.load_state === 'loading'}
 	<div class="flex items-center justify-center h-[calc(100vh-104px)] text-foreground-muted">
