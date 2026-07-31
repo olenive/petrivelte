@@ -7,12 +7,15 @@
 	import {
 		API_URL,
 		getNotebook,
+		getNotebookSync,
 		getNotebookTimings,
 		loadNotebook,
 		unloadNotebook,
 		type Notebook,
+		type NotebookSyncSlot,
 		type NotebookTimings,
 	} from '$lib/api';
+	import { syncBadge } from '$lib/notebookSync';
 	import { serverEventsStore } from '$lib/stores/serverEvents';
 
 	// Human-friendly reasons matching what the worker / control plane
@@ -40,6 +43,32 @@
 	let errorMessage = $state<string | null>(null);
 	let timings = $state<NotebookTimings | null>(null);
 	let timingsPoll: ReturnType<typeof setTimeout> | null = null;
+
+	// Sync freshness. Polled rather than pushed because the value is an age:
+	// it changes with the passage of time, not with events, so there is
+	// nothing for the server to notify us about. Nulled while unloaded so the
+	// badge disappears instead of freezing at its last reading — a stale
+	// freshness indicator being the one thing worse than none.
+	let syncSlots = $state<NotebookSyncSlot[] | null>(null);
+	let syncPoll: ReturnType<typeof setTimeout> | null = null;
+	const SYNC_POLL_MS = 5000;
+
+	let badge = $derived(syncBadge(syncSlots));
+
+	async function pollSync() {
+		if (notebook?.load_state !== 'loaded') {
+			syncSlots = null;
+		} else {
+			try {
+				syncSlots = (await getNotebookSync(notebookId)).slots;
+			} catch {
+				// A failed poll says nothing about the notebook, only about
+				// this request — so leave the last reading in place and let its
+				// age speak for itself on the next render.
+			}
+		}
+		syncPoll = setTimeout(pollSync, SYNC_POLL_MS);
+	}
 
 	// Wall-clock cost of the whole thing, from the user's action to the iframe
 	// firing load. The server-side `load` number covers only the spawn call, so
@@ -169,6 +198,7 @@
 
 	onMount(async () => {
 		await initialise();
+		pollSync();
 	});
 
 	// React to backend-driven state changes so the badge + reason update
@@ -192,6 +222,7 @@
 	onDestroy(() => {
 		unsubscribeEvents();
 		if (timingsPoll) clearTimeout(timingsPoll);
+		if (syncPoll) clearTimeout(syncPoll);
 	});
 
 	async function initialise() {
@@ -294,6 +325,19 @@
 			{#if notebook.bindings.length > 0}
 				<span class="text-foreground-muted text-xs">
 					· {notebook.bindings.length} binding{notebook.bindings.length === 1 ? '' : 's'}
+				</span>
+			{/if}
+			<!-- Sync freshness, separate from load_state above. A notebook can
+			     be perfectly `loaded` and hours behind its net; that gap is
+			     invisible in the notebook's own output, which is the whole
+			     reason this badge exists. -->
+			{#if badge}
+				<span
+					class="inline-block px-2 py-0.5 rounded-full text-white text-[11px] font-medium whitespace-nowrap"
+					style="background: {badge.colour}"
+					title={badge.title}
+				>
+					{badge.label}
 				</span>
 			{/if}
 			{#if timingsLabel}

@@ -853,6 +853,40 @@ export async function getNotebookTimings(id: string): Promise<NotebookTimings> {
 	return res.json();
 }
 
+/** How far behind its net each of a notebook's bound slots is.
+ *
+ * Reported by the notebook subprocess, aged by the worker against its own
+ * clock, read through the control plane. The ages are what make it useful:
+ * a notebook that has silently stopped updating shows identical *data* to one
+ * that is up to date, so freshness has to be stated rather than inferred.
+ *
+ * `last_sync_age_s` is null when a slot has never synced at all — which is a
+ * different thing from having synced a moment ago, and must not render the
+ * same way. `report_age_s` is time since the subprocess said anything, so a
+ * subprocess that has died shows a growing report age while its last
+ * `last_error` stays whatever it was.
+ */
+export interface NotebookSyncSlot {
+	slot_name: string;
+	net_id: string | null;
+	synced: boolean;
+	step_count: number | null;
+	running: boolean | null;
+	last_error: string | null;
+	last_sync_age_s: number | null;
+	report_age_s: number;
+}
+
+export interface NotebookSync {
+	slots: NotebookSyncSlot[];
+}
+
+export async function getNotebookSync(id: string): Promise<NotebookSync> {
+	const res = await get(`/api/notebooks/${id}/sync`);
+	if (!res.ok) throw new Error('Failed to get notebook sync status');
+	return res.json();
+}
+
 export async function bindNotebookSlot(
 	notebookId: string,
 	slotName: string,
