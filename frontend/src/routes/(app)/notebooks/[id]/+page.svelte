@@ -41,14 +41,40 @@
 	let timings = $state<NotebookTimings | null>(null);
 	let timingsPoll: ReturnType<typeof setTimeout> | null = null;
 
-	// The backend closes a page-load burst only after ~2s of network quiet, so
-	// a single fetch on iframe load would always read it as still in progress.
-	// Poll a handful of times and then stop — this is instrumentation, and it
-	// should never turn into an indefinite background loop.
-	const TIMINGS_POLL_ATTEMPTS = 6;
+	// Wall-clock cost of the whole thing, from the user's action to the iframe
+	// firing load. The server-side `load` number covers only the spawn call, so
+	// on its own it reads as "25s" for something that took well over a minute:
+	// a Reload also pays an unload, and the browser then fetches marimo and
+	// boots its kernel. Reporting only the component we happen to instrument
+	// would keep pointing at the wrong bottleneck.
+	let wallClockStart: number | null = null;
+	let wallClockMs = $state<number | null>(null);
+
+	function startWallClock() {
+		wallClockStart = performance.now();
+		wallClockMs = null;
+	}
+
+	function stopWallClock() {
+		if (wallClockStart === null) return;
+		wallClockMs = performance.now() - wallClockStart;
+		wallClockStart = null;
+	}
+
+	// The backend closes a page-load burst after ~2s of network quiet, so a
+	// single fetch on iframe load always reads as still in progress. Poll for a
+	// bounded window instead — this is instrumentation and must never become an
+	// indefinite background loop.
+	//
+	// Long enough to outlast a cold marimo start: the chunk fetches can begin
+	// well after the iframe's load event on a worker waking from suspend.
+	const TIMINGS_POLL_ATTEMPTS = 20;
 	const TIMINGS_POLL_INTERVAL_MS = 1500;
 
-	async function refreshTimings(attemptsLeft = TIMINGS_POLL_ATTEMPTS) {
+	async function refreshTimings(
+		attemptsLeft = TIMINGS_POLL_ATTEMPTS,
+		sawBurstStart = false,
+	) {
 		try {
 			timings = await getNotebookTimings(notebookId);
 		} catch {
@@ -56,10 +82,16 @@
 			// notebook itself is fine, we just have no numbers to show.
 			return;
 		}
-		const settled = timings?.burst && !timings.burst_in_progress;
+		// Only trust a closed burst once we've actually watched one open. A
+		// stray early request (the document fetch, a service-worker probe) goes
+		// quiet for 2s and closes a burst of its own; stopping there reported
+		// "1 reqs 0.0s" while the real 300-request burst happened afterwards,
+		// unobserved.
+		const started = sawBurstStart || !!timings?.burst_in_progress;
+		const settled = started && timings?.burst && !timings.burst_in_progress;
 		if (!settled && attemptsLeft > 1) {
 			timingsPoll = setTimeout(
-				() => refreshTimings(attemptsLeft - 1),
+				() => refreshTimings(attemptsLeft - 1, started),
 				TIMINGS_POLL_INTERVAL_MS,
 			);
 		}
@@ -72,26 +104,36 @@
 	// Compact enough to sit in the slim header; the full breakdown lives in the
 	// title tooltip so the common case stays glanceable.
 	let timingsLabel = $derived.by(() => {
-		if (!timings) return null;
+		if (!timings && wallClockMs === null) return null;
 		const parts: string[] = [];
-		if (timings.load) parts.push(`${fmtSeconds(timings.load.total_s)} load`);
-		if (timings.burst_in_progress) {
+		// Total leads: it is what the user waited, and it is the only figure
+		// that includes the unload, the asset burst and marimo's own startup.
+		if (wallClockMs !== null) parts.push(`${fmtSeconds(wallClockMs / 1000)} total`);
+		if (timings?.load) parts.push(`${fmtSeconds(timings.load.total_s)} spawn`);
+		if (timings?.burst_in_progress) {
 			parts.push('measuring page…');
-		} else if (timings.burst) {
+		} else if (timings?.burst) {
 			parts.push(`${timings.burst.count} reqs ${fmtSeconds(timings.burst.wall_s)}`);
 		}
 		return parts.length ? parts.join(' · ') : null;
 	});
 
 	let timingsDetail = $derived.by(() => {
-		if (!timings) return '';
 		const lines: string[] = [];
+		if (wallClockMs !== null) {
+			lines.push(
+				`Total: ${(wallClockMs / 1000).toFixed(1)}s — your action to the ` +
+					`notebook appearing, including unload, spawn, assets and ` +
+					`marimo's own startup.`,
+			);
+		}
+		if (!timings) return lines.join('\n');
 		if (timings.load) {
 			const phases = Object.entries(timings.load.phases)
 				.sort((a, b) => b[1] - a[1])
 				.map(([name, seconds]) => `${name}=${seconds.toFixed(1)}s`)
 				.join(' ');
-			lines.push(`Load: ${timings.load.total_s.toFixed(1)}s (${phases})`);
+			lines.push(`Spawn: ${timings.load.total_s.toFixed(1)}s (${phases})`);
 		}
 		const b = timings.burst;
 		if (b) {
@@ -101,7 +143,10 @@
 				`  ${b.queued} queued (max wait ${b.max_queue_wait_s.toFixed(1)}s) · ${b.errors} errors`,
 			);
 		}
-		lines.push('Measured on the control plane; resets when it restarts.');
+		lines.push(
+			'Spawn and page-open are measured on the control plane and reset ' +
+				'when it restarts; total is measured in this tab.',
+		);
 		return lines.join('\n');
 	});
 
@@ -152,6 +197,7 @@
 	async function initialise() {
 		initialising = true;
 		errorMessage = null;
+		startWallClock();
 		try {
 			notebook = await getNotebook(notebookId);
 			if (notebook.load_state !== 'loaded') {
@@ -185,6 +231,9 @@
 		if (!notebook) return;
 		busy = true;
 		errorMessage = null;
+		// Starts before the unload: a Reload pays unload + load, and the unload
+		// half was 15s in the field.
+		startWallClock();
 		try {
 			if (notebook.load_state === 'loaded') {
 				await unloadNotebook(notebookId);
@@ -295,7 +344,10 @@
 		src={iframeSrc}
 		title={notebook.instance_name}
 		class="w-full h-[calc(100vh-104px)] border-0 block"
-		onload={() => refreshTimings()}
+		onload={() => {
+			stopWallClock();
+			refreshTimings();
+		}}
 	></iframe>
 {:else if notebook && notebook.load_state === 'loading'}
 	<div class="flex items-center justify-center h-[calc(100vh-104px)] text-foreground-muted">
