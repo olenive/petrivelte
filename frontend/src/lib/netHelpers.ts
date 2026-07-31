@@ -65,3 +65,34 @@ export function placeTokenCount(place: { token_count?: number; tokens?: unknown[
 export function placeShowsCount(place: { token_count?: number; tokens?: unknown[] }): boolean {
 	return placeTokenCount(place) >= TOKEN_DOT_LIMIT;
 }
+
+/**
+ * Merge authoritative per-place counts from a `transition_fired` event into
+ * the graph's places.
+ *
+ * Counts cannot be derived from `new_token_positions`: that payload is capped
+ * per place, so a large place would report the cap. And they cannot wait for
+ * the next full state snapshot either — transitions fire continuously between
+ * refreshes, and counts would visibly freeze while the execution log kept
+ * scrolling. Hence the worker sends `token_counts` with every fire.
+ *
+ * Places absent from `tokenCounts` are left untouched rather than zeroed, so a
+ * partial payload can't blank out the marking.
+ */
+export function applyTokenCounts<P extends { id: string; name: string; token_count?: number }>(
+	places: P[],
+	tokenCounts: Record<string, number> | undefined,
+): P[] {
+	if (!tokenCounts) return places;
+	return places.map((place) => {
+		// The worker keys counts by place *name*; the graph keys places by id.
+		// They coincide today, so accept either rather than depending on it.
+		const count = tokenCounts[place.name] ?? tokenCounts[place.id];
+		return count === undefined ? place : { ...place, token_count: count };
+	});
+}
+
+/** Total tokens across every place, from the authoritative counts. */
+export function totalTokenCount(places: { token_count?: number; tokens?: unknown[] }[]): number {
+	return places.reduce((sum, place) => sum + placeTokenCount(place), 0);
+}

@@ -22,7 +22,12 @@
 	import DataLoadState from '$lib/components/DataLoadState.svelte';
 	import { portal } from '$lib/actions/portal';
 	import type { GraphState, Token, LogEntry, Transition } from '$lib/types';
-	import { netFullLabel, placeShowsCount, placeTokenCount } from '$lib/netHelpers';
+	import {
+		applyTokenCounts,
+		netFullLabel,
+		placeShowsCount,
+		totalTokenCount as sumTokenCounts,
+	} from '$lib/netHelpers';
 
 	let graphState = $state<GraphState | null>(null);
 	let tokens = $state<Token[]>([]);
@@ -35,8 +40,7 @@
 	// large place would report the cap instead of its real size. Falls back to
 	// the rendered length for workers predating the cap.
 	let totalTokenCount = $derived(
-		graphState?.places?.reduce((sum, place) => sum + placeTokenCount(place), 0)
-			?? tokens.length,
+		graphState?.places ? sumTokenCounts(graphState.places) : tokens.length,
 	);
 
 	// The inspector needs its own list rather than the positioned `tokens`:
@@ -1094,6 +1098,14 @@
 				if (autoStepResolve) autoStepResolve(true);
 
 				if (!graphState) return;
+
+				// Counts must come off the event, not the capped position payload,
+				// or they freeze between full state refreshes while the log keeps
+				// streaming.
+				graphState = {
+					...graphState,
+					places: applyTokenCounts(graphState.places, data.token_counts),
+				};
 
 				const newTokens = calculateTokenPositions(data.new_token_positions, graphState);
 
