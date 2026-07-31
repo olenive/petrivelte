@@ -39,15 +39,54 @@ export function suggestInstanceName(definitionName: string): string {
 }
 
 /**
- * Above this many tokens in one place, the graph draws the count instead of
- * individual dots.
+ * Above this many tokens in one place, a count appears in the node.
  *
- * Seven is where dots stop meaning anything: the layout lays them on a ring of
- * radius `min(20, count * 3)`, which pins at 20px from seven tokens up, so
- * every further token is squeezed onto the same small circle. Past that point
- * a number is strictly more informative than a smear.
+ * Seven is roughly where the eye stops being able to subitise a cluster, so
+ * the number takes over the job the dots were failing at. The dots stay —
+ * they're what makes the net feel alive — the number just tells you how many
+ * there are.
  */
-export const TOKEN_DOT_LIMIT = 7;
+export const TOKEN_COUNTER_THRESHOLD = 7;
+
+/**
+ * Most token dots drawn for one place, however many tokens it holds.
+ *
+ * Past this the dots convey nothing the counter doesn't, and each one is a
+ * keyed SVG node re-evaluated on every fire.
+ */
+export const TOKEN_DOT_MAX = 20;
+
+/**
+ * Fixed slots for token dots, as concentric rings inside the r=30 place.
+ *
+ * Capacities and radii are constants so slot N is always the same point. The
+ * previous layout derived both angle and radius from the *current* token
+ * count, so every arrival rotated and expanded the whole ring and the dots
+ * appeared to slide around the node. Pinning the slots means an arriving token
+ * fills the next empty one and nothing already drawn moves.
+ *
+ * Radii keep an 8px dot inside the circle (20 + 8 = 28 < 30). The outer ring
+ * is deliberately over-subscribed — 14 dots on a 126px circumference overlap —
+ * because a dense clump is the intended "lots of tokens here" signal.
+ */
+const TOKEN_RINGS = [
+	{ radius: 10, capacity: 6, offset: 0 },
+	{ radius: 20, capacity: 14, offset: Math.PI / 14 },
+];
+
+/** Offset from the place centre for the token dot in slot `index`. */
+export function tokenSlotOffset(index: number): { dx: number; dy: number } {
+	let remaining = index;
+	for (const ring of TOKEN_RINGS) {
+		if (remaining < ring.capacity) {
+			const angle = ring.offset + (remaining * 2 * Math.PI) / ring.capacity;
+			return { dx: Math.cos(angle) * ring.radius, dy: Math.sin(angle) * ring.radius };
+		}
+		remaining -= ring.capacity;
+	}
+	// Beyond the rings nothing is drawn; callers cap at TOKEN_DOT_MAX.
+	return { dx: 0, dy: 0 };
+}
 
 /**
  * How many tokens a place actually holds.
@@ -61,9 +100,9 @@ export function placeTokenCount(place: { token_count?: number; tokens?: unknown[
 	return place.token_count ?? place.tokens?.length ?? 0;
 }
 
-/** True when a place should render as a count rather than as token dots. */
-export function placeShowsCount(place: { token_count?: number; tokens?: unknown[] }): boolean {
-	return placeTokenCount(place) >= TOKEN_DOT_LIMIT;
+/** True when a place should show its token count as a number. */
+export function placeShowsCounter(place: { token_count?: number; tokens?: unknown[] }): boolean {
+	return placeTokenCount(place) >= TOKEN_COUNTER_THRESHOLD;
 }
 
 /**

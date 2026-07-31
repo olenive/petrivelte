@@ -23,9 +23,10 @@
 	import { portal } from '$lib/actions/portal';
 	import type { GraphState, Token, LogEntry, Transition } from '$lib/types';
 	import {
+		TOKEN_DOT_MAX,
 		applyTokenCounts,
 		netFullLabel,
-		placeShowsCount,
+		tokenSlotOffset,
 		totalTokenCount as sumTokenCounts,
 	} from '$lib/netHelpers';
 
@@ -617,26 +618,19 @@
 		for (const [placeId, placeTokens] of tokensByPlace) {
 			const place = state.places.find(p => p.id === placeId);
 			if (!place) continue;
-			// Past TOKEN_DOT_LIMIT the ring radius has pinned and the dots are an
-			// unreadable smear, so PlaceText draws the count instead and we lay
-			// out nothing. Individual tokens in such a place therefore don't
-			// animate in or out — animating one token into a pile of hundreds
-			// conveys nothing anyway.
-			if (placeShowsCount(place)) continue;
 
-			const tokenCount = placeTokens.length;
-			const stackRadius = Math.min(20, tokenCount * 3);
-
-			placeTokens.forEach((token, index) => {
-				const angle = (index * 2 * Math.PI) / tokenCount;
-				const offsetX = Math.cos(angle) * stackRadius;
-				const offsetY = Math.sin(angle) * stackRadius;
+			// Fixed slots, capped at TOKEN_DOT_MAX. Slot N is always the same
+			// point regardless of how many tokens the place holds, so an arriving
+			// token fills the next empty slot instead of shifting every dot
+			// already on screen. Beyond the cap the counter carries the number.
+			placeTokens.slice(0, TOKEN_DOT_MAX).forEach((token, index) => {
+				const { dx, dy } = tokenSlotOffset(index);
 
 				positionedTokens.push({
 					id: token.id,
 					place_id: placeId,
-					x: place.x + offsetX,
-					y: place.y + offsetY,
+					x: place.x + dx,
+					y: place.y + dy,
 					color: token.color,
 					preview: token.preview,
 					type_name: token.type_name,

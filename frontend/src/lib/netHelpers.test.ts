@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-	TOKEN_DOT_LIMIT,
+	TOKEN_COUNTER_THRESHOLD,
+	TOKEN_DOT_MAX,
 	applyTokenCounts,
-	placeShowsCount,
+	placeShowsCounter,
 	placeTokenCount,
+	tokenSlotOffset,
 	totalTokenCount,
 } from './netHelpers';
 
@@ -48,13 +50,51 @@ describe('placeTokenCount', () => {
 	});
 });
 
-describe('placeShowsCount', () => {
-	it('draws dots below the limit', () => {
-		expect(placeShowsCount(place('P', { token_count: TOKEN_DOT_LIMIT - 1 }))).toBe(false);
+describe('placeShowsCounter', () => {
+	it('stays silent while the cluster is still countable by eye', () => {
+		expect(placeShowsCounter(place('P', { token_count: TOKEN_COUNTER_THRESHOLD - 1 }))).toBe(
+			false,
+		);
 	});
 
-	it('switches to a count at the limit, where the dot ring stops growing', () => {
-		expect(placeShowsCount(place('P', { token_count: TOKEN_DOT_LIMIT }))).toBe(true);
+	it('shows a count once the cluster stops being countable', () => {
+		expect(placeShowsCounter(place('P', { token_count: TOKEN_COUNTER_THRESHOLD }))).toBe(true);
+	});
+});
+
+describe('tokenSlotOffset', () => {
+	it('gives a slot the same position no matter how many tokens exist', () => {
+		// The reported jitter: the old layout derived angle and radius from the
+		// current count, so every arrival slid every dot already on screen.
+		expect(tokenSlotOffset(0)).toEqual(tokenSlotOffset(0));
+		expect(tokenSlotOffset(3)).toEqual(tokenSlotOffset(3));
+	});
+
+	it('gives distinct slots distinct positions', () => {
+		const seen = new Set(
+			Array.from({ length: TOKEN_DOT_MAX }, (_, i) => {
+				const { dx, dy } = tokenSlotOffset(i);
+				return `${dx.toFixed(4)},${dy.toFixed(4)}`;
+			}),
+		);
+
+		expect(seen.size).toBe(TOKEN_DOT_MAX);
+	});
+
+	it('keeps every dot inside the place circle', () => {
+		// Place radius 30, token radius 8 — a dot centred beyond 22 would spill
+		// out of the node.
+		for (let i = 0; i < TOKEN_DOT_MAX; i++) {
+			const { dx, dy } = tokenSlotOffset(i);
+			expect(Math.hypot(dx, dy)).toBeLessThanOrEqual(22);
+		}
+	});
+
+	it('leaves the centre clear for the counter', () => {
+		for (let i = 0; i < TOKEN_DOT_MAX; i++) {
+			const { dx, dy } = tokenSlotOffset(i);
+			expect(Math.hypot(dx, dy)).toBeGreaterThan(0);
+		}
 	});
 });
 

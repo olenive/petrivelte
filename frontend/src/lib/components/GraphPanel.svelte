@@ -174,6 +174,16 @@
 			>
 				<path d="M0,0 L0,12 L12,6 z" class="arrowhead-output-path" />
 			</marker>
+			<!-- Scrim behind a place's token counter. The node's own fill colour
+			     fading to fully transparent before the circle edge, so the number
+			     reads clearly over the dots without drawing a visible disc: the
+			     eye moves from counting dots to reading the count with nothing
+			     hard to cross. -->
+			<radialGradient id="token-count-scrim">
+				<stop offset="0%" stop-color="var(--place-fill)" stop-opacity="0.92" />
+				<stop offset="55%" stop-color="var(--place-fill)" stop-opacity="0.78" />
+				<stop offset="100%" stop-color="var(--place-fill)" stop-opacity="0" />
+			</radialGradient>
 		</defs>
 
 		{#if graphState}
