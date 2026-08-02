@@ -12,10 +12,10 @@
 		loadNotebook,
 		unloadNotebook,
 		type Notebook,
-		type NotebookSyncSlot,
+		type NotebookSync,
 		type NotebookTimings,
 	} from '$lib/api';
-	import { syncBadge } from '$lib/notebookSync';
+	import { diagnose, planRemount, stateColour, type Diagnosis } from '$lib/notebookSync';
 	import { serverEventsStore } from '$lib/stores/serverEvents';
 
 	// Human-friendly reasons matching what the worker / control plane
@@ -44,23 +44,40 @@
 	let timings = $state<NotebookTimings | null>(null);
 	let timingsPoll: ReturnType<typeof setTimeout> | null = null;
 
-	// Sync freshness. Polled rather than pushed because the value is an age:
+	// Notebook health. Polled rather than pushed because most of it is an age:
 	// it changes with the passage of time, not with events, so there is
 	// nothing for the server to notify us about. Nulled while unloaded so the
 	// badge disappears instead of freezing at its last reading — a stale
 	// freshness indicator being the one thing worse than none.
-	let syncSlots = $state<NotebookSyncSlot[] | null>(null);
+	let syncState = $state<NotebookSync | null>(null);
 	let syncPoll: ReturnType<typeof setTimeout> | null = null;
 	const SYNC_POLL_MS = 5000;
 
-	let badge = $derived(syncBadge(syncSlots));
+	// Self-heal state. `remountAttempts` is reset by planRemount once the
+	// notebook recovers, so a page left open for days is not gradually
+	// consumed by unrelated hiccups hours apart.
+	let remountAttempts = $state(0);
+	let remountExhausted = $state(false);
+	let remountPending: ReturnType<typeof setTimeout> | null = null;
+
+	// Computed at poll time rather than derived. Half its inputs are clocks —
+	// how long since the burst settled, how long since the last frame — and a
+	// derived value would only recompute when something else happened to
+	// change, which is precisely the "looks fine because nothing told us
+	// otherwise" failure this page is being fixed for.
+	let diagnosis = $state<Diagnosis | null>(null);
 
 	async function pollSync() {
 		if (notebook?.load_state !== 'loaded') {
-			syncSlots = null;
+			syncState = null;
+			diagnosis = null;
 		} else {
 			try {
-				syncSlots = (await getNotebookSync(notebookId)).slots;
+				syncState = await getNotebookSync(notebookId);
+				diagnosis = diagnose(syncState, {
+					sinceBurstSettledS: sinceBurstSettledS(),
+				});
+				considerRemount();
 			} catch {
 				// A failed poll says nothing about the notebook, only about
 				// this request — so leave the last reading in place and let its
@@ -68,6 +85,48 @@
 			}
 		}
 		syncPoll = setTimeout(pollSync, SYNC_POLL_MS);
+	}
+
+	// The render channel is the half of this system nothing used to watch. It
+	// carries what the iframe actually draws, and it fails independently of
+	// the freshness numbers above — a notebook once sat frozen for 259s while
+	// every one of them read healthy, because the browser had not opened its
+	// socket. The page cannot check that directly: the iframe is cross-origin,
+	// so its socket is invisible from here. The worker counts it and we act on
+	// what it reports.
+	function considerRemount() {
+		if (!diagnosis) return;
+
+		if (remountPending) {
+			// One is already queued. Do not consult the plan again — polls
+			// arrive every 5s and the backoff is longer than that, so
+			// re-planning here would spend the whole retry budget waiting for
+			// the first retry. The only decision left is whether to call it
+			// off, which a notebook that recovered on its own has earned.
+			if (diagnosis.action !== 'remount') {
+				clearTimeout(remountPending);
+				remountPending = null;
+			}
+			return;
+		}
+
+		const plan = planRemount(diagnosis, remountAttempts);
+		remountAttempts = plan.attempts;
+		remountExhausted = plan.exhausted;
+		if (!plan.remount) return;
+		remountPending = setTimeout(() => {
+			remountPending = null;
+			// A remount is a fresh Marimo session — same trade-off the
+			// iframeSrc comment below describes, and the reason this is capped.
+			mountToken += 1;
+			// The new iframe runs its own asset burst, so the connection clock
+			// restarts with it. The old timings chain has to go too: it would
+			// otherwise reach its terminal branch and arm the clock against a
+			// burst that no longer exists, cutting the new one short.
+			if (timingsPoll) clearTimeout(timingsPoll);
+			timingsPoll = null;
+			burstSettledAt = null;
+		}, plan.delayS * 1000);
 	}
 
 	// Wall-clock cost of the whole thing, from the user's action to the iframe
@@ -78,6 +137,20 @@
 	// would keep pointing at the wrong bottleneck.
 	let wallClockStart: number | null = null;
 	let wallClockMs = $state<number | null>(null);
+
+	// Bumped to force a fresh iframe, and therefore a fresh Marimo session.
+	let mountToken = $state(0);
+
+	// When Marimo's asset burst went quiet, which is the only sane clock to
+	// judge "should have connected by now" against. The burst has been
+	// measured at 61s on a cold worker, and a remount restarts it from
+	// nothing — so a deadline armed at the iframe's load event would fire
+	// mid-load and turn a slow open into an unbounded one.
+	let burstSettledAt: number | null = null;
+
+	function sinceBurstSettledS(): number | null {
+		return burstSettledAt === null ? null : (performance.now() - burstSettledAt) / 1000;
+	}
 
 	function startWallClock() {
 		wallClockStart = performance.now();
@@ -123,6 +196,14 @@
 				() => refreshTimings(attemptsLeft - 1, started),
 				TIMINGS_POLL_INTERVAL_MS,
 			);
+		} else if (burstSettledAt === null) {
+			// Either the burst settled, or we ran out of attempts and can no
+			// longer tell. Both start the connection clock: the second case
+			// has already spent the poll window waiting, and leaving it unarmed
+			// would mean a notebook whose burst never settles is never checked
+			// for a connection at all — silence forever, which is the failure
+			// this whole mechanism exists to end.
+			burstSettledAt = performance.now();
 		}
 	}
 
@@ -192,6 +273,11 @@
 	// in-memory history (it refills as the net steps) but renders cleanly,
 	// which is strictly better than hanging. See tests/integration/
 	// test_notebook_refresh for the repro/guard before re-attempting resume.
+	//
+	// Unchanged across remounts: the URL stays exactly what Marimo expects, and
+	// `mountToken` recreates the element instead (see the {#key} below). A cache
+	// -busting query param would work too, but it would arrive at Marimo, whose
+	// run-mode handler already treats one query param as meaningful.
 	let iframeSrc = $derived(notebook?.load_state === 'loaded'
 		? `${API_URL}/api/notebooks/${notebookId}/`
 		: null);
@@ -223,6 +309,7 @@
 		unsubscribeEvents();
 		if (timingsPoll) clearTimeout(timingsPoll);
 		if (syncPoll) clearTimeout(syncPoll);
+		if (remountPending) clearTimeout(remountPending);
 	});
 
 	async function initialise() {
@@ -265,6 +352,15 @@
 		// Starts before the unload: a Reload pays unload + load, and the unload
 		// half was 15s in the field.
 		startWallClock();
+		// The user has taken over, so the self-heal budget starts again. Not
+		// resetting it would leave a page that had already exhausted its
+		// retries unable to heal itself for the rest of its life, however many
+		// times it was manually rescued in between.
+		if (remountPending) clearTimeout(remountPending);
+		remountPending = null;
+		remountAttempts = 0;
+		remountExhausted = false;
+		burstSettledAt = null;
 		try {
 			if (notebook.load_state === 'loaded') {
 				await unloadNotebook(notebookId);
@@ -327,17 +423,30 @@
 					· {notebook.bindings.length} binding{notebook.bindings.length === 1 ? '' : 's'}
 				</span>
 			{/if}
-			<!-- Sync freshness, separate from load_state above. A notebook can
-			     be perfectly `loaded` and hours behind its net; that gap is
-			     invisible in the notebook's own output, which is the whole
-			     reason this badge exists. -->
-			{#if badge}
+			<!-- Health, separate from load_state above. A notebook can be
+			     perfectly `loaded` and hours behind its net, or connected and
+			     drawing nothing; both gaps are invisible in the notebook's own
+			     output, which is the whole reason this badge exists. It names
+			     the broken hop rather than saying only that something is
+			     wrong, because the recoveries differ. -->
+			{#if diagnosis}
 				<span
 					class="inline-block px-2 py-0.5 rounded-full text-white text-[11px] font-medium whitespace-nowrap"
-					style="background: {badge.colour}"
-					title={badge.title}
+					style="background: {stateColour(diagnosis.state)}"
+					title={diagnosis.detail}
 				>
-					{badge.label}
+					{diagnosis.label}
+				</span>
+			{/if}
+			{#if remountExhausted}
+				<!-- Tried what it could and stopped, rather than looping. Says
+				     so explicitly: a page that had silently given up would look
+				     identical to one that never noticed. -->
+				<span
+					class="text-foreground-muted text-xs whitespace-nowrap"
+					title={diagnosis?.detail}
+				>
+					· reconnecting did not help — try Reload
 				</span>
 			{/if}
 			{#if timingsLabel}
@@ -384,15 +493,22 @@
 	<!-- Full-viewport iframe under the slim header -->
 	<!-- onload fires once Marimo's document is in; the asset burst is still
 	     settling at that point, which is why refreshTimings polls. -->
-	<iframe
-		src={iframeSrc}
-		title={notebook.instance_name}
-		class="w-full h-[calc(100vh-104px)] border-0 block"
-		onload={() => {
-			stopWallClock();
-			refreshTimings();
-		}}
-	></iframe>
+	<!-- Keyed so a bumped mountToken destroys and recreates the element,
+	     which is how the page recovers a render channel that never came up.
+	     A new element means a new document and a new Marimo session, with the
+	     same loss of in-memory chart history a Reload costs — which is why the
+	     retry is capped at two rather than being a loop. -->
+	{#key mountToken}
+		<iframe
+			src={iframeSrc}
+			title={notebook.instance_name}
+			class="w-full h-[calc(100vh-104px)] border-0 block"
+			onload={() => {
+				stopWallClock();
+				refreshTimings();
+			}}
+		></iframe>
+	{/key}
 {:else if notebook && notebook.load_state === 'loading'}
 	<div class="flex items-center justify-center h-[calc(100vh-104px)] text-foreground-muted">
 		Loading notebook on worker…

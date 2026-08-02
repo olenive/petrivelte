@@ -877,8 +877,41 @@ export interface NotebookSyncSlot {
 	report_age_s: number;
 }
 
+/**
+ * The render channel, as the worker sees it.
+ *
+ * Everything in `NotebookSyncSlot` travels the HTTP path from the notebook's
+ * bridge and describes that path. The rendering a viewer actually looks at
+ * travels a WebSocket, and the two fail independently — a notebook once sat
+ * frozen for 259 seconds while every slot reported a sub-second sync age,
+ * because the browser had not opened its socket yet.
+ *
+ * This page cannot check that for itself: the Marimo iframe is cross-origin,
+ * so its socket is invisible from here. The worker counts it instead.
+ *
+ * Ages are null for "never happened", which must stay distinct from a large
+ * number — never having connected and having disconnected long ago call for
+ * different recoveries.
+ */
+export interface NotebookTransport {
+	alive: boolean;
+	ws_sessions: number;
+	ws_opened_total: number;
+	last_ws_open_age_s: number | null;
+	frames_relayed: number;
+	last_frame_age_s: number | null;
+	first_report_age_s: number | null;
+}
+
 export interface NotebookSync {
 	slots: NotebookSyncSlot[];
+	// Optional throughout: a control plane or worker predating the transport
+	// signals omits these, and an absent block must degrade to "cannot tell"
+	// rather than being filled in with zeros that read as "nothing attached".
+	transport?: NotebookTransport | null;
+	reachable?: boolean;
+	reason?: 'no_worker' | 'not_loaded' | 'worker_unreachable' | null;
+	bindings?: number;
 }
 
 export async function getNotebookSync(id: string): Promise<NotebookSync> {
