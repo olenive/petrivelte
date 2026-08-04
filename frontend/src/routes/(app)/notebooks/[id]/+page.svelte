@@ -17,6 +17,14 @@
 	} from '$lib/api';
 	import { diagnose, planRemount, stateColour, type Diagnosis } from '$lib/notebookSync';
 	import { serverEventsStore } from '$lib/stores/serverEvents';
+	import NotebookLoadPanel from '$lib/components/NotebookLoadPanel.svelte';
+	import {
+		emptyProgress,
+		reduceLoadEvent,
+		applyBurst,
+		expectedSeconds,
+		type LoadProgress,
+	} from '$lib/notebookLoadProgress';
 
 	// Human-friendly reasons matching what the worker / control plane
 	// stamps on `load_error` when something changes load_state. Keep this
@@ -43,6 +51,59 @@
 	let errorMessage = $state<string | null>(null);
 	let timings = $state<NotebookTimings | null>(null);
 	let timingsPoll: ReturnType<typeof setTimeout> | null = null;
+
+	// What the load is doing, so the wait is legible rather than a spinner.
+	// The spawn is ~99% of a cold load and used to report nothing at all, which
+	// made a working load and a hung one look identical.
+	let loadProgress = $state<LoadProgress>(emptyProgress());
+	let loadElapsedS = $state(0);
+	let loadEvents: EventSource | null = null;
+	let loadTicker: ReturnType<typeof setInterval> | null = null;
+
+	// Burst arrives on the timings poll, not the event stream: the notebook's
+	// uvicorn runs with access_log=False, so the subprocess says nothing at all
+	// while the browser fetches its ~228 lazily imported chunks. Without this
+	// the panel would go quiet for the whole second half of the wait.
+	let displayedProgress = $derived(applyBurst(loadProgress, timings));
+
+	function startLoadStream() {
+		stopLoadStream();
+		loadProgress = emptyProgress();
+		loadElapsedS = 0;
+		const startedAt = performance.now();
+		loadTicker = setInterval(() => {
+			loadElapsedS = (performance.now() - startedAt) / 1000;
+		}, 250);
+		try {
+			loadEvents = new EventSource(`${API_URL}/api/notebooks/${notebookId}/events`, {
+				withCredentials: true,
+			});
+		} catch {
+			// No progress detail is a worse page, not a broken one.
+			return;
+		}
+		loadEvents.onmessage = (message) => {
+			try {
+				loadProgress = reduceLoadEvent(loadProgress, JSON.parse(message.data));
+			} catch {
+				// One malformed event must not take down the whole readout.
+			}
+		};
+		// Deliberately no onerror handler beyond closing: EventSource retries on
+		// its own, and a load that finishes normally closes the stream from this
+		// side anyway.
+	}
+
+	function stopLoadStream() {
+		if (loadTicker !== null) {
+			clearInterval(loadTicker);
+			loadTicker = null;
+		}
+		if (loadEvents) {
+			loadEvents.close();
+			loadEvents = null;
+		}
+	}
 
 	// Notebook health. Polled rather than pushed because most of it is an age:
 	// it changes with the passage of time, not with events, so there is
@@ -307,6 +368,7 @@
 
 	onDestroy(() => {
 		unsubscribeEvents();
+		stopLoadStream();
 		if (timingsPoll) clearTimeout(timingsPoll);
 		if (syncPoll) clearTimeout(syncPoll);
 		if (remountPending) clearTimeout(remountPending);
@@ -316,6 +378,17 @@
 		initialising = true;
 		errorMessage = null;
 		startWallClock();
+		startLoadStream();
+		// The expectation is this notebook's own last load, so it has to be
+		// read up front: waiting for the iframe's poll would mean the panel
+		// could only say "usually about 51s" after the wait it exists to
+		// explain. Fire and forget — no expectation is a quieter panel, not a
+		// broken one.
+		getNotebookTimings(notebookId)
+			.then((t) => {
+				timings = t;
+			})
+			.catch(() => {});
 		try {
 			notebook = await getNotebook(notebookId);
 			if (notebook.load_state !== 'loaded') {
@@ -325,6 +398,9 @@
 			errorMessage = e?.message ?? String(e);
 		} finally {
 			initialising = false;
+			// The spawn is over either way; the burst that follows is reported
+			// by the timings poll, which the iframe's onload starts.
+			stopLoadStream();
 		}
 	}
 
@@ -475,9 +551,11 @@
 <NotebookErrorsBanner {notebookId} />
 
 {#if initialising}
-	<div class="flex items-center justify-center h-[calc(100vh-104px)] text-foreground-muted">
-		Initialising notebook…
-	</div>
+	<NotebookLoadPanel
+		progress={displayedProgress}
+		elapsedSeconds={loadElapsedS}
+		expectedSeconds={expectedSeconds(timings)}
+	/>
 {:else if errorMessage}
 	<div class="m-6 p-4 border border-red-500 rounded bg-red-50 text-red-700 text-sm">
 		<p class="font-medium mb-2">Could not open notebook</p>

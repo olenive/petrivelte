@@ -845,6 +845,37 @@ export interface NotebookTimings {
 		at: number;
 	} | null;
 	burst_in_progress: boolean;
+	/**
+	 * The in-flight burst, while one is open. `expected` is the previous
+	 * burst's total, which is what makes an honest fraction possible: Marimo
+	 * fetches the same lazily imported asset set on every open. It is null on
+	 * a first-ever open — show a bare count there rather than a percentage
+	 * against a guess.
+	 *
+	 * Optional so an older control plane degrades instead of throwing.
+	 */
+	burst_progress?: {
+		count: number;
+		elapsed_s: number;
+		expected: number | null;
+	} | null;
+}
+
+/**
+ * One event from a notebook's load, as the worker publishes it.
+ *
+ * `load_progress` carries `{ step, message }` and drives the phase checklist;
+ * `log` carries `{ text }`, the subprocess's own stderr. Both are needed: the
+ * checklist is what a person reads, the log is what they send us when the
+ * checklist is not enough.
+ */
+export interface NotebookLoadEvent {
+	seq: number;
+	scope: 'notebook';
+	notebook_id: string | null;
+	kind: 'load_progress' | 'log' | string;
+	ts: string;
+	data: Record<string, any>;
 }
 
 export async function getNotebookTimings(id: string): Promise<NotebookTimings> {
