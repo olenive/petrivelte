@@ -5,7 +5,11 @@
 	import { workerEventsStore, connectToWorker, disconnectWorkerEvents } from '$lib/stores/workerEvents';
 	import { selectedTokenId } from '$lib/stores/tokenSelection';
 	import { serverEventsStore } from '$lib/stores/serverEvents';
-	import { workerMemoryStore, type WorkerMemorySnapshot } from '$lib/stores/workerMemory';
+	import {
+		workerMemoryStore,
+		workerMemoryUsedMb,
+		type WorkerMemorySnapshot,
+	} from '$lib/stores/workerMemory';
 	import {
 		logout,
 		listNets, listWorkers, patchNet, loadNet, unloadNet,
@@ -772,8 +776,7 @@
 		if (!snap || !w) return 0;
 		const limit = snap.container_total_mb ?? w.memory_mb;
 		if (!limit) return 0;
-		const used = (snap.parent_rss_mb ?? 0) + snap.nets.reduce((s, n) => s + n.rss_mb, 0);
-		return Math.min(100, (used / limit) * 100);
+		return Math.min(100, (workerMemoryUsedMb(snap) / limit) * 100);
 	});
 
 	let memoryBarText = $derived.by(() => {
@@ -781,8 +784,7 @@
 		const w = selectedNetWorker();
 		if (!snap || !w) return '';
 		const limit = Math.round(snap.container_total_mb ?? w.memory_mb);
-		const used = Math.round((snap.parent_rss_mb ?? 0) + snap.nets.reduce((s, n) => s + n.rss_mb, 0));
-		return `${used} / ${limit} MB`;
+		return `${Math.round(workerMemoryUsedMb(snap))} / ${limit} MB`;
 	});
 
 	function memoryBarColor(percent: number): string {
@@ -1312,7 +1314,7 @@
 				{#if selectedWorkerMemory}
 					<div
 						class="flex items-center gap-2 min-w-[180px]"
-						title="Worker memory: parent {Math.round(selectedWorkerMemory.parent_rss_mb ?? 0)} MB + nets {Math.round(selectedWorkerMemory.nets.reduce((s, n) => s + n.rss_mb, 0))} MB"
+						title="Worker memory: parent {Math.round(selectedWorkerMemory.parent_rss_mb ?? 0)} MB + nets {Math.round(selectedWorkerMemory.nets.reduce((s, n) => s + n.rss_mb, 0))} MB + notebooks {Math.round((selectedWorkerMemory.notebooks ?? []).reduce((s, n) => s + n.rss_mb, 0))} MB"
 					>
 						<span class="text-xs text-foreground-muted">Mem</span>
 						<div class="flex-1 h-2 bg-muted rounded overflow-hidden min-w-[80px]">

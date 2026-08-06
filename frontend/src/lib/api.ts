@@ -800,12 +800,95 @@ export async function deleteNotebook(id: string): Promise<void> {
 	if (!res.ok) throw new Error('Failed to delete notebook');
 }
 
-export async function loadNotebook(id: string): Promise<{ status: string; port: number | null }> {
+/** A notebook subprocess running on a worker, and what it costs.
+ *
+ * ~188MB each — larger than the worker's own process — so on the default
+ * 512MB machine one is the ceiling. `instance_name` comes from the control
+ * plane, the rest from the worker itself.
+ */
+export interface OccupancyNotebook {
+	notebook_id: string;
+	definition_name: string | null;
+	instance_name?: string | null;
+	pid: number;
+	rss_mb: number;
+	peak_rss_mb: number;
+}
+
+export interface OccupancyNet {
+	net_id: string;
+	pid: number;
+	rss_mb: number;
+	peak_rss_mb: number;
+}
+
+export interface WorkerOccupancy {
+	reachable: boolean;
+	/** `worker_unreachable` | `not_supported` | `no_backend` | `http_*` | null */
+	reason: string | null;
+	memory: {
+		parent_rss_mb?: number | null;
+		parent_peak_rss_mb?: number | null;
+		container_total_mb?: number | null;
+		container_available_mb?: number | null;
+	};
+	nets: OccupancyNet[];
+	notebooks: OccupancyNotebook[];
+}
+
+/** The 409 body returned when loading would add a second notebook to a worker. */
+export interface AdditionalNotebookRefusal {
+	reason: 'additional_notebook';
+	message: string;
+	occupancy: WorkerOccupancy;
+	additional: boolean;
+	other_notebooks: OccupancyNotebook[];
+	estimated_cost_mb: number;
+	estimate_source: 'same_notebook' | 'other_notebook' | 'default';
+	predicted_free_mb: number | null;
+	/** `null` means unknown — never read it as "yes". */
+	fits: boolean | null;
+}
+
+/** Thrown by `loadNotebook` when the server wants explicit consent. */
+export class AdditionalNotebookError extends Error {
+	constructor(public readonly refusal: AdditionalNotebookRefusal) {
+		super(refusal.message);
+		this.name = 'AdditionalNotebookError';
+	}
+}
+
+export async function getWorkerOccupancy(workerId: string): Promise<WorkerOccupancy> {
+	const res = await get(`/api/workers/${workerId}/occupancy`);
+	if (!res.ok) throw new Error('Failed to fetch worker occupancy');
+	return res.json();
+}
+
+/** Spawn a notebook's subprocess.
+ *
+ * Throws `AdditionalNotebookError` when the target worker is already running a
+ * different notebook and `confirmAdditional` was not set — the caller is meant
+ * to show what is running, then retry with it true. The refusal is the
+ * server's, not the dialog's, so an agent hitting the API gets the same
+ * information a person does.
+ */
+export async function loadNotebook(
+	id: string,
+	opts?: { confirmAdditional?: boolean },
+): Promise<{ status: string; port: number | null }> {
 	const res = await post(
 		`/api/notebooks/${id}/load`,
-		undefined,
+		opts?.confirmAdditional ? { confirm_additional: true } : undefined,
 		withIdempotency(newIdempotencyKey()),
 	);
+	if (res.status === 409) {
+		const body = await res.json();
+		const detail = body?.detail;
+		if (detail?.reason === 'additional_notebook') {
+			throw new AdditionalNotebookError(detail as AdditionalNotebookRefusal);
+		}
+		throw new Error(extractErrorMessage(body, 'Failed to load notebook'));
+	}
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to load notebook'));
 	return res.json();
 }

@@ -1,20 +1,27 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { page } from '$app/stores';
+	import { goto } from '$app/navigation';
 
 	import AppNav from '$lib/components/AppNav.svelte';
 	import NotebookErrorsBanner from '$lib/components/NotebookErrorsBanner.svelte';
 	import {
 		API_URL,
+		AdditionalNotebookError,
 		getNotebook,
 		getNotebookSync,
 		getNotebookTimings,
+		getWorkerOccupancy,
 		loadNotebook,
 		unloadNotebook,
+		type AdditionalNotebookRefusal,
 		type Notebook,
 		type NotebookSync,
 		type NotebookTimings,
+		type WorkerOccupancy,
 	} from '$lib/api';
+	import NotebookOccupancyBanner from '$lib/components/NotebookOccupancyBanner.svelte';
+	import NotebookLoadConfirm from '$lib/components/NotebookLoadConfirm.svelte';
 	import { diagnose, planRemount, type Diagnosis } from '$lib/notebookSync';
 	import { serverEventsStore } from '$lib/stores/serverEvents';
 	import NotebookLoadPanel from '$lib/components/NotebookLoadPanel.svelte';
@@ -52,6 +59,13 @@
 	let errorMessage = $state<string | null>(null);
 	let timings = $state<NotebookTimings | null>(null);
 	let timingsPoll: ReturnType<typeof setTimeout> | null = null;
+
+	// What else is on this worker. A notebook subprocess is ~190MB — the
+	// largest process on the machine — so the second one on a 512MB worker is
+	// what gets something OOM-killed. `pendingRefusal` is the server's 409:
+	// this load would add a notebook, and it wants that said out loud first.
+	let occupancy = $state<WorkerOccupancy | null>(null);
+	let pendingRefusal = $state<AdditionalNotebookRefusal | null>(null);
 
 	// What the load is doing, so the wait is legible rather than a spinner.
 	// The spawn is ~99% of a cold load and used to report nothing at all, which
@@ -412,6 +426,7 @@
 			if (notebook.load_state !== 'loaded') {
 				await ensureLoaded();
 			}
+			refreshOccupancy();
 		} catch (e: any) {
 			errorMessage = e?.message ?? String(e);
 		} finally {
@@ -422,7 +437,7 @@
 		}
 	}
 
-	async function ensureLoaded() {
+	async function ensureLoaded(confirmAdditional = false) {
 		if (!notebook) return;
 		if (!notebook.worker_id) {
 			errorMessage = 'Notebook is not assigned to a worker. Pick a worker on the Wiring page first.';
@@ -430,12 +445,40 @@
 		}
 		busy = true;
 		try {
-			await loadNotebook(notebookId);
+			await loadNotebook(notebookId, { confirmAdditional });
+			pendingRefusal = null;
 			notebook = await getNotebook(notebookId);
 		} catch (e: any) {
-			errorMessage = e?.message ?? String(e);
+			// The server refuses once when this would be an additional notebook
+			// on the worker. Opening the page loads it automatically, so without
+			// this the ~190MB would be spent by following a link — show what is
+			// running and let the user decide.
+			if (e instanceof AdditionalNotebookError) {
+				pendingRefusal = e.refusal;
+			} else {
+				errorMessage = e?.message ?? String(e);
+			}
 		} finally {
 			busy = false;
+		}
+	}
+
+	function cancelAdditional() {
+		pendingRefusal = null;
+		history.length > 1 ? history.back() : goto('/wiring');
+	}
+
+	/** Poll-free: occupancy changes only when something is loaded or evicted,
+	 * so it is read at mount and after a load rather than on a timer. */
+	async function refreshOccupancy() {
+		const workerId = notebook?.worker_id;
+		if (!workerId) return;
+		try {
+			occupancy = await getWorkerOccupancy(workerId);
+		} catch {
+			// A missing occupancy reading hides the banner; it never blocks the
+			// notebook, which is the thing the user came for.
+			occupancy = null;
 		}
 	}
 
@@ -459,8 +502,12 @@
 			if (notebook.load_state === 'loaded') {
 				await unloadNotebook(notebookId);
 			}
-			await loadNotebook(notebookId);
+			// Confirmed by construction: restarting a notebook the user already
+			// had is not an additional one, and after the unload above the
+			// server would otherwise see this as adding one back.
+			await loadNotebook(notebookId, { confirmAdditional: true });
 			notebook = await getNotebook(notebookId);
+			refreshOccupancy();
 		} catch (e: any) {
 			errorMessage = e?.message ?? String(e);
 		} finally {
@@ -567,7 +614,22 @@
 
 <NotebookErrorsBanner {notebookId} />
 
-{#if initialising}
+<NotebookOccupancyBanner
+	{occupancy}
+	{notebookId}
+	definitionName={notebook?.definition_name}
+/>
+
+{#if pendingRefusal}
+	<!-- Ahead of `initialising`: the load stopped to ask a question, so the
+	     load panel would be counting up a wait that is not happening. -->
+	<NotebookLoadConfirm
+		refusal={pendingRefusal}
+		{busy}
+		onconfirm={() => ensureLoaded(true)}
+		oncancel={cancelAdditional}
+	/>
+{:else if initialising}
 	<NotebookLoadPanel
 		progress={displayedProgress}
 		elapsedSeconds={loadElapsedS}
@@ -620,7 +682,7 @@
 		</p>
 		<button
 			class="mt-3 px-3 py-1.5 border border-accent rounded bg-card text-accent text-xs font-medium hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
-			onclick={ensureLoaded}
+			onclick={() => ensureLoaded()}
 			disabled={busy}
 		>
 			{busy ? 'Loading…' : 'Load on assigned worker'}

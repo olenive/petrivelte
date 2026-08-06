@@ -28,7 +28,12 @@
 		type ServerEvent,
 		type ConnectionState,
 	} from '$lib/stores/serverEvents';
-	import { workerMemoryStore, type WorkerMemorySnapshot } from '$lib/stores/workerMemory';
+	import {
+		workerMemoryStore,
+		workerMemoryUsedMb,
+		type WorkerMemorySnapshot,
+	} from '$lib/stores/workerMemory';
+	import { NOTEBOOK_COST_MB as OCCUPANCY_NOTEBOOK_COST_MB } from '$lib/notebookOccupancy';
 
 	// ---- data ----
 
@@ -157,14 +162,25 @@
 		if (changed) rebuildGraph(wiring);
 	}
 
+	// Measured, not guessed — see notebookOccupancy.ts.
+	const NOTEBOOK_COST_MB = OCCUPANCY_NOTEBOOK_COST_MB;
+
 	function applyMemorySnapshot(m: Map<string, WorkerMemorySnapshot>): void {
 		if (!wiring || m.size === 0) return;
 		let changed = false;
 		for (const w of wiring.workers) {
 			const snap = m.get(w.id);
 			if (!snap) continue;
-			const rss = snap.parent_rss_mb ?? null;
-			const peak = snap.parent_peak_rss_mb ?? null;
+			// Everything the worker is holding, not just its own process. This
+			// read `parent_rss_mb` until 2026-08-06, which omitted the notebook
+			// subprocesses — the largest things on the machine at ~188MB each —
+			// and so overstated free memory by more than the worker itself, in
+			// the picker below that exists to choose where a notebook fits.
+			const rss = workerMemoryUsedMb(snap);
+			// A lower bound: the highest total actually observed at one instant,
+			// rather than a sum of peaks that never coexisted. Never below the
+			// current usage, which would read as a broken gauge.
+			const peak = Math.max(snap.parent_peak_rss_mb ?? 0, rss);
 			if (rss !== w.memory_used_mb || peak !== w.memory_peak_mb) {
 				w.memory_used_mb = rss;
 				w.memory_peak_mb = peak;
@@ -1029,20 +1045,20 @@
 						{/each}
 					</select>
 					<p class="mt-1 text-[11px] text-foreground-muted">
-						The notebook subprocess reserves ~80 MB for the Marimo kernel; user
-						code adds on top. Watch the worker's memory bar after load to see
-						actual usage. v1 doesn't pre-estimate user-code RAM — it can pull
-						arbitrary data at runtime.
+						A notebook subprocess costs about 190 MB — Marimo plus your
+						deployment's imports — which makes it the largest process on a
+						worker. On a 512 MB worker that is room for one. User code adds on
+						top and isn't estimated here: it can pull arbitrary data at runtime.
 					</p>
 					{#if addModal.workerId}
 						{@const _w = wiring?.workers.find(w => w.id === addModal.workerId)}
 						{#if _w}
 							{@const _free = _w.memory_mb - (_w.memory_used_mb ?? 0)}
-							{#if _free < 150}
+							{#if _free < NOTEBOOK_COST_MB}
 								<p class="mt-1 text-[11px] text-amber-500">
-									⚠ Only {Math.round(_free)} MB free on this worker — Marimo
-									alone needs ~80 MB. Pick a bigger worker if your notebook
-									imports anything heavy.
+									⚠ Only {Math.round(_free)} MB free on this worker, and a
+									notebook needs about {NOTEBOOK_COST_MB} MB. Pick a bigger
+									worker, or unload something first.
 								</p>
 							{/if}
 						{/if}
