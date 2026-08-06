@@ -15,9 +15,10 @@
 		type NotebookSync,
 		type NotebookTimings,
 	} from '$lib/api';
-	import { diagnose, planRemount, stateColour, type Diagnosis } from '$lib/notebookSync';
+	import { diagnose, planRemount, type Diagnosis } from '$lib/notebookSync';
 	import { serverEventsStore } from '$lib/stores/serverEvents';
 	import NotebookLoadPanel from '$lib/components/NotebookLoadPanel.svelte';
+	import NotebookHealthPanel from '$lib/components/NotebookHealthPanel.svelte';
 	import {
 		emptyProgress,
 		reduceLoadEvent,
@@ -189,6 +190,23 @@
 			burstSettledAt = null;
 		}, plan.delayS * 1000);
 	}
+
+	// The same remount, on request. Resets the attempt count: the automatic
+	// budget exists to stop an unattended page looping, and a person asking for
+	// one is not that.
+	function remountNow() {
+		if (remountPending) {
+			clearTimeout(remountPending);
+			remountPending = null;
+		}
+		remountAttempts = 0;
+		remountExhausted = false;
+		mountToken += 1;
+		if (timingsPoll) clearTimeout(timingsPoll);
+		timingsPoll = null;
+		burstSettledAt = null;
+	}
+
 
 	// Wall-clock cost of the whole thing, from the user's action to the iframe
 	// firing load. The server-side `load` number covers only the spawn call, so
@@ -505,14 +523,13 @@
 			     output, which is the whole reason this badge exists. It names
 			     the broken hop rather than saying only that something is
 			     wrong, because the recoveries differ. -->
-			{#if diagnosis}
-				<span
-					class="inline-block px-2 py-0.5 rounded-full text-white text-[11px] font-medium whitespace-nowrap"
-					style="background: {stateColour(diagnosis.state)}"
-					title={diagnosis.detail}
-				>
-					{diagnosis.label}
-				</span>
+			{#if diagnosis && syncState}
+				<NotebookHealthPanel
+					sync={syncState}
+					{diagnosis}
+					{notebookId}
+					onact={diagnosis.action === 'remount' ? remountNow : handleReload}
+				/>
 			{/if}
 			{#if remountExhausted}
 				<!-- Tried what it could and stopped, rather than looping. Says
