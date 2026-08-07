@@ -700,10 +700,27 @@ export async function triggerRepoBuild(repoId: string): Promise<{ deployment_id:
  * Add-Notebook modal binds against ``name`` and surfaces ``slots`` for
  * preview, so those must stay present.
  */
+/**
+ * Something marimo found that stops it running part of the notebook.
+ *
+ * Recorded at build time, so it is known before a worker is ever asked to run
+ * the notebook. `lines` holds one anchor per offending cell.
+ */
+export interface NotebookDefect {
+	code: string;
+	name: string;
+	message: string;
+	lines: number[];
+	fix: string;
+}
+
 export interface DiscoveredNotebook {
 	name: string;
 	path_in_tarball: string;
 	slots: NotebookSlot[];
+	// Optional: a deployment built before the check existed has no such field,
+	// and that must read as "not checked", never as "checked and sound".
+	defects?: NotebookDefect[];
 }
 
 export interface Deployment {

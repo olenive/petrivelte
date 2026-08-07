@@ -34,6 +34,8 @@
 		type WorkerMemorySnapshot,
 	} from '$lib/stores/workerMemory';
 	import { NOTEBOOK_COST_MB as OCCUPANCY_NOTEBOOK_COST_MB } from '$lib/notebookOccupancy';
+	import NotebookDefectWarning from '$lib/components/NotebookDefectWarning.svelte';
+	import { verdictFor, verdictForInstance } from '$lib/notebookDefects';
 
 	// ---- data ----
 
@@ -739,6 +741,15 @@
 								</dd>
 							</dl>
 
+							<NotebookDefectWarning
+								defects={verdictForInstance(
+									deployments,
+									nb.deployment_id,
+									nb.definition_name,
+								).defects}
+								definitionName={nb.definition_name}
+							/>
+
 							<div class="mt-4">
 								<h3 class="text-xs font-semibold text-foreground mb-2">Slots ({nb.slots.length})</h3>
 								{#if nb.slots.length === 0}
@@ -1006,9 +1017,21 @@
 					>
 						<option value="">Pick a notebook…</option>
 						{#each deploymentNotebookDefs.get(addModal.deploymentId) ?? [] as def}
-							<option value={def.name}>{def.name}</option>
+							<option value={def.name}
+								>{def.name}{(def.defects?.length ?? 0) > 0 ? ' ⚠' : ''}</option
+							>
 						{/each}
 					</select>
+					{#if addModal.definitionName}
+						{@const picked = (deploymentNotebookDefs.get(addModal.deploymentId) ?? []).find(
+							(d) => d.name === addModal.definitionName,
+						)}
+						<NotebookDefectWarning
+							defects={verdictFor(picked).defects}
+							definitionName={addModal.definitionName}
+							compact
+						/>
+					{/if}
 					{#if addModal.deploymentId && (deploymentNotebookDefs.get(addModal.deploymentId)?.length ?? 0) === 0}
 						<span class="text-[11px] text-foreground-muted">
 							No notebooks discovered in this deployment. Add a Marimo notebook

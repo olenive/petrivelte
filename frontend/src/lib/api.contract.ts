@@ -10,7 +10,7 @@
  * the UI reads directly. The cost is one literal per field; the benefit
  * is type-check coverage on the parts that matter.
  */
-import type { Deployment, DiscoveredNotebook, NotebookSlot } from './api';
+import type { Deployment, DiscoveredNotebook, NotebookDefect, NotebookSlot } from './api';
 
 // -- Regression lock: Deployment must expose discovered_notebooks --
 //
@@ -49,6 +49,30 @@ const _notebook_shape: DiscoveredNotebook = {
 	name: 'x',
 	path_in_tarball: 'x.py',
 	slots: [],
+};
+
+// -- NotebookDefect contract --
+//
+// The build records what marimo will refuse to run, and the wiring view warns
+// on it. Every field is read: ``message`` and ``lines`` are the warning,
+// ``fix`` is marimo's own remedy, ``name``/``code`` identify the rule.
+//
+// ``defects`` stays optional on DiscoveredNotebook, because a deployment built
+// before the check existed genuinely has no verdict — and "not checked" must
+// not render as "checked and sound".
+const _defect_shape: NotebookDefect = {
+	code: 'MB002',
+	name: 'multiple-definitions',
+	message: "Variable 'petri' is defined in multiple cells",
+	lines: [103, 155],
+	fix: 'Variables must be unique across cells.',
+};
+
+const _notebook_with_defects: DiscoveredNotebook = {
+	name: 'x',
+	path_in_tarball: 'x.py',
+	slots: [],
+	defects: [_defect_shape],
 };
 
 // -- NotebookSlot contract --
