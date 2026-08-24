@@ -151,6 +151,11 @@
 	}
 
 	function buildFactoryParams(netId: string, params: NetParam[]): Record<string, unknown> | undefined {
+		// No schema means nothing to say about params: leave whatever the net
+		// row already holds alone. With a schema, the boxes are authoritative
+		// — an all-empty form must send {} rather than undefined, or the
+		// server falls back to the row's stored params and a value the user
+		// just cleared comes back.
 		if (params.length === 0) return undefined;
 		const values = netParamValues.get(netId) ?? {};
 		const result: Record<string, unknown> = {};
@@ -158,7 +163,7 @@
 			const raw = values[p.name] ?? '';
 			if (raw !== '') result[p.name] = coerceParamValue(raw, p.type);
 		}
-		return Object.keys(result).length > 0 ? result : undefined;
+		return result;
 	}
 
 	// Delete confirmation state (per-worker so timers don't interfere)
@@ -1230,7 +1235,7 @@
 																				netParamValues.set(net.id, v);
 																				netParamValues = netParamValues;
 																			}}
-																			placeholder={param.default ?? ''}
+																			placeholder={param.default ?? param.default_display ?? ''}
 																			class="flex-1 max-w-[200px] px-2 py-1 border border-border rounded bg-surface text-foreground text-xs focus:outline-none focus:border-accent"
 																		/>
 																	</div>

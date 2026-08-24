@@ -299,8 +299,14 @@ export async function confirmEmailChange(token: string): Promise<AuthUser> {
 export interface NetParam {
 	name: string;
 	type: string | null;
+	/** Prefill for the input box. Null when the factory's default cannot
+	 *  survive the text round trip (None, a lambda, an `int | None`) — leave
+	 *  the box empty and the factory's own default applies. */
 	default: string | null;
 	required: boolean;
+	/** The default as written in the factory's source, for display only.
+	 *  Optional: control planes predating this field omit it. */
+	default_display?: string | null;
 }
 
 export interface Net {

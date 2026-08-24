@@ -1611,7 +1611,7 @@
 							id="param-{param.name}"
 							type="text"
 							bind:value={paramValues[param.name]}
-							placeholder={param.default ?? ''}
+							placeholder={param.default ?? param.default_display ?? ''}
 							required={param.required}
 							class="w-full px-3 py-2 border border-border rounded bg-surface text-foreground text-sm focus:outline-none focus:border-accent"
 						/>
