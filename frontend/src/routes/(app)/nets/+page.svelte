@@ -154,6 +154,13 @@
 		return net.factory_params_schema;
 	}
 
+	// Mirrors _UI_COERCION in the control plane's discovery.py, which decides
+	// whether a factory default is safe to prefill by predicting what this
+	// function does to it. The two must agree: teaching this one a new
+	// annotation (int | None, say) without updating the server silently
+	// reintroduces the bug where a default round-trips into user code as a
+	// string. The durable fix is for the schema to declare the coercion per
+	// param — see dev-docs/DIAGNOSABILITY.md.
 	function coerceParamValue(value: string, type: string | null): unknown {
 		if (type === 'int') return parseInt(value, 10);
 		if (type === 'float') return parseFloat(value);
