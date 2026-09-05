@@ -244,6 +244,27 @@ describe('lastRunBadge', () => {
 		expect(badge?.title).toContain('schedule');
 	});
 
+	it('does not say a skipped slot ended', () => {
+		// It never ran. `ended_at` is when the control plane consumed the slot,
+		// which is a different event from a run finishing.
+		const skipped = lastRunBadge(lastRun({
+			state: 'skipped',
+			reason: 'overlap',
+			started_at: null,
+			ended_at: '2026-09-05T11:57:00Z',
+			duration_s: null,
+		}), NOW);
+		const stopped = lastRunBadge(lastRun({
+			state: 'stopped',
+			reason: 'user_stop',
+			ended_at: '2026-09-05T11:57:00Z',
+		}), NOW);
+
+		expect(skipped?.title).toContain('skipped 3m ago');
+		expect(skipped?.title).not.toContain('ended');
+		expect(stopped?.title).toContain('ended 3m ago');
+	});
+
 	it('still renders once retention has taken the run row away', () => {
 		// `trigger` and `ended_at` come from the run; the outcome is
 		// denormalised onto the state row precisely so it outlives them.
@@ -264,7 +285,7 @@ describe('lastRunBadge', () => {
 
 describe('liveness', () => {
 	const executing = netFields({
-		open_run: { id: 'r-9', trigger: 'schedule', state: 'running', started_at: '2026-09-05T11:58:00Z' },
+		open_run: { id: 'r-9', trigger: 'schedule', state: 'running', created_at: '2026-09-05T11:57:59Z', started_at: '2026-09-05T11:58:00Z', scheduled_for: null },
 		step_count: 4213,
 		last_progress_at: '2026-09-05T11:59:48Z',
 	});
@@ -284,7 +305,7 @@ describe('liveness', () => {
 		expect(netIsRunning(executing)).toBe(true);
 		expect(netIsRunning(drained)).toBe(false);
 		expect(netIsRunning(netFields({
-			open_run: { id: 'r-9', trigger: 'schedule', state: 'claimed', started_at: null },
+			open_run: { id: 'r-9', trigger: 'schedule', state: 'claimed', created_at: '2026-09-05T11:56:00Z', started_at: null, scheduled_for: null },
 		}))).toBe(false);
 	});
 
@@ -321,20 +342,64 @@ describe('liveness', () => {
 		// issued. Nothing is firing yet, and `started_at` is null until it is.
 		for (const state of ['claimed', 'dispatched']) {
 			const armed = netFields({
-				open_run: { id: 'r-9', trigger: 'schedule', state, started_at: null },
+				open_run: { id: 'r-9', trigger: 'schedule', state, created_at: '2026-09-05T11:56:00Z', started_at: null, scheduled_for: '2026-09-05T02:00:00Z' },
 				step_count: 12,
 				last_progress_at: '2026-09-05T02:31:00Z',
 			});
-			expect(openRunLabel(armed, NOW)?.text).toBe('scheduled run pending');
+			expect(openRunLabel(armed, NOW)?.text).toContain('scheduled run pending');
 			expect(progressLabel(armed, NOW)).toBeNull();
 		}
 	});
 
+	it('measures an armed run’s wait from when it was claimed', () => {
+		// `started_at` is null for a run that has not begun, so the wait has to
+		// come from `created_at` — and a claim that is not moving is exactly
+		// what this is for.
+		const armed = netFields({
+			open_run: {
+				id: 'r-9', trigger: 'schedule', state: 'claimed',
+				created_at: '2026-09-05T11:56:00Z', started_at: null, scheduled_for: null,
+			},
+		});
+		const label = openRunLabel(armed, NOW);
+
+		expect(label?.text).toBe('scheduled run pending since 4m');
+		expect(label?.title).toContain('2026-09-05T11:56:00Z');
+	});
+
+	it('names the slot an armed run is waiting for, in UTC', () => {
+		// Schedules are UTC by policy, so the slot must read as the same number
+		// that is written in the net's decorator.
+		const armed = netFields({
+			open_run: {
+				id: 'r-9', trigger: 'schedule', state: 'dispatched',
+				created_at: '2026-09-05T11:56:00Z', started_at: null,
+				scheduled_for: '2026-09-05T02:00:00Z',
+			},
+		});
+
+		expect(openRunLabel(armed, NOW)?.text).toBe(
+			'scheduled run pending since 4m · for the 02:00 UTC slot',
+		);
+	});
+
+	it('dates a slot that is not today’s', () => {
+		const armed = netFields({
+			open_run: {
+				id: 'r-9', trigger: 'schedule', state: 'claimed',
+				created_at: '2026-09-05T11:56:00Z', started_at: null,
+				scheduled_for: '2026-09-04T02:00:00Z',
+			},
+		});
+
+		expect(openRunLabel(armed, NOW)?.text).toContain('for the Sep 4 02:00 UTC slot');
+	});
+
 	it('still names an open run in a state it has never heard of', () => {
 		const odd = netFields({
-			open_run: { id: 'r-9', trigger: 'manual', state: 'quarantined', started_at: null },
+			open_run: { id: 'r-9', trigger: 'manual', state: 'quarantined', created_at: '2026-09-05T11:56:00Z', started_at: null, scheduled_for: null },
 		});
-		expect(openRunLabel(odd, NOW)?.text).toBe('run open (unknown)');
+		expect(openRunLabel(odd, NOW)?.text).toContain('run open (unknown)');
 		expect(progressLabel(odd, NOW)).toBeNull();
 	});
 });
@@ -346,8 +411,20 @@ describe('applyRunEvent', () => {
 
 		expect(updated.open_run?.id).toBe('r-9');
 		expect(updated.open_run?.started_at).toBe('2026-09-05T11:58:00Z');
+		// The event carries no `created_at`; for a run that has just started
+		// the two are the same instant, and the refetch replaces it anyway.
+		expect(updated.open_run?.created_at).toBe('2026-09-05T11:58:00Z');
 		expect(updated.pending_reason).toBeNull();
 		expect(updated.pending_since).toBeNull();
+	});
+
+	it('carries the slot onto the open run it opens', () => {
+		const armed = applyRunEvent(netFields(), runEvent({
+			trigger: 'schedule',
+			scheduled_for: '2026-09-05T02:00:00Z',
+		}));
+
+		expect(armed.open_run?.scheduled_for).toBe('2026-09-05T02:00:00Z');
 	});
 
 	it('closes the run it names, with a duration derived from the event', () => {
@@ -379,7 +456,7 @@ describe('applyRunEvent', () => {
 
 	it('records a skipped slot without claiming the net ran', () => {
 		const armed = netFields({
-			open_run: { id: 'r-9', trigger: 'schedule', state: 'claimed', started_at: null },
+			open_run: { id: 'r-9', trigger: 'schedule', state: 'claimed', created_at: '2026-09-05T11:56:00Z', started_at: null, scheduled_for: null },
 		});
 		const skipped = applyRunEvent(armed, runEvent({
 			type: 'net_run_skipped',

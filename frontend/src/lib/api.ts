@@ -342,7 +342,13 @@ export interface OpenRun {
 	id: string;
 	trigger: string;
 	state: 'claimed' | 'dispatched' | 'running' | string;
+	/** When the run row was written — the moment the slot was claimed or the
+	 *  start was asked for. Always present, which is what lets an armed run
+	 *  say how long it has been waiting. */
+	created_at: string;
 	started_at: string | null;
+	/** The cron slot this run was fired for; null unless it was scheduled. */
+	scheduled_for: string | null;
 }
 
 export interface Net {

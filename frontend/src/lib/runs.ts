@@ -192,6 +192,34 @@ export function formatStamp(iso: string | null | undefined, now = Date.now()): S
 	return { text: `${date} ${clock}`, title: iso };
 }
 
+const MONTHS = [
+	'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+/**
+ * A time in UTC, said in UTC.
+ *
+ * Schedules are UTC by policy, so a cron slot rendered in the reader's own
+ * timezone is a different number from the one in the net's decorator, and the
+ * two would have to be reconciled by hand every time. The date is added only
+ * when the slot is not today's, so the common case stays short.
+ */
+export function formatUtcStamp(iso: string | null | undefined, now = Date.now()): Stamp | null {
+	if (!iso) return null;
+	const t = Date.parse(iso);
+	if (Number.isNaN(t)) return null;
+	const d = new Date(t);
+	const clock = `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')} UTC`;
+	const today = new Date(now);
+	const sameDay = d.getUTCFullYear() === today.getUTCFullYear()
+		&& d.getUTCMonth() === today.getUTCMonth()
+		&& d.getUTCDate() === today.getUTCDate();
+	return {
+		text: sameDay ? clock : `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()} ${clock}`,
+		title: iso,
+	};
+}
+
 // -- per-net summaries, for the nets list --
 
 export interface RunBadge {
@@ -221,7 +249,9 @@ export function lastRunBadge(lastRun: LastRun | null | undefined, now = Date.now
 	// while the outcome above survives on the state row. Each is added only if
 	// it is actually there, so an old run still gets a badge and a tooltip.
 	if (took) parts.push(`took ${took}`);
-	if (age) parts.push(`ended ${age} ago`);
+	// A skipped slot never ran, so it did not end. Its `ended_at` is when the
+	// control plane consumed the slot, which is a different event.
+	if (age) parts.push(`${lastRun.state === 'skipped' ? 'skipped' : 'ended'} ${age} ago`);
 	if (lastRun.trigger) parts.push(`triggered ${triggerLabel(lastRun.trigger)}`);
 	return { label: meta.label, colour: meta.colour, detail, title: parts.join(' · ') };
 }
@@ -250,22 +280,41 @@ export function openRunLabel(net: Pick<Net, 'open_run'>, now = Date.now()): Stam
 	const open = net.open_run;
 	if (!open) return null;
 	const meta = runStateMeta(open.state);
-	const since = formatStamp(open.started_at, now);
-	const elapsed = formatElapsed(open.started_at, now);
 	const trigger = `${triggerLabel(open.trigger)} run`;
+	// Rendered in UTC because schedules are UTC by policy: a slot shown in the
+	// reader's timezone is a different number from the one in the decorator.
+	const slot = formatUtcStamp(open.scheduled_for, now);
+	const slotTitle = slot ? ` for the slot at ${slot.title}` : '';
+
 	if (open.state === 'running') {
+		const since = formatStamp(open.started_at, now);
+		const elapsed = formatElapsed(open.started_at, now);
 		return since && elapsed
-			? { text: `running since ${since.text} (${elapsed})`, title: `${trigger} started ${since.title}` }
-			: { text: 'running', title: `${trigger}; the worker has not reported when it started` };
+			? {
+				text: `running since ${since.text} (${elapsed})`,
+				title: `${trigger} started ${since.title}${slotTitle}`,
+			}
+			: {
+				text: 'running',
+				title: `${trigger}; the worker has not reported when it started${slotTitle}`,
+			};
 	}
-	// Armed but not executing. `started_at` is null until it actually starts,
-	// so there is usually no time to show here.
-	const text = open.state === 'claimed' || open.state === 'dispatched'
-		? 'scheduled run pending'
-		: `run open (${meta.label})`;
+
+	// Armed but not executing: the slot is claimed and the load may be in
+	// flight, but nothing is firing, and `started_at` stays null until it is.
+	// The wait is measured from `created_at`, which is the moment the run row
+	// was written — a claim that is not moving is the thing worth seeing.
+	const waiting = formatElapsed(open.created_at, now);
+	const parts = [
+		open.state === 'claimed' || open.state === 'dispatched'
+			? 'scheduled run pending'
+			: `run open (${meta.label})`,
+	];
+	if (waiting) parts.push(`since ${waiting}`);
+	const text = slot ? `${parts.join(' ')} · for the ${slot.text} slot` : parts.join(' ');
 	return {
-		text: since ? `${text} since ${since.text}` : text,
-		title: `${trigger} is ${meta.label}${since ? ` since ${since.title}` : ''}`,
+		text,
+		title: `${trigger} is ${meta.label} since ${open.created_at}${slotTitle}`,
 	};
 }
 
@@ -353,7 +402,13 @@ export function applyRunEvent<T extends Pick<Net, 'id' | 'last_run' | 'open_run'
 			id: event.run_id,
 			trigger: event.trigger,
 			state: event.state,
+			// The event does not carry `created_at`, and for a run that has just
+			// started the two are the same instant to any reader. Only the wait
+			// before a start is worth measuring from the real one, and that run
+			// has not sent a start event yet. The refetch replaces this anyway.
+			created_at: event.started_at ?? new Date().toISOString(),
 			started_at: event.started_at,
+			scheduled_for: event.scheduled_for,
 		};
 		// A started run answers whatever pre-dispatch refusal was pending —
 		// the same thing `open_run` does on the state row.

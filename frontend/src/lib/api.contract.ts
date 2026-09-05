@@ -142,18 +142,27 @@ const _last_run_shape: LastRun = {
 //
 // ``started_at`` is null while the run is ``claimed`` or ``dispatched``: armed
 // is not the same as running, and the type has to allow saying so.
+//
+// ``created_at`` is required and ``started_at`` is not, which is the pair that
+// lets an armed run say how long it has been waiting: the wait is measured
+// from when the row was written, because a claim that is not moving has no
+// start to measure from. ``scheduled_for`` is the slot, rendered in UTC.
 const _open_run_shape: OpenRun = {
 	id: '44444444-4444-4444-4444-444444444444',
 	trigger: 'schedule',
 	state: 'claimed',
+	created_at: '2026-09-05T02:00:00Z',
 	started_at: null,
+	scheduled_for: '2026-09-05T02:00:00Z',
 };
 
 const _running_open_run: OpenRun = {
 	id: '44444444-4444-4444-4444-444444444444',
 	trigger: 'manual',
 	state: 'running',
+	created_at: '2026-09-05T02:00:01Z',
 	started_at: '2026-09-05T02:00:02Z',
+	scheduled_for: null,
 };
 
 // Every run field the nets list reads off a net row, in one place.
