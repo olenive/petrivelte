@@ -24,6 +24,8 @@
 	import TransitionInspector from '$lib/components/TransitionInspector.svelte';
 	import AppNav from '$lib/components/AppNav.svelte';
 	import DataLoadState from '$lib/components/DataLoadState.svelte';
+	import RunsPanel from '$lib/components/RunsPanel.svelte';
+	import { pendingLabel } from '$lib/runs';
 	import { portal } from '$lib/actions/portal';
 	import type { GraphState, Token, LogEntry, Transition } from '$lib/types';
 	import {
@@ -181,6 +183,9 @@
 	let execLogRatio = $state(DEFAULT_PANEL_RATIO);
 	let rightSidebarCollapsed = $state(false);
 	let rightSidebarWidth = $state(DEFAULT_SIDEBAR_WIDTH);
+	// The run history is a diagnostic rather than a dashboard, so it starts
+	// collapsed and fetches nothing until it is opened.
+	let runsExpanded = $state(false);
 
 	// Drag state for resizing
 	let isDraggingSidebar = $state(false);
@@ -203,6 +208,7 @@
 				execLogRatio = layout.execLogRatio ?? DEFAULT_PANEL_RATIO;
 				rightSidebarCollapsed = layout.rightSidebarCollapsed ?? false;
 				rightSidebarWidth = layout.rightSidebarWidth ?? DEFAULT_SIDEBAR_WIDTH;
+				runsExpanded = layout.runsExpanded ?? false;
 			}
 		} catch (e) {
 			console.warn('Failed to load panel layout:', e);
@@ -219,6 +225,7 @@
 				execLogRatio,
 				rightSidebarCollapsed,
 				rightSidebarWidth,
+				runsExpanded,
 			}));
 		} catch (e) {
 			console.warn('Failed to save panel layout:', e);
@@ -232,6 +239,11 @@
 
 	function toggleTokenInspector() {
 		tokenInspectorCollapsed = !tokenInspectorCollapsed;
+		savePanelLayout();
+	}
+
+	function toggleRuns() {
+		runsExpanded = !runsExpanded;
 		savePanelLayout();
 	}
 
@@ -764,6 +776,15 @@
 	function selectedNet(): Net | undefined {
 		return availableNets.find(n => n.id === selectedNetId);
 	}
+
+	// A slot that is due but cannot be dispatched yet — the worker is not
+	// ready, or the net is not loaded. It lives on the net's run-state row
+	// rather than on a run, because a wait must cost one overwritten row and
+	// not one row per minute of waiting.
+	let pendingNote = $derived.by(() => {
+		const net = selectedNet();
+		return net ? pendingLabel(net) : null;
+	});
 
 	// Subscribe to per-worker memory snapshots streamed over the same SSE
 	// connection that workerEventsStore opens — no extra connection.
@@ -1300,6 +1321,9 @@
 								{selectedNet()?.load_state === 'loaded' ? 'Loaded' : selectedNet()?.load_state === 'error' ? 'Error' : 'Unloaded'}
 							</span>
 						{/if}
+						{#if pendingNote}
+							<span class="text-xs text-status-warning" title={pendingNote.title}>{pendingNote.text}</span>
+						{/if}
 						{#if selectedNetId}
 							<button
 								class={btnSmall}
@@ -1592,6 +1616,11 @@
 			</DataLoadState>
 		</div>
 	{/if}
+
+	<!-- The durable record of this net's executions. Outside the graph gate
+	     on purpose: a net that has been unloaded still has a history, and that
+	     is often exactly when it is wanted. -->
+	<RunsPanel net={selectedNet() ?? null} expanded={runsExpanded} onToggle={toggleRuns} />
 </div>
 
 {#if showParamsDialog}

@@ -378,6 +378,12 @@ describe('dailyChart', () => {
 		expect(chart.max).toBe(0);
 	});
 
+	it('reports the window it drew, in UTC days, so the axis can be labelled', () => {
+		const chart = dailyChart([], opts);
+		expect(chart.endDay).toBe('2026-09-05');
+		expect(chart.startDay).toBe('2026-08-07');
+	});
+
 	it('names the day in UTC in the tooltip', () => {
 		const chart = dailyChart([rollup({ day: '2026-09-05', duration_max_s: 90 })], opts);
 		expect(chart.bars[0].title).toContain('2026-09-05 (UTC)');

@@ -371,6 +371,13 @@ export interface DailyChart {
 	columns: number;
 	/** Busiest day in the window; the scale. Zero when there is nothing. */
 	max: number;
+	/** The window's own bounds as UTC dates, so the axis can be labelled. */
+	startDay: string;
+	endDay: string;
+}
+
+function utcDay(ms: number): string {
+	return new Date(ms).toISOString().slice(0, 10);
 }
 
 function utcMidnight(iso: string): number {
@@ -421,7 +428,13 @@ export function dailyChart(
 			title: dailyTitle(rollup, segments),
 		});
 	}
-	return { bars, columns: days, max };
+	return {
+		bars,
+		columns: days,
+		max,
+		startDay: utcDay(windowStart),
+		endDay: utcDay(windowStart + (days - 1) * DAY),
+	};
 }
 
 function dailyTitle(rollup: DailyRollup, segments: DailySegment[]): string {
