@@ -11,8 +11,8 @@
  * is type-check coverage on the parts that matter.
  */
 import type {
-	DailyRollup, Deployment, DiscoveredNotebook, LastRun, NotebookDefect, NotebookSlot,
-	RunPage, RunRecord,
+	DailyRollup, Deployment, DiscoveredNotebook, LastRun, Net, NotebookDefect, NotebookSlot,
+	OpenRun, RunPage, RunRecord,
 } from './api';
 
 // -- Regression lock: Deployment must expose discovered_notebooks --
@@ -128,7 +128,47 @@ const _last_run_shape: LastRun = {
 	trigger: null,
 	state: 'failed',
 	reason: 'transition_raised',
+	started_at: null,
 	ended_at: null,
+	duration_s: null,
+};
+
+// -- Liveness contract --
+//
+// ``open_run`` is the only thing that says a net is executing. The UI used to
+// infer it from ``load_state`` + ``desired_state``, which is wrong for a
+// drained one-shot net — loaded, desired-running, doing nothing, all day. If
+// this field goes away the inference comes back, so lock it here.
+//
+// ``started_at`` is null while the run is ``claimed`` or ``dispatched``: armed
+// is not the same as running, and the type has to allow saying so.
+const _open_run_shape: OpenRun = {
+	id: '44444444-4444-4444-4444-444444444444',
+	trigger: 'schedule',
+	state: 'claimed',
+	started_at: null,
+};
+
+const _running_open_run: OpenRun = {
+	id: '44444444-4444-4444-4444-444444444444',
+	trigger: 'manual',
+	state: 'running',
+	started_at: '2026-09-05T02:00:02Z',
+};
+
+// Every run field the nets list reads off a net row, in one place.
+const _net_run_fields: Pick<
+	Net,
+	'last_run' | 'open_run' | 'pending_reason' | 'pending_since' | 'step_count'
+	| 'last_progress_at' | 'last_success_at'
+> = {
+	last_run: _last_run_shape,
+	open_run: _running_open_run,
+	pending_reason: 'worker_not_ready',
+	pending_since: '2026-09-05T02:00:00Z',
+	step_count: 4213,
+	last_progress_at: '2026-09-05T02:29:59Z',
+	last_success_at: '2026-09-04T02:31:00Z',
 };
 
 // Days with no runs have no row at all, so the chart plots against ``day``
@@ -159,5 +199,8 @@ export const __runs_contract_check = [
 	_run_page_shape,
 	_exhausted_run_page,
 	_last_run_shape,
+	_open_run_shape,
+	_running_open_run,
+	_net_run_fields,
 	_daily_shape,
 ];

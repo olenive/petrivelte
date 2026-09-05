@@ -25,9 +25,31 @@ export type ServerEvent =
 	// needs a second connection to be followed live. ``state`` and ``reason``
 	// are the closed sets from ``nets/runs.py``; render them through
 	// ``$lib/runs``, never raw.
-	| { seq?: number; type: 'net_run_started'; run_id: string; net_id: string; trigger: string; state: string; reason: string | null; ts?: string }
-	| { seq?: number; type: 'net_run_finished'; run_id: string; net_id: string; trigger: string; state: string; reason: string | null; ts?: string }
-	| { seq?: number; type: 'net_run_skipped'; run_id: string; net_id: string; trigger: string; state: string; reason: string | null; ts?: string };
+	| ({ type: 'net_run_started' } & RunEventFields)
+	| ({ type: 'net_run_finished' } & RunEventFields)
+	| ({ type: 'net_run_skipped' } & RunEventFields);
+
+/**
+ * What every run event carries.
+ *
+ * The three timestamps are what let a listener update a badge from the event
+ * itself instead of waiting for the refetch that follows it. All three are
+ * legitimately null: a run that has not begun executing has no ``started_at``,
+ * an open run no ``ended_at``, and only a scheduled run has a
+ * ``scheduled_for``.
+ */
+interface RunEventFields {
+	seq?: number;
+	run_id: string;
+	net_id: string;
+	trigger: string;
+	state: string;
+	reason: string | null;
+	started_at: string | null;
+	ended_at: string | null;
+	scheduled_for: string | null;
+	ts?: string;
+}
 
 /** The run-lifecycle event types, for callers that treat the three alike. */
 export const RUN_EVENT_TYPES = ['net_run_started', 'net_run_finished', 'net_run_skipped'] as const;

@@ -321,7 +321,28 @@ export interface LastRun {
 	trigger: string | null;
 	state: string | null;
 	reason: string | null;
+	started_at: string | null;
 	ended_at: string | null;
+	/** Wall clock, seconds. Null once retention pruned the run row — the
+	 *  outcome lives on the state row and outlives its own timings. */
+	duration_s: number | null;
+}
+
+/**
+ * The net's currently open run, or null when nothing is executing or armed.
+ *
+ * This is the liveness signal, and it replaces inferring one from
+ * ``load_state`` and ``desired_state``: a drained one-shot net is loaded and
+ * desired-running while sitting idle, which is what the daily pipeline is for
+ * twenty-three hours of the day. ``state`` is one of the open states —
+ * ``claimed`` and ``dispatched`` are a scheduled run that has not begun
+ * executing, so ``started_at`` is null until it does.
+ */
+export interface OpenRun {
+	id: string;
+	trigger: string;
+	state: 'claimed' | 'dispatched' | 'running' | string;
+	started_at: string | null;
 }
 
 export interface Net {
@@ -349,6 +370,7 @@ export interface Net {
 	// and not a missing join. Optional so a control plane predating the run
 	// record degrades to "nothing to say" rather than to zeros.
 	last_run?: LastRun | null;
+	open_run?: OpenRun | null;
 	pending_reason?: string | null;
 	pending_since?: string | null;
 	step_count?: number | null;

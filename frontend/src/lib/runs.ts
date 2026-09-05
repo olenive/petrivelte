@@ -1,4 +1,5 @@
-import type { DailyRollup, LastRun, Net, RunPage, RunRecord } from './api';
+import type { DailyRollup, LastRun, Net, OpenRun, RunPage, RunRecord } from './api';
+import type { RunEvent } from './stores/serverEvents';
 
 /**
  * Reading a net's run record.
@@ -88,7 +89,13 @@ const REASON_LABELS: Record<string, string> = {
 	overlap: 'previous run still going',
 };
 
-/** Why a pending slot has not been dispatched yet (`net_run_state`). */
+/**
+ * Why a pending slot has not been dispatched yet (`net_run_state`).
+ *
+ * Mirrors `PENDING_REASONS` in the control plane's `nets/runs.py`, which is
+ * the declared closed set — exactly `worker_not_ready` and `not_loaded`. A tag
+ * added there and not here still renders, as itself.
+ */
 const PENDING_REASON_LABELS: Record<string, string> = {
 	worker_not_ready: 'waiting for worker',
 	not_loaded: 'waiting for the net to load',
@@ -207,29 +214,72 @@ export function lastRunBadge(lastRun: LastRun | null | undefined, now = Date.now
 	const meta = runStateMeta(lastRun.state);
 	const detail = reasonLabel(lastRun.reason);
 	const age = formatElapsed(lastRun.ended_at, now);
+	const took = formatDuration(lastRun.duration_s);
 	const parts = [`last run: ${meta.label}`];
 	if (detail) parts.push(detail);
+	// Timings come from the run row and are gone once retention prunes it,
+	// while the outcome above survives on the state row. Each is added only if
+	// it is actually there, so an old run still gets a badge and a tooltip.
+	if (took) parts.push(`took ${took}`);
 	if (age) parts.push(`ended ${age} ago`);
 	if (lastRun.trigger) parts.push(`triggered ${triggerLabel(lastRun.trigger)}`);
 	return { label: meta.label, colour: meta.colour, detail, title: parts.join(' · ') };
 }
 
-/** True when the net is meant to be executing right now. */
-export function netIsRunning(net: Pick<Net, 'load_state' | 'desired_state'>): boolean {
-	return net.load_state === 'loaded' && net.desired_state === 'running';
+/**
+ * True when this net is executing *right now*.
+ *
+ * Read from the open run, and from nothing else. The tempting inference —
+ * loaded, and desired-running — is wrong for precisely the net that matters:
+ * a one-shot net that has drained sits loaded and desired-running while doing
+ * nothing at all, which is what the daily pipeline does for twenty-three hours
+ * a day. Only an open run in `running` means work is happening.
+ */
+export function netIsRunning(net: Pick<Net, 'open_run'>): boolean {
+	return net.open_run?.state === 'running';
+}
+
+/**
+ * What the net's open run is, in words, or null when nothing is open.
+ *
+ * A run that is `claimed` or `dispatched` is armed, not working: the slot has
+ * been taken and the load issued, but nothing is firing yet, and calling that
+ * "running" would put a working net and a waiting one in the same words.
+ */
+export function openRunLabel(net: Pick<Net, 'open_run'>, now = Date.now()): Stamp | null {
+	const open = net.open_run;
+	if (!open) return null;
+	const meta = runStateMeta(open.state);
+	const since = formatStamp(open.started_at, now);
+	const elapsed = formatElapsed(open.started_at, now);
+	const trigger = `${triggerLabel(open.trigger)} run`;
+	if (open.state === 'running') {
+		return since && elapsed
+			? { text: `running since ${since.text} (${elapsed})`, title: `${trigger} started ${since.title}` }
+			: { text: 'running', title: `${trigger}; the worker has not reported when it started` };
+	}
+	// Armed but not executing. `started_at` is null until it actually starts,
+	// so there is usually no time to show here.
+	const text = open.state === 'claimed' || open.state === 'dispatched'
+		? 'scheduled run pending'
+		: `run open (${meta.label})`;
+	return {
+		text: since ? `${text} since ${since.text}` : text,
+		title: `${trigger} is ${meta.label}${since ? ` since ${since.title}` : ''}`,
+	};
 }
 
 /**
  * How long since the worker last reported this net firing.
  *
- * Only for a net that is supposed to be running — on a stopped net an age is
- * just the time since it stopped, which the last-run badge already says, and
- * showing it as "progress" would suggest something is still happening.
- * "when did it stop" is the whole question for a hang, so a running net with
- * no progress at all says so rather than saying nothing.
+ * Only while a run is open *and* running. On an idle net the same age is just
+ * the time since it last did anything, which the last-run badge already says,
+ * and showing it as "progress" would suggest something is still happening. A
+ * running net that has reported nothing says so rather than saying nothing —
+ * "when did it stop" is the whole question for a hang.
  */
 export function progressLabel(
-	net: Pick<Net, 'load_state' | 'desired_state' | 'step_count' | 'last_progress_at'>,
+	net: Pick<Net, 'open_run' | 'step_count' | 'last_progress_at'>,
 	now = Date.now(),
 ): Stamp | null {
 	if (!netIsRunning(net)) return null;
@@ -264,6 +314,69 @@ export function pendingLabel(
 	return {
 		text: `${label} since ${since.text}`,
 		title: elapsed ? `${label} for ${elapsed} (since ${since.title})` : `${label} since ${since.title}`,
+	};
+}
+
+// -- live updates --
+//
+// A run event carries the whole transition — id, trigger, state, reason and
+// the three timestamps — so the summary a list row shows can be updated from
+// the event itself instead of waiting on the refetch it triggers. The refetch
+// stays authoritative: this only closes the gap between "the run ended" and
+// "the row that says so has arrived", which is the second or two in which a
+// user watching a net they just stopped sees nothing change.
+
+function durationBetween(start: string | null, end: string | null): number | null {
+	if (!start || !end) return null;
+	const from = Date.parse(start);
+	const to = Date.parse(end);
+	if (Number.isNaN(from) || Number.isNaN(to)) return null;
+	return Math.max(0, (to - from) / 1000);
+}
+
+/**
+ * Apply one run event to the net it is about, returning a new net.
+ *
+ * Events for other nets are returned unchanged, so a caller can map the whole
+ * list without filtering first. A close only clears `open_run` when it is
+ * closing *that* run: a late event about an older run must not make a net that
+ * is currently executing look idle.
+ */
+export function applyRunEvent<T extends Pick<Net, 'id' | 'last_run' | 'open_run' | 'last_success_at' | 'pending_reason' | 'pending_since'>>(
+	net: T,
+	event: RunEvent,
+): T {
+	if (event.net_id !== net.id) return net;
+
+	if (event.type === 'net_run_started') {
+		const open: OpenRun = {
+			id: event.run_id,
+			trigger: event.trigger,
+			state: event.state,
+			started_at: event.started_at,
+		};
+		// A started run answers whatever pre-dispatch refusal was pending —
+		// the same thing `open_run` does on the state row.
+		return { ...net, open_run: open, pending_reason: null, pending_since: null };
+	}
+
+	const closed: LastRun = {
+		id: event.run_id,
+		trigger: event.trigger,
+		state: event.state,
+		reason: event.reason,
+		started_at: event.started_at,
+		ended_at: event.ended_at,
+		duration_s: durationBetween(event.started_at, event.ended_at),
+	};
+	const stillOpen = net.open_run && net.open_run.id !== event.run_id ? net.open_run : null;
+	return {
+		...net,
+		open_run: stillOpen,
+		last_run: closed,
+		last_success_at: event.state === 'succeeded'
+			? (event.ended_at ?? net.last_success_at ?? null)
+			: (net.last_success_at ?? null),
 	};
 }
 

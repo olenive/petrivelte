@@ -1,14 +1,18 @@
 import { describe, expect, it } from 'vitest';
 
-import type { DailyRollup, RunPage, RunRecord } from './api';
+import type { DailyRollup, LastRun, Net, RunPage, RunRecord } from './api';
+import type { RunEvent } from './stores/serverEvents';
 import {
 	appendRunPage,
+	applyRunEvent,
 	dailyChart,
 	emptyRunHistory,
 	formatDuration,
 	formatElapsed,
 	hasMoreRuns,
 	lastRunBadge,
+	netIsRunning,
+	openRunLabel,
 	pendingLabel,
 	progressLabel,
 	reasonLabel,
@@ -67,6 +71,49 @@ const rollup = (over: Partial<DailyRollup> = {}): DailyRollup => ({
 	duration_max_s: 60,
 	...over,
 });
+
+const lastRun = (over: Partial<LastRun> = {}): LastRun => ({
+	id: 'r-1',
+	trigger: 'manual',
+	state: 'succeeded',
+	reason: 'no_enabled_transitions',
+	started_at: '2026-09-05T10:00:00Z',
+	ended_at: '2026-09-05T10:01:00Z',
+	duration_s: 60,
+	...over,
+});
+
+/** Just the run fields; the liveness helpers read nothing else off a net. */
+type NetRunFields = Pick<
+	Net,
+	'id' | 'last_run' | 'open_run' | 'pending_reason' | 'pending_since'
+	| 'step_count' | 'last_progress_at' | 'last_success_at'
+>;
+
+const netFields = (over: Partial<NetRunFields> = {}): NetRunFields => ({
+	id: 'n-1',
+	last_run: null,
+	open_run: null,
+	pending_reason: null,
+	pending_since: null,
+	step_count: null,
+	last_progress_at: null,
+	last_success_at: null,
+	...over,
+});
+
+const runEvent = (over: Partial<RunEvent> = {}): RunEvent => ({
+	type: 'net_run_started',
+	run_id: 'r-9',
+	net_id: 'n-1',
+	trigger: 'manual',
+	state: 'running',
+	reason: null,
+	started_at: '2026-09-05T11:58:00Z',
+	ended_at: null,
+	scheduled_for: null,
+	...over,
+} as RunEvent);
 
 const NOW = Date.parse('2026-09-05T12:00:00Z');
 
@@ -175,8 +222,7 @@ describe('lastRunBadge', () => {
 		// The state row is created by the first run, so its absence is the
 		// answer; a badge here would be an invention.
 		expect(lastRunBadge(null, NOW)).toBeNull();
-		expect(lastRunBadge({ id: 'r', trigger: null, state: null, reason: null, ended_at: null }, NOW))
-			.toBeNull();
+		expect(lastRunBadge(lastRun({ state: null, reason: null }), NOW)).toBeNull();
 	});
 
 	it('renders state and reason, and puts the age in the tooltip', () => {
@@ -185,12 +231,15 @@ describe('lastRunBadge', () => {
 			trigger: 'schedule',
 			state: 'failed',
 			reason: 'transition_raised',
+			started_at: '2026-09-05T10:55:48Z',
 			ended_at: '2026-09-05T11:00:00Z',
+			duration_s: 252,
 		}, NOW);
 
 		expect(badge?.label).toBe('failed');
 		expect(badge?.detail).toBe('a transition raised');
 		expect(badge?.colour).toBe(runStateColour('failed'));
+		expect(badge?.title).toContain('took 4m 12s');
 		expect(badge?.title).toContain('ended 1h ago');
 		expect(badge?.title).toContain('schedule');
 	});
@@ -198,43 +247,173 @@ describe('lastRunBadge', () => {
 	it('still renders once retention has taken the run row away', () => {
 		// `trigger` and `ended_at` come from the run; the outcome is
 		// denormalised onto the state row precisely so it outlives them.
-		const badge = lastRunBadge({
-			id: 'r-old',
+		const badge = lastRunBadge(lastRun({
 			trigger: null,
 			state: 'succeeded',
 			reason: 'no_enabled_transitions',
+			started_at: null,
 			ended_at: null,
-		}, NOW);
+			duration_s: null,
+		}), NOW);
 
 		expect(badge?.label).toBe('succeeded');
 		expect(badge?.detail).toBe('no enabled transitions');
+		expect(badge?.title).not.toContain('took');
 	});
 });
 
-describe('progressLabel', () => {
-	const running = {
-		load_state: 'loaded' as const,
-		desired_state: 'running' as const,
+describe('liveness', () => {
+	const executing = netFields({
+		open_run: { id: 'r-9', trigger: 'schedule', state: 'running', started_at: '2026-09-05T11:58:00Z' },
 		step_count: 4213,
 		last_progress_at: '2026-09-05T11:59:48Z',
-	};
-
-	it('quantifies progress for a running net', () => {
-		expect(progressLabel(running, NOW)?.text).toBe('step 4213 · 12s ago');
 	});
 
-	it('says nothing for a net that is not meant to be running', () => {
-		// On a stopped net the same age is just "when it stopped", which the
-		// last-run badge already says.
-		expect(progressLabel({ ...running, desired_state: 'stopped' }, NOW)).toBeNull();
-		expect(progressLabel({ ...running, load_state: 'unloaded' }, NOW)).toBeNull();
+	// The whole point of `open_run`. A one-shot net that has drained sits
+	// loaded and desired-running while doing nothing at all — the daily
+	// pipeline spends twenty-three hours a day like this — so the old
+	// inference reported steady progress on a net that had finished hours ago.
+	const drained = netFields({
+		open_run: null,
+		step_count: 4213,
+		last_progress_at: '2026-09-05T02:31:00Z',
+		last_run: lastRun({ state: 'succeeded', ended_at: '2026-09-05T02:31:00Z' }),
+	});
+
+	it('calls a net running only while a run is open and running', () => {
+		expect(netIsRunning(executing)).toBe(true);
+		expect(netIsRunning(drained)).toBe(false);
+		expect(netIsRunning(netFields({
+			open_run: { id: 'r-9', trigger: 'schedule', state: 'claimed', started_at: null },
+		}))).toBe(false);
+	});
+
+	it('quantifies progress for a running net', () => {
+		expect(progressLabel(executing, NOW)?.text).toBe('step 4213 · 12s ago');
+	});
+
+	it('shows no progress for a drained one-shot net', () => {
+		// It is loaded, it is desired-running, and it has a step count and a
+		// progress time from this morning. None of that is progress.
+		expect(progressLabel(drained, NOW)).toBeNull();
+		expect(openRunLabel(drained, NOW)).toBeNull();
 	});
 
 	it('says a running net has reported nothing rather than saying nothing', () => {
 		// "When did it stop" is the whole question for a hang; silence here
 		// would be the bug, not the answer.
-		const label = progressLabel({ ...running, step_count: null, last_progress_at: null }, NOW);
+		const label = progressLabel(
+			netFields({ ...executing, step_count: null, last_progress_at: null }),
+			NOW,
+		);
 		expect(label?.text).toBe('no progress reported');
+	});
+
+	it('says how long the open run has been running', () => {
+		const label = openRunLabel(executing, NOW);
+		expect(label?.text).toContain('running since');
+		expect(label?.text).toContain('(2m)');
+		expect(label?.title).toContain('2026-09-05T11:58:00Z');
+	});
+
+	it('calls an armed run pending, not running, and shows no progress', () => {
+		// `claimed` and `dispatched` mean the slot is taken and the load
+		// issued. Nothing is firing yet, and `started_at` is null until it is.
+		for (const state of ['claimed', 'dispatched']) {
+			const armed = netFields({
+				open_run: { id: 'r-9', trigger: 'schedule', state, started_at: null },
+				step_count: 12,
+				last_progress_at: '2026-09-05T02:31:00Z',
+			});
+			expect(openRunLabel(armed, NOW)?.text).toBe('scheduled run pending');
+			expect(progressLabel(armed, NOW)).toBeNull();
+		}
+	});
+
+	it('still names an open run in a state it has never heard of', () => {
+		const odd = netFields({
+			open_run: { id: 'r-9', trigger: 'manual', state: 'quarantined', started_at: null },
+		});
+		expect(openRunLabel(odd, NOW)?.text).toBe('run open (unknown)');
+		expect(progressLabel(odd, NOW)).toBeNull();
+	});
+});
+
+describe('applyRunEvent', () => {
+	it('opens a run and answers whatever was pending', () => {
+		const net = netFields({ pending_reason: 'worker_not_ready', pending_since: '2026-09-05T11:00:00Z' });
+		const updated = applyRunEvent(net, runEvent());
+
+		expect(updated.open_run?.id).toBe('r-9');
+		expect(updated.open_run?.started_at).toBe('2026-09-05T11:58:00Z');
+		expect(updated.pending_reason).toBeNull();
+		expect(updated.pending_since).toBeNull();
+	});
+
+	it('closes the run it names, with a duration derived from the event', () => {
+		const net = applyRunEvent(netFields(), runEvent());
+		const closed = applyRunEvent(net, runEvent({
+			type: 'net_run_finished',
+			state: 'succeeded',
+			reason: 'no_enabled_transitions',
+			ended_at: '2026-09-05T11:59:00Z',
+		}));
+
+		expect(closed.open_run).toBeNull();
+		expect(closed.last_run?.state).toBe('succeeded');
+		expect(closed.last_run?.duration_s).toBe(60);
+		expect(closed.last_success_at).toBe('2026-09-05T11:59:00Z');
+	});
+
+	it('does not move last_success_at for a run that did not succeed', () => {
+		const net = netFields({ last_success_at: '2026-09-04T02:31:00Z' });
+		const closed = applyRunEvent(net, runEvent({
+			type: 'net_run_finished',
+			state: 'failed',
+			reason: 'transition_raised',
+			ended_at: '2026-09-05T11:59:00Z',
+		}));
+
+		expect(closed.last_success_at).toBe('2026-09-04T02:31:00Z');
+	});
+
+	it('records a skipped slot without claiming the net ran', () => {
+		const armed = netFields({
+			open_run: { id: 'r-9', trigger: 'schedule', state: 'claimed', started_at: null },
+		});
+		const skipped = applyRunEvent(armed, runEvent({
+			type: 'net_run_skipped',
+			trigger: 'schedule',
+			state: 'skipped',
+			reason: 'overlap',
+			started_at: null,
+			ended_at: '2026-09-05T11:59:00Z',
+			scheduled_for: '2026-09-05T11:59:00Z',
+		}));
+
+		expect(skipped.open_run).toBeNull();
+		expect(skipped.last_run?.state).toBe('skipped');
+		// No start, so no duration to invent.
+		expect(skipped.last_run?.duration_s).toBeNull();
+	});
+
+	it('leaves a live run alone when a late event closes an older one', () => {
+		// Otherwise a stale event makes an executing net look idle.
+		const net = applyRunEvent(netFields(), runEvent());
+		const stale = applyRunEvent(net, runEvent({
+			type: 'net_run_finished',
+			run_id: 'r-8',
+			state: 'stopped',
+			reason: 'user_stop',
+			ended_at: '2026-09-05T11:00:00Z',
+		}));
+
+		expect(stale.open_run?.id).toBe('r-9');
+	});
+
+	it('ignores an event about another net', () => {
+		const net = netFields({ id: 'n-2' });
+		expect(applyRunEvent(net, runEvent())).toBe(net);
 	});
 });
 
