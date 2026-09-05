@@ -1052,6 +1052,11 @@
 		if (!event) return;
 		// Pure log events carry no state — skip the REST refetch. Only
 		// state-change events warrant pulling fresh net/worker lists.
+		//
+		// The run lifecycle events (net_run_started / _finished / _skipped)
+		// deliberately fall through to the same debounced refetch: they change
+		// the net's last-run summary, and that arrives on the net row. The
+		// Runs panel refreshes its own page from the same store.
 		if (event.type === 'worker_provision_log' || event.type === 'net_load_log') return;
 		if (sseDebounceTimer) clearTimeout(sseDebounceTimer);
 		sseDebounceTimer = setTimeout(() => {

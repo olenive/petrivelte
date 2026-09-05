@@ -401,6 +401,11 @@
 
 		// Pure log events carry no state — skip the REST refetch. Only
 		// state-change events warrant pulling fresh worker/net lists.
+		//
+		// Run lifecycle events (net_run_started / _finished / _skipped) fall
+		// through to the same refetch: the last-run badge and progress age on
+		// each row come from the net row, so refreshing the list is what
+		// refreshes them.
 		if (event.type === 'worker_provision_log' || event.type === 'net_load_log') return;
 
 		if (sseDebounceTimer) clearTimeout(sseDebounceTimer);
