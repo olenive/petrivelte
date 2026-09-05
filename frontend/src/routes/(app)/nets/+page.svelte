@@ -4,7 +4,7 @@
 	import { page } from '$app/stores';
 	import { workerEventsStore, connectToWorker, disconnectWorkerEvents } from '$lib/stores/workerEvents';
 	import { selectedTokenId } from '$lib/stores/tokenSelection';
-	import { serverEventsStore } from '$lib/stores/serverEvents';
+	import { isRunEvent, serverEventsStore } from '$lib/stores/serverEvents';
 	import {
 		workerMemoryStore,
 		workerMemoryUsedMb,
@@ -25,7 +25,7 @@
 	import AppNav from '$lib/components/AppNav.svelte';
 	import DataLoadState from '$lib/components/DataLoadState.svelte';
 	import RunsPanel from '$lib/components/RunsPanel.svelte';
-	import { pendingLabel } from '$lib/runs';
+	import { applyRunEvent, pendingLabel } from '$lib/runs';
 	import { portal } from '$lib/actions/portal';
 	import type { GraphState, Token, LogEntry, Transition } from '$lib/types';
 	import {
@@ -1050,13 +1050,19 @@
 
 	const unsubscribeSSE = serverEventsStore.subscribe((event) => {
 		if (!event) return;
+		// A run event carries the whole transition, so the net's summary is
+		// updated from the event itself — the Runs panel header and the
+		// pending note follow immediately rather than after the debounce.
+		if (isRunEvent(event)) {
+			availableNets = availableNets.map(n => applyRunEvent(n, event));
+		}
 		// Pure log events carry no state — skip the REST refetch. Only
 		// state-change events warrant pulling fresh net/worker lists.
 		//
 		// The run lifecycle events (net_run_started / _finished / _skipped)
-		// deliberately fall through to the same debounced refetch: they change
-		// the net's last-run summary, and that arrives on the net row. The
-		// Runs panel refreshes its own page from the same store.
+		// deliberately fall through to the same debounced refetch, which stays
+		// authoritative over the optimistic update above. The Runs panel
+		// refreshes its own page from the same store.
 		if (event.type === 'worker_provision_log' || event.type === 'net_load_log') return;
 		if (sseDebounceTimer) clearTimeout(sseDebounceTimer);
 		sseDebounceTimer = setTimeout(() => {

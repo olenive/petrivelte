@@ -13,13 +13,13 @@
 	import DataLoadState from '$lib/components/DataLoadState.svelte';
 	import { portal } from '$lib/actions/portal';
 	import LogViewer from '$lib/components/LogViewer.svelte';
-	import { serverEventsStore } from '$lib/stores/serverEvents';
+	import { isRunEvent, serverEventsStore } from '$lib/stores/serverEvents';
 	import {
 		workerLogsStore, setNets, seedFromNetErrors, loadHistory as loadLogHistory,
 		clearLogs, connectRuntimeLogs,
 	} from '$lib/stores/workerLogs';
 	import { netDisplayName, suggestInstanceName } from '$lib/netHelpers';
-	import { lastRunBadge, pendingLabel, progressLabel } from '$lib/runs';
+	import { applyRunEvent, lastRunBadge, openRunLabel, pendingLabel, progressLabel } from '$lib/runs';
 	import { workerMemoryStore, type WorkerMemorySnapshot } from '$lib/stores/workerMemory';
 
 	let workers = $state<Worker[]>([]);
@@ -399,13 +399,21 @@
 			}
 		}
 
+		// A run event carries the whole transition, so the row it is about is
+		// updated from the event itself and the refetch below then confirms it.
+		// Without this the badge lags by the debounce, which is the couple of
+		// seconds a user who just stopped a net spends watching nothing change.
+		if (isRunEvent(event)) {
+			nets = nets.map((n) => applyRunEvent(n, event));
+		}
+
 		// Pure log events carry no state — skip the REST refetch. Only
 		// state-change events warrant pulling fresh worker/net lists.
 		//
 		// Run lifecycle events (net_run_started / _finished / _skipped) fall
-		// through to the same refetch: the last-run badge and progress age on
-		// each row come from the net row, so refreshing the list is what
-		// refreshes them.
+		// through to the same refetch, which stays authoritative: it carries
+		// the fields the event does not, and repairs anything the optimistic
+		// update above got wrong.
 		if (event.type === 'worker_provision_log' || event.type === 'net_load_log') return;
 
 		if (sseDebounceTimer) clearTimeout(sseDebounceTimer);
@@ -1123,6 +1131,7 @@
 											<!-- What the net has done, as against what state it is in.
 											     All three are null for a net that has never run. -->
 											{@const runBadge = lastRunBadge(net.last_run)}
+											{@const openRun = openRunLabel(net)}
 											{@const progress = progressLabel(net)}
 											{@const pending = pendingLabel(net)}
 											<li class="py-1.5 border-b border-border-light last:border-b-0">
@@ -1165,6 +1174,9 @@
 												<span class="text-xs px-2 py-0.5 rounded-full text-white font-medium" style="background: {badge.color}">{badge.label}</span>
 												<!-- Outlined rather than filled, so the run outcome does
 												     not compete with the load state beside it. -->
+												{#if openRun}
+													<span class="text-xs text-status-info" title={openRun.title}>{openRun.text}</span>
+												{/if}
 												{#if runBadge}
 													<span
 														class="text-xs inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-border text-foreground-muted"

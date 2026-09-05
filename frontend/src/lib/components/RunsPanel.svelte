@@ -31,8 +31,8 @@
 	import {
 		DAILY_WINDOW_DAYS, DAILY_SEGMENT_STATES,
 		appendRunPage, dailyChart, emptyRunHistory, formatDuration, formatElapsed,
-		formatStamp, hasMoreRuns, lastRunBadge, refreshRunHistory, reasonLabel,
-		runStateColour, runStateMeta, triggerLabel,
+		formatStamp, hasMoreRuns, lastRunBadge, openRunLabel, progressLabel,
+		refreshRunHistory, reasonLabel, runStateColour, runStateMeta, triggerLabel,
 		type RunHistory,
 	} from '$lib/runs';
 	import DataLoadState from '$lib/components/DataLoadState.svelte';
@@ -61,6 +61,10 @@
 	onDestroy(() => clearInterval(tick));
 
 	let badge = $derived(lastRunBadge(net?.last_run, now));
+	// What is happening now, as against what happened last. Both come off the
+	// net row, so both follow a run event as soon as the page applies it.
+	let openRun = $derived(net ? openRunLabel(net, now) : null);
+	let progress = $derived(net ? progressLabel(net, now) : null);
 	let chart = $derived(dailyChart(daily, { days: DAILY_WINDOW_DAYS, now }));
 
 	async function load(netId: string) {
@@ -171,6 +175,15 @@
 	>
 		<span class="text-[0.7rem] text-foreground-muted">{expanded ? '▼' : '▶'}</span>
 		<span>Runs</span>
+		<!-- What is happening now, and what happened last. Both, when there is
+		     both: a net that is running still has a previous outcome, and that
+		     is often the thing being watched for a change. -->
+		{#if openRun}
+			<span class="text-xs text-status-info font-normal" title={openRun.title}>{openRun.text}</span>
+			{#if progress}
+				<span class="text-xs text-foreground-muted font-mono font-normal" title={progress.title}>{progress.text}</span>
+			{/if}
+		{/if}
 		{#if badge}
 			<span
 				class="text-xs px-2 py-0.5 rounded-full text-white font-medium"
@@ -178,10 +191,10 @@
 				title={badge.title}
 			>{badge.label}</span>
 			{#if badge.detail}
-				<span class="text-xs text-foreground-muted">{badge.detail}</span>
+				<span class="text-xs text-foreground-muted font-normal">{badge.detail}</span>
 			{/if}
-		{:else}
-			<span class="text-xs text-foreground-faint">never run</span>
+		{:else if !openRun}
+			<span class="text-xs text-foreground-faint font-normal">never run</span>
 		{/if}
 		{#if net?.last_success_at}
 			<span class="text-xs text-foreground-faint" title="Last succeeded {net.last_success_at}">
