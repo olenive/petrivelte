@@ -402,11 +402,12 @@ export function applyRunEvent<T extends Pick<Net, 'id' | 'last_run' | 'open_run'
 			id: event.run_id,
 			trigger: event.trigger,
 			state: event.state,
-			// The event does not carry `created_at`, and for a run that has just
-			// started the two are the same instant to any reader. Only the wait
-			// before a start is worth measuring from the real one, and that run
-			// has not sent a start event yet. The refetch replaces this anyway.
-			created_at: event.started_at ?? new Date().toISOString(),
+			// The event's own `created_at` when it has one. An older control
+			// plane omits it, and for a run that has just started `started_at`
+			// is the same instant to any reader; the refetch replaces it either
+			// way. Never left unset, because the armed-run wait is measured
+			// from this field.
+			created_at: event.created_at ?? event.started_at ?? new Date().toISOString(),
 			started_at: event.started_at,
 			scheduled_for: event.scheduled_for,
 		};

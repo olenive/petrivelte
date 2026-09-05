@@ -418,6 +418,15 @@ describe('applyRunEvent', () => {
 		expect(updated.pending_since).toBeNull();
 	});
 
+	it('prefers the event’s own created_at for the open run', () => {
+		const armed = applyRunEvent(netFields(), runEvent({
+			created_at: '2026-09-05T11:57:30Z',
+			started_at: '2026-09-05T11:58:00Z',
+		}));
+
+		expect(armed.open_run?.created_at).toBe('2026-09-05T11:57:30Z');
+	});
+
 	it('carries the slot onto the open run it opens', () => {
 		const armed = applyRunEvent(netFields(), runEvent({
 			trigger: 'schedule',

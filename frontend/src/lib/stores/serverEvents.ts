@@ -45,6 +45,9 @@ interface RunEventFields {
 	trigger: string;
 	state: string;
 	reason: string | null;
+	/** When the run row was written. Optional: a control plane predating the
+	 *  field omits it, and a listener then falls back to ``started_at``. */
+	created_at?: string | null;
 	started_at: string | null;
 	ended_at: string | null;
 	scheduled_for: string | null;
