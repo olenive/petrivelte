@@ -19,7 +19,24 @@ export type ServerEvent =
 	| { seq?: number; type: 'notebook_state_changed'; notebook_id: string; worker_id?: string | null; load_state: string; load_error?: string | null; ts?: string }
 	| { seq?: number; type: 'notebook_error'; notebook_id: string; error_id?: string; exception_type?: string; top_frame_location?: string | null; occurrence_count?: number; dismissed_all?: boolean; ts?: string }
 	| { seq?: number; type: 'net_load_log'; net_id: string; worker_id?: string; step: string; message: string; ts?: string }
-	| { seq?: number; type: 'worker_provision_log'; worker_id: string; step: string; message: string; ts?: string };
+	| { seq?: number; type: 'worker_provision_log'; worker_id: string; step: string; message: string; ts?: string }
+	// Run lifecycle. Emitted inside the transaction that wrote the run, on the
+	// same ``state_changes`` channel as every other event here — a run never
+	// needs a second connection to be followed live. ``state`` and ``reason``
+	// are the closed sets from ``nets/runs.py``; render them through
+	// ``$lib/runs``, never raw.
+	| { seq?: number; type: 'net_run_started'; run_id: string; net_id: string; trigger: string; state: string; reason: string | null; ts?: string }
+	| { seq?: number; type: 'net_run_finished'; run_id: string; net_id: string; trigger: string; state: string; reason: string | null; ts?: string }
+	| { seq?: number; type: 'net_run_skipped'; run_id: string; net_id: string; trigger: string; state: string; reason: string | null; ts?: string };
+
+/** The run-lifecycle event types, for callers that treat the three alike. */
+export const RUN_EVENT_TYPES = ['net_run_started', 'net_run_finished', 'net_run_skipped'] as const;
+
+export type RunEvent = Extract<ServerEvent, { type: (typeof RUN_EVENT_TYPES)[number] }>;
+
+export function isRunEvent(event: ServerEvent): event is RunEvent {
+	return (RUN_EVENT_TYPES as readonly string[]).includes(event.type);
+}
 
 export type ConnectionState = 'connecting' | 'connected' | 'disconnected';
 

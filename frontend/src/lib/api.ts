@@ -309,6 +309,21 @@ export interface NetParam {
 	default_display?: string | null;
 }
 
+/**
+ * The net's most recent closed run, denormalised onto its run-state row.
+ *
+ * ``trigger`` comes from the run row itself and goes null once retention
+ * deletes it — the outcome outlives the history that produced it, which is
+ * why the badge must never require ``trigger`` to render.
+ */
+export interface LastRun {
+	id: string;
+	trigger: string | null;
+	state: string | null;
+	reason: string | null;
+	ended_at: string | null;
+}
+
 export interface Net {
 	id: string;
 	definition_name: string;
@@ -326,6 +341,19 @@ export interface Net {
 	execution_mode: string | null;
 	factory_params_schema: NetParam[] | null;
 	step_wall_clock_timeout_seconds: number | null;
+	/** The execution intent the resume sweep restores after a worker reboot.
+	 *  Distinct from ``load_state``, which is what is actually true. */
+	desired_state?: 'stopped' | 'running';
+	// Surfaced from net_run_state. All null for a net that has never run: the
+	// state row is created by its first run, so "no run state" is an answer
+	// and not a missing join. Optional so a control plane predating the run
+	// record degrades to "nothing to say" rather than to zeros.
+	last_run?: LastRun | null;
+	pending_reason?: string | null;
+	pending_since?: string | null;
+	step_count?: number | null;
+	last_progress_at?: string | null;
+	last_success_at?: string | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -399,6 +427,87 @@ export async function unloadNet(netId: string): Promise<void> {
 		withIdempotency(newIdempotencyKey()),
 	);
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to unload net'));
+}
+
+// -- net runs --
+//
+// The control plane's durable record of net executions: one row per run, a
+// per-net summary and a per-UTC-day rollup. Everything the UI shows about
+// what a net has actually done comes from these two reads — the worker is
+// not asked, and a net whose worker is gone still has its history.
+
+/**
+ * One execution of a net.
+ *
+ * ``state`` and ``reason`` are closed sets the server enforces (see
+ * ``nets/runs.py``); they are tags, never prose, and are rendered through the
+ * map in ``$lib/runs`` rather than being shown raw. ``error`` is the one
+ * field that carries free text, capped server-side at 2,000 characters.
+ */
+export interface RunRecord {
+	id: string;
+	net_id: string;
+	trigger: string;
+	/** The cron slot this run was fired for. Null unless trigger = schedule. */
+	scheduled_for: string | null;
+	state: string;
+	reason: string | null;
+	error: string | null;
+	step_count: number | null;
+	created_at: string;
+	started_at: string | null;
+	ended_at: string | null;
+	duration_s: number | null;
+}
+
+/**
+ * One newest-first page of run history.
+ *
+ * ``next_before`` is the cursor for the following page and is absent once the
+ * history is exhausted, so a client stops paging on null rather than by
+ * comparing lengths to a page size it would have to know.
+ */
+export interface RunPage {
+	runs: RunRecord[];
+	next_before: string | null;
+}
+
+/** One net's run counts for one UTC day. Days with no runs have no row. */
+export interface DailyRollup {
+	net_id: string;
+	/** ISO date, ``YYYY-MM-DD``. */
+	day: string;
+	runs: number;
+	succeeded: number;
+	failed: number;
+	stopped: number;
+	skipped: number;
+	steps_total: number;
+	duration_total_s: number;
+	duration_max_s: number | null;
+}
+
+export async function listNetRuns(
+	netId: string,
+	opts?: { limit?: number; before?: string | null },
+): Promise<RunPage> {
+	const params = new URLSearchParams();
+	if (opts?.limit !== undefined) params.set('limit', String(opts.limit));
+	if (opts?.before) params.set('before', opts.before);
+	const qs = params.toString();
+	const res = await get(`/api/nets/${netId}/runs${qs ? `?${qs}` : ''}`);
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to list runs'));
+	return res.json();
+}
+
+export async function getNetRunDaily(
+	netId: string,
+	days?: number,
+): Promise<DailyRollup[]> {
+	const qs = days === undefined ? '' : `?days=${days}`;
+	const res = await get(`/api/nets/${netId}/runs/daily${qs}`);
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to load run history'));
+	return res.json();
 }
 
 // -- net secrets --
