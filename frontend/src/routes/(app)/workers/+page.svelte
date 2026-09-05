@@ -19,6 +19,7 @@
 		clearLogs, connectRuntimeLogs,
 	} from '$lib/stores/workerLogs';
 	import { netDisplayName, suggestInstanceName } from '$lib/netHelpers';
+	import { lastRunBadge, pendingLabel, progressLabel } from '$lib/runs';
 	import { workerMemoryStore, type WorkerMemorySnapshot } from '$lib/stores/workerMemory';
 
 	let workers = $state<Worker[]>([]);
@@ -1114,6 +1115,11 @@
 											{@const badge = loadStateBadge(net.load_state, net.id)}
 											{@const params = getNetParams(net.id, worker.id)}
 											{@const hasParams = params.length > 0}
+											<!-- What the net has done, as against what state it is in.
+											     All three are null for a net that has never run. -->
+											{@const runBadge = lastRunBadge(net.last_run)}
+											{@const progress = progressLabel(net)}
+											{@const pending = pendingLabel(net)}
 											<li class="py-1.5 border-b border-border-light last:border-b-0">
 												<div class="flex items-center gap-3 flex-wrap">
 													<a
@@ -1152,6 +1158,23 @@
 													</button>
 												{/if}
 												<span class="text-xs px-2 py-0.5 rounded-full text-white font-medium" style="background: {badge.color}">{badge.label}</span>
+												<!-- Outlined rather than filled, so the run outcome does
+												     not compete with the load state beside it. -->
+												{#if runBadge}
+													<span
+														class="text-xs inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-border text-foreground-muted"
+														title={runBadge.title}
+													>
+														<span class="inline-block w-2 h-2 rounded-full" style="background: {runBadge.colour}"></span>
+														last run {runBadge.label}{#if runBadge.detail}<span class="text-foreground-faint"> · {runBadge.detail}</span>{/if}
+													</span>
+												{/if}
+												{#if progress}
+													<span class="text-xs text-foreground-muted font-mono" title={progress.title}>{progress.text}</span>
+												{/if}
+												{#if pending}
+													<span class="text-xs text-status-warning" title={pending.title}>{pending.text}</span>
+												{/if}
 												<span class="text-xs text-foreground-faint font-mono" title="Definition · entry module:function">
 													{net.definition_name}
 													{#if net.entry_module && net.entry_function}
