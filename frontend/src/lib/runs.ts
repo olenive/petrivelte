@@ -359,10 +359,13 @@ export function openRunLabel(net: Pick<Net, 'open_run'>, now = Date.now()): Stam
 	// flight, but nothing is firing, and `started_at` stays null until it is.
 	// The wait is measured from `created_at`, which is the moment the run row
 	// was written — a claim that is not moving is the thing worth seeing.
+	// Named by what asked for it, because Run now dispatches the same way the
+	// scheduler does: calling a hand-pressed rerun "scheduled" would send a
+	// reader looking for a cron expression that does not exist.
 	const waiting = formatElapsed(open.created_at, now);
 	const parts = [
 		open.state === 'claimed' || open.state === 'dispatched'
-			? 'scheduled run pending'
+			? (open.trigger === 'schedule' ? 'scheduled run pending' : 'run pending')
 			: `run open (${meta.label})`,
 	];
 	if (waiting) parts.push(`since ${waiting}`);

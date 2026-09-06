@@ -372,6 +372,21 @@ describe('liveness', () => {
 		}
 	});
 
+	it('does not call a Run now dispatch a scheduled run', () => {
+		// Run now dispatches exactly the way the scheduler does, so a manual
+		// run is `dispatched` too. Calling it "scheduled" would send a reader
+		// looking for a cron expression that does not exist.
+		const dispatched = netFields({
+			open_run: {
+				id: 'r-9', trigger: 'manual', state: 'dispatched',
+				created_at: '2026-09-05T11:56:00Z', started_at: null, scheduled_for: null,
+			},
+		});
+
+		expect(openRunLabel(dispatched, NOW)?.text).toBe('run pending since 4m');
+		expect(openRunLabel(dispatched, NOW)?.title).toContain('manual run');
+	});
+
 	it('measures an armed run’s wait from when it was claimed', () => {
 		// `started_at` is null for a run that has not begun, so the wait has to
 		// come from `created_at` — and a claim that is not moving is exactly

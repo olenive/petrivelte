@@ -14,7 +14,7 @@
 		logout,
 		listNets, listWorkers, patchNet, loadNet, unloadNet,
 		getExecutionState, executionStep, executionStart, executionStop, executionReset, executionInject,
-		listNetSecrets, setNetSecrets, getNetLogHistory,
+		listNetSecrets, setNetSecrets, getNetLogHistory, runNetNow,
 		type Net, type Worker, type NetParam, type SecretMetadata,
 	} from '$lib/api';
 	import GraphPanel from '$lib/components/GraphPanel.svelte';
@@ -25,7 +25,7 @@
 	import AppNav from '$lib/components/AppNav.svelte';
 	import DataLoadState from '$lib/components/DataLoadState.svelte';
 	import RunsPanel from '$lib/components/RunsPanel.svelte';
-	import { applyRunEvent, pendingLabel } from '$lib/runs';
+	import { applyRunEvent, executionVerbs, pendingLabel, scheduleFacts } from '$lib/runs';
 	import { portal } from '$lib/actions/portal';
 	import type { GraphState, Token, LogEntry, Transition } from '$lib/types';
 	import {
@@ -105,6 +105,11 @@
 	let isAutoStepping = $state(false);
 	let isStepping = $state(false);
 	let isResetting = $state(false);
+	// Run now: one dispatch — unload, load, and the start that follows —
+	// recorded as a manual run. `runNowError` holds the server's own words for
+	// a refusal; the route's 409/400/503 details are written for a person.
+	let isRunningNow = $state(false);
+	let runNowError = $state<string | null>(null);
 	let stepError = $state<string | null>(null);
 	// Human-in-the-loop token injection: drop a typed token into a place to
 	// drive an end-to-end test (e.g. synthetic traffic into the anomaly monitor).
@@ -467,10 +472,17 @@
 		// engine loop has necessarily settled, and a dropped event stream can't
 		// be relied on to correct a wrong guess. Reconcile from the worker
 		// instead; the spinner covers the round-trip.
-		const target = !isRunning;
+		//
+		// Which way the button goes is `executionOn`, not `isRunning`: on a
+		// cron net the same two requests arm and pause the schedule, and an
+		// armed daily net is idle for twenty-three hours a day without being
+		// paused. Reading `isRunning` there would offer to arm a net that is
+		// already armed, and never offer to pause it.
+		const on = executionOn;
+		const scheduled = verbs.scheduled;
 		isToggling = true;
 		try {
-			if (isRunning) {
+			if (on) {
 				await executionStop(netId);
 			} else {
 				executionStoppedReason = null;  // fresh run — drop any prior stop
@@ -478,14 +490,44 @@
 			}
 			// Optimistic flip first (keeps pre-`running`-flag workers correct),
 			// then let the authoritative state override it where available.
-			isRunning = target;
+			// Only for a net whose button *is* the execution state: on a cron
+			// net, arming does not claim anything is firing.
+			if (!scheduled) isRunning = !on;
 			await refreshRunningState(netId);
+			// The schedule verbs read `desired_state`, which changes on the
+			// control plane rather than on the worker, so it comes from a net
+			// refetch and not from the execution state above.
+			if (scheduled) availableNets = await listNets({ assigned: true });
 		} catch (error) {
 			console.error('Activate/Deactivate failed:', error);
 			// Best-effort reconcile so the button still reflects reality.
 			await refreshRunningState(netId);
 		} finally {
 			if (selectedNetId === netId) isToggling = false;
+		}
+	}
+
+	async function handleRunNow() {
+		if (!selectedNetId || isRunningNow) return;
+		const netId = selectedNetId;
+		isRunningNow = true;
+		runNowError = null;
+		try {
+			await runNetNow(netId);
+			// Nothing is refetched here: the run opens as `dispatched` before
+			// the load begins, and the `net_run_started` that carries it comes
+			// down the SSE connection this page already listens on — which is
+			// also what updates the Runs panel and the badges.
+			executionStoppedReason = null;
+		} catch (error) {
+			// Every refusal this route gives — the net is stopped, a load is
+			// already in flight, a run is already pending, no worker, an
+			// unreachable worker — arrives as prose written for a person. It
+			// is shown as it came; a status code would say nothing a reader
+			// could act on.
+			runNowError = error instanceof Error ? error.message : 'Run now failed.';
+		} finally {
+			if (selectedNetId === netId) isRunningNow = false;
 		}
 	}
 
@@ -612,6 +654,8 @@
 		graphState = null;
 		tokens = [];
 		logEntries = [];
+		// A refusal belongs to the net it was about.
+		runNowError = null;
 
 		if (netId) {
 			await selectNet(netId);
@@ -777,13 +821,31 @@
 		return availableNets.find(n => n.id === selectedNetId);
 	}
 
+	// What this net's on/off control is called. On a cron net Start arms the
+	// schedule and Stop pauses it, so the words — and the state the pill
+	// describes — are the schedule's, not the worker's.
+	let verbs = $derived(executionVerbs(selectedNet() ?? null));
+
+	// Whether execution is on. For a cron net that is the intent
+	// (`desired_state`); for every other net it stays what it has always been,
+	// whether the worker is firing.
+	let executionOn = $derived(verbs.scheduled ? verbs.armed : isRunning);
+
+	// The expression and the slot it points at, for a cron net.
+	let scheduleNote = $derived.by(() => scheduleFacts(selectedNet() ?? null));
+
 	// A slot that is due but cannot be dispatched yet — the worker is not
 	// ready, or the net is not loaded. It lives on the net's run-state row
 	// rather than on a run, because a wait must cost one overwritten row and
 	// not one row per minute of waiting.
 	let pendingNote = $derived.by(() => {
 		const net = selectedNet();
-		return net ? pendingLabel(net) : null;
+		if (!net) return null;
+		// The schedule line already carries the refusal when a due slot is
+		// waiting on one, next to the slot it is holding up. Saying it twice
+		// on one toolbar does not say it twice as clearly.
+		if (scheduleNote?.pending) return null;
+		return pendingLabel(net);
 	});
 
 	// Subscribe to per-worker memory snapshots streamed over the same SSE
@@ -1348,8 +1410,11 @@
 				{/if}
 
 				<div class="flex items-center gap-2">
-					<span class="px-4 py-2 rounded text-sm font-medium {isToggling ? 'bg-status-warning-bg text-status-warning' : isRunning ? 'bg-status-info-bg text-status-info' : isAutoStepping ? 'bg-status-warning-bg text-status-warning' : isStepping ? 'bg-status-warning-bg text-status-warning' : 'bg-muted text-foreground-muted'}">
-						{isToggling ? 'Working…' : isRunning ? 'Active' : isAutoStepping ? 'Repeating' : isStepping ? 'Stepping...' : 'Idle'}
+					<!-- Armed / Paused on a cron net, Active / Idle on every other
+					     one. The two browser-driven states in between are the
+					     same either way. -->
+					<span class="px-4 py-2 rounded text-sm font-medium {isToggling ? 'bg-status-warning-bg text-status-warning' : executionOn ? 'bg-status-info-bg text-status-info' : isAutoStepping ? 'bg-status-warning-bg text-status-warning' : isStepping ? 'bg-status-warning-bg text-status-warning' : 'bg-muted text-foreground-muted'}">
+						{isToggling ? 'Working…' : executionOn ? verbs.onLabel : isAutoStepping ? 'Repeating' : isStepping ? 'Stepping...' : verbs.offLabel}
 					</span>
 				</div>
 
@@ -1374,13 +1439,44 @@
 					<button class={isAutoStepping ? btnDanger : btnDefault} onclick={handleAutoStep} disabled={isRunning || isResetting || isToggling || !selectedNetId}
 						title={isAutoStepping ? "Stop repeating steps." : "Repeatedly fires one transition at a time (with animation), like clicking Step over and over. Driven by this browser tab — closing or disconnecting it stops the run. To run the net independently of the browser, use Activate."}
 					>{isAutoStepping ? 'Stop' : 'Repeat Step'}</button>
-					<button class={isRunning ? btnDanger : btnDefault} onclick={handleActivateDeactivate} disabled={isAutoStepping || isResetting || isToggling || !selectedNetId}
-						title={isRunning ? "Stop continuous execution on the worker." : "Run continuously on the worker. Keeps running even if you close this window; reopen the net to observe it again."}
-					>{#if isToggling}<span class="inline-flex items-center gap-2"><span class="inline-block w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" aria-hidden="true"></span>{isRunning ? 'Deactivating…' : 'Activating…'}</span>{:else}{isRunning ? 'Deactivate' : 'Activate'}{/if}</button>
+					<button class={executionOn ? btnDanger : btnDefault} onclick={handleActivateDeactivate} disabled={isAutoStepping || isResetting || isToggling || !selectedNetId}
+						title={executionOn ? verbs.deactivateTitle : verbs.activateTitle}
+					>{#if isToggling}<span class="inline-flex items-center gap-2"><span class="inline-block w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" aria-hidden="true"></span>{executionOn ? verbs.deactivating : verbs.activating}</span>{:else}{executionOn ? verbs.deactivate : verbs.activate}{/if}</button>
+					<!-- Every net, not only the scheduled ones: this is the one
+					     verb that reruns a one-shot net that has drained, and the
+					     only one that works on a wedged subprocess. -->
+					<button class={btnDefault} onclick={handleRunNow}
+						disabled={isRunningNow || selectedNet()?.load_state === 'loading' || !selectedNetId}
+						title="Run this net once now: unload, load, and the start that follows. Recorded as a manual run."
+					>{isRunningNow ? 'Dispatching…' : 'Run now'}</button>
+					{#if runNowError}
+						<!-- The server's own words. It refuses for reasons a reader
+						     can act on — the net is stopped, a load is in flight —
+						     so the refusal is shown, never a status code. -->
+						<span class="text-xs text-destructive max-w-[22rem]">{runNowError}</span>
+					{/if}
 					<button class={btnDefault} onclick={handleReset} disabled={isRunning || isAutoStepping || isResetting || isToggling || !selectedNetId} title="Reset the Petri net to its initial state.">{isResetting ? 'Resetting…' : 'Reset'}</button>
 					<button class={showInject ? btnDanger : btnDefault} onclick={() => (showInject = !showInject)} disabled={!selectedNetId}
 						title="Inject a typed token into a place — e.g. synthetic traffic to drive an end-to-end alert test.">{showInject ? 'Close Inject' : 'Inject…'}</button>
 				</div>
+			{/if}
+		</div>
+	{/if}
+
+	<!-- What the schedule is doing. Outside the graph gate on purpose: a cron
+	     net that is paused or waiting to be loaded has no graph on screen, and
+	     that is exactly when "when does this run" is asked. -->
+	{#if scheduleNote}
+		<div class="flex items-center gap-2 px-6 py-2 bg-card border-b border-border text-xs flex-wrap">
+			<span class="text-foreground-faint">Schedule</span>
+			<code class="px-1.5 py-0.5 rounded bg-muted text-foreground font-mono">{scheduleNote.expression}</code>
+			<span
+				class={scheduleNote.kind === 'due' ? 'text-status-warning' : 'text-foreground-muted'}
+				title={scheduleNote.title}
+			>{scheduleNote.when}</span>
+			{#if scheduleNote.pending}
+				<!-- Why the owed slot has not gone yet, beside the slot itself. -->
+				<span class="text-status-warning" title={scheduleNote.pending.title}>· {scheduleNote.pending.text}</span>
 			{/if}
 		</div>
 	{/if}
