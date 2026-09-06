@@ -87,6 +87,10 @@ const REASON_LABELS: Record<string, string> = {
 	abandoned: 'abandoned — no report arrived',
 	// skipped
 	overlap: 'previous run still going',
+	// A person pressed Stop while the slot was claimed or dispatched. Stop
+	// pauses the schedule, so the slot is consumed rather than executed — the
+	// run is not left open for the abandon sweep to find.
+	paused: 'schedule paused',
 };
 
 /**
@@ -414,6 +418,172 @@ export function pendingLabel(
 	return {
 		text: `${label} since ${since.text}`,
 		title: elapsed ? `${label} for ${elapsed} (since ${since.title})` : `${label} since ${since.title}`,
+	};
+}
+
+// -- the schedule --
+//
+// A cron net's controls are the same two requests every other net's are —
+// start and stop — but they mean a different thing, and "Activate" said about
+// a net that will do nothing for another nine hours is how a person concludes
+// the button did not work. Stop pauses the schedule and Start arms it (the
+// backend's `dev-docs/RUNS_AND_SCHEDULING.md`, decision 7), so on a cron net
+// that is what the words say, and the state they describe is the *intent*
+// (`desired_state`) rather than whether something happens to be firing right
+// now — an armed daily net is idle for twenty-three hours a day and is not
+// thereby paused.
+
+/** The `execution_mode` a scheduled net carries; the platform's `MODES`. */
+export const CRON_MODE = 'cron';
+
+export interface ExecutionVerbs {
+	/** True when this net runs on a schedule rather than by hand. */
+	scheduled: boolean;
+	/** The intent, from `desired_state`. For a cron net: armed. */
+	armed: boolean;
+	/** The button that turns execution on, and its label while in flight. */
+	activate: string;
+	activating: string;
+	/** The button that turns it off. */
+	deactivate: string;
+	deactivating: string;
+	/** The status pill, in each of its two states. */
+	onLabel: string;
+	offLabel: string;
+	activateTitle: string;
+	deactivateTitle: string;
+}
+
+const MANUAL_VERBS = {
+	activate: 'Activate',
+	activating: 'Activating…',
+	deactivate: 'Deactivate',
+	deactivating: 'Deactivating…',
+	onLabel: 'Active',
+	offLabel: 'Idle',
+	activateTitle:
+		'Run continuously on the worker. Keeps running even if you close this window; reopen the net to observe it again.',
+	deactivateTitle: 'Stop continuous execution on the worker.',
+} as const;
+
+const SCHEDULE_VERBS = {
+	activate: 'Arm schedule',
+	activating: 'Arming…',
+	deactivate: 'Pause schedule',
+	deactivating: 'Pausing…',
+	onLabel: 'Armed',
+	offLabel: 'Paused',
+	activateTitle:
+		'Arm the schedule: each slot from now on runs this net, and the resume sweep re-arms it after a worker reboot.',
+	deactivateTitle:
+		'Pause the schedule: no slot fires until it is armed again. A slot already claimed is recorded as skipped rather than run.',
+} as const;
+
+/**
+ * What this net's on/off control is called, and what its two states are.
+ *
+ * One helper rather than a conditional in each template, because it is one
+ * decision made in several places and getting it inconsistent is worse than
+ * getting it wrong: a button that says Deactivate above a pill that says
+ * Armed is two claims about the same thing.
+ */
+export function executionVerbs(
+	net: Pick<Net, 'execution_mode' | 'desired_state'> | null | undefined,
+): ExecutionVerbs {
+	const scheduled = net?.execution_mode === CRON_MODE;
+	return {
+		scheduled,
+		armed: net?.desired_state === 'running',
+		...(scheduled ? SCHEDULE_VERBS : MANUAL_VERBS),
+	};
+}
+
+/**
+ * What a cron net's schedule is doing, as one line beside its controls.
+ *
+ * * `next` — armed, with a slot ahead of it.
+ * * `due` — the slot at or before now is still owed. `next_run_at` is
+ *   deliberately allowed to be in the past for exactly this, and it is the
+ *   case worth seeing: the sweep has not reached the slot yet, or something
+ *   is in its way, which `pending` says.
+ * * `paused` — Stop was pressed. No slot fires, and the server sends no
+ *   `next_run_at` at all rather than a time that will not happen.
+ * * `unknown` — armed, but the server computed no slot: an expression that
+ *   will not parse, or a control plane that predates the field. Saying so is
+ *   the only honest answer; inventing one from the expression here would put
+ *   a second cron implementation in the browser.
+ */
+export type ScheduleKind = 'next' | 'due' | 'paused' | 'unknown';
+
+export interface ScheduleFacts {
+	/** The expression as the net's code declares it, shown as code. */
+	expression: string;
+	kind: ScheduleKind;
+	/** The one line: "next run 02:00 UTC · 03:00 local", "due since …". */
+	when: string;
+	title: string;
+	/**
+	 * The pre-dispatch refusal, when a due slot is waiting on one. Carried
+	 * here rather than left to the caller so that "due since 02:00 UTC" and
+	 * "waiting for worker since 02:00" are one statement and not two
+	 * unrelated notes that happen to sit near each other.
+	 */
+	pending: Stamp | null;
+}
+
+type ScheduleFields = Pick<
+	Net, 'execution_mode' | 'schedule' | 'desired_state' | 'next_run_at'
+	| 'pending_reason' | 'pending_since'
+>;
+
+export function scheduleFacts(
+	net: ScheduleFields | null | undefined,
+	now = Date.now(),
+): ScheduleFacts | null {
+	if (!net || net.execution_mode !== CRON_MODE || !net.schedule) return null;
+	const expression = net.schedule;
+
+	if (net.desired_state !== 'running') {
+		return {
+			expression,
+			kind: 'paused',
+			when: 'schedule paused',
+			title: `${expression} — paused. Arm the schedule to run it again.`,
+			pending: null,
+		};
+	}
+
+	// Both renderings, UTC first: the expression is UTC by policy, so the UTC
+	// time is the one that can be checked against the decorator, and the local
+	// one is what says whether it is the middle of the reader's night.
+	const utc = formatUtcStamp(net.next_run_at, now);
+	const local = formatStamp(net.next_run_at, now);
+	if (!utc || !local || !net.next_run_at) {
+		return {
+			expression,
+			kind: 'unknown',
+			when: 'armed · next run unknown',
+			title: `${expression} — armed, but the control plane computed no next run for it.`,
+			pending: pendingLabel(net, now),
+		};
+	}
+
+	if (Date.parse(net.next_run_at) <= now) {
+		return {
+			expression,
+			kind: 'due',
+			when: `due since ${utc.text}`,
+			title: `The ${utc.title} slot is owed and has not run yet.`,
+			pending: pendingLabel(net, now),
+		};
+	}
+
+	return {
+		expression,
+		kind: 'next',
+		when: `next run ${utc.text} · ${local.text} local`,
+		title: `${expression} — next run ${utc.title}`,
+		pending: null,
 	};
 }
 

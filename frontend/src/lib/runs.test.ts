@@ -21,6 +21,8 @@ import {
 	refreshRunHistory,
 	runStateColour,
 	runStateMeta,
+	scheduleFacts,
+	executionVerbs,
 	triggerLabel,
 } from './runs';
 
@@ -104,6 +106,23 @@ const netFields = (over: Partial<NetRunFields> = {}): NetRunFields => ({
 	...over,
 });
 
+/** Just the schedule fields; the wording and the facts read nothing else. */
+type NetScheduleFields = Pick<
+	Net,
+	'execution_mode' | 'schedule' | 'desired_state' | 'next_run_at'
+	| 'pending_reason' | 'pending_since'
+>;
+
+const netSchedule = (over: Partial<NetScheduleFields> = {}): NetScheduleFields => ({
+	execution_mode: 'cron',
+	schedule: '0 2 * * *',
+	desired_state: 'running',
+	next_run_at: '2026-09-06T02:00:00Z',
+	pending_reason: null,
+	pending_since: null,
+	...over,
+});
+
 const runEvent = (over: Partial<RunEvent> = {}): RunEvent => ({
 	type: 'net_run_started',
 	run_id: 'r-9',
@@ -156,7 +175,7 @@ describe('reasonLabel', () => {
 		const tags = [
 			'no_enabled_transitions', 'user_stop', 'unloaded', 'transition_raised',
 			'subprocess_exited', 'load_failed', 'dispatch_failed', 'worker_lost',
-			'abandoned', 'overlap',
+			'abandoned', 'overlap', 'paused',
 		];
 		for (const tag of tags) {
 			expect(reasonLabel(tag)).toBeTruthy();
@@ -618,6 +637,114 @@ describe('pendingLabel', () => {
 	it('still names an unknown refusal', () => {
 		const label = pendingLabel({ pending_reason: 'quota_hold', pending_since: null }, NOW);
 		expect(label?.text).toBe('quota hold');
+	});
+});
+
+describe('executionVerbs', () => {
+	// Two questions the words have to keep apart: what kind of net this is
+	// (`execution_mode`), and whether it is meant to be running
+	// (`desired_state`). A cron net that is armed but idle — which the daily
+	// pipeline is for twenty-three hours a day — is armed, not paused.
+	const cron = (over: Partial<NetScheduleFields> = {}) => netSchedule(over);
+
+	it('names the schedule for a cron net', () => {
+		const verbs = executionVerbs(cron());
+
+		expect(verbs.scheduled).toBe(true);
+		expect(verbs.activate).toBe('Arm schedule');
+		expect(verbs.deactivate).toBe('Pause schedule');
+		expect(verbs.onLabel).toBe('Armed');
+		expect(verbs.offLabel).toBe('Paused');
+	});
+
+	it('leaves every other net’s wording exactly as it was', () => {
+		const verbs = executionVerbs(cron({ execution_mode: '24/7', schedule: null }));
+
+		expect(verbs.scheduled).toBe(false);
+		expect(verbs.activate).toBe('Activate');
+		expect(verbs.deactivate).toBe('Deactivate');
+		expect(verbs.onLabel).toBe('Active');
+		expect(verbs.offLabel).toBe('Idle');
+	});
+
+	it('reads armed from the intent, not from whether anything is firing', () => {
+		expect(executionVerbs(cron({ desired_state: 'running' })).armed).toBe(true);
+		expect(executionVerbs(cron({ desired_state: 'stopped' })).armed).toBe(false);
+	});
+
+	it('falls back to the manual wording when there is no net', () => {
+		// A toolbar renders before a net is selected; it must not say "Arm".
+		expect(executionVerbs(null).activate).toBe('Activate');
+		expect(executionVerbs(undefined).armed).toBe(false);
+	});
+});
+
+describe('scheduleFacts', () => {
+	it('says both times, UTC first, for a slot still ahead', () => {
+		const facts = scheduleFacts(netSchedule({ next_run_at: '2026-09-05T14:00:00Z' }), NOW);
+
+		expect(facts?.kind).toBe('next');
+		expect(facts?.expression).toBe('0 2 * * *');
+		// The local half is the reader's timezone, so it is matched rather
+		// than spelled: what this pins is that UTC leads and local follows.
+		expect(facts?.when).toMatch(/^next run 14:00 UTC · .+ local$/);
+		expect(facts?.pending).toBeNull();
+	});
+
+	it('dates a slot that is not today’s in UTC', () => {
+		const facts = scheduleFacts(netSchedule({ next_run_at: '2026-09-06T02:00:00Z' }), NOW);
+
+		expect(facts?.when).toContain('Sep 6 02:00 UTC');
+	});
+
+	it('reports an owed slot as due rather than pointing at tomorrow', () => {
+		// `next_run_at` in the past is not a bug: the sweep has not reached
+		// the slot, and saying "next run 02:00 tomorrow" would hide that
+		// today's has not run.
+		const facts = scheduleFacts(netSchedule({ next_run_at: '2026-09-05T02:00:00Z' }), NOW);
+
+		expect(facts?.kind).toBe('due');
+		expect(facts?.when).toBe('due since 02:00 UTC');
+		expect(facts?.pending).toBeNull();
+	});
+
+	it('carries the refusal an owed slot is waiting on', () => {
+		const facts = scheduleFacts(netSchedule({
+			next_run_at: '2026-09-05T02:00:00Z',
+			pending_reason: 'worker_not_ready',
+			pending_since: '2026-09-05T02:00:10Z',
+		}), NOW);
+
+		expect(facts?.kind).toBe('due');
+		expect(facts?.pending?.text).toContain('waiting for worker');
+	});
+
+	it('says a paused schedule is paused, and promises no time', () => {
+		const facts = scheduleFacts(netSchedule({
+			desired_state: 'stopped',
+			next_run_at: null,
+		}), NOW);
+
+		expect(facts?.kind).toBe('paused');
+		expect(facts?.when).toBe('schedule paused');
+		expect(facts?.pending).toBeNull();
+	});
+
+	it('admits it when the control plane computed no slot for an armed net', () => {
+		// An expression that will not parse, or a control plane predating the
+		// field. The browser does not own a second cron implementation to
+		// answer with instead.
+		const facts = scheduleFacts(netSchedule({ next_run_at: null }), NOW);
+
+		expect(facts?.kind).toBe('unknown');
+		expect(facts?.when).toContain('unknown');
+	});
+
+	it('has nothing to say about a net that is not on a schedule', () => {
+		expect(scheduleFacts(netSchedule({ execution_mode: '24/7', schedule: null }), NOW)).toBeNull();
+		// Mode without an expression is the same absence of a schedule.
+		expect(scheduleFacts(netSchedule({ schedule: null }), NOW)).toBeNull();
+		expect(scheduleFacts(null, NOW)).toBeNull();
 	});
 });
 
