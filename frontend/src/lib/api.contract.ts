@@ -180,6 +180,35 @@ const _net_run_fields: Pick<
 	last_success_at: '2026-09-04T02:31:00Z',
 };
 
+// -- Schedule contract --
+//
+// What a cron net's page needs to say anything true about its schedule: the
+// expression as the code declares it, the intent (Stop pauses the schedule,
+// Start arms it), and the slot the control plane computes on read.
+//
+// ``next_run_at`` is nullable *and* allowed to be in the past. Null is a
+// paused net or an unparseable expression; a past value is a slot still owed,
+// which is the state the whole feature exists to make visible. A type that
+// promised a future time would push the UI into showing tomorrow while
+// nothing had run.
+const _net_schedule_fields: Pick<
+	Net, 'execution_mode' | 'schedule' | 'desired_state' | 'next_run_at'
+> = {
+	execution_mode: 'cron',
+	schedule: '0 2 * * *',
+	desired_state: 'running',
+	next_run_at: '2026-09-06T02:00:00Z',
+};
+
+const _paused_net_schedule_fields: Pick<
+	Net, 'execution_mode' | 'schedule' | 'desired_state' | 'next_run_at'
+> = {
+	execution_mode: 'cron',
+	schedule: '0 2 * * *',
+	desired_state: 'stopped',
+	next_run_at: null,
+};
+
 // Days with no runs have no row at all, so the chart plots against ``day``
 // rather than against position. Keeping ``day`` in the contract keeps that
 // possible.
@@ -211,5 +240,7 @@ export const __runs_contract_check = [
 	_open_run_shape,
 	_running_open_run,
 	_net_run_fields,
+	_net_schedule_fields,
+	_paused_net_schedule_fields,
 	_daily_shape,
 ];

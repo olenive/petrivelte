@@ -366,6 +366,11 @@ export interface Net {
 	entry_module: string | null;
 	entry_function: string | null;
 	execution_mode: string | null;
+	/** The cron expression the net's code declares — read from the same
+	 *  discovered definition as ``execution_mode`` and never copied onto the
+	 *  net row, so a redeploy that changes ``schedule=`` changes this answer
+	 *  immediately. Null unless ``execution_mode === 'cron'``. */
+	schedule?: string | null;
 	factory_params_schema: NetParam[] | null;
 	step_wall_clock_timeout_seconds: number | null;
 	/** The execution intent the resume sweep restores after a worker reboot.
@@ -382,6 +387,18 @@ export interface Net {
 	step_count?: number | null;
 	last_progress_at?: string | null;
 	last_success_at?: string | null;
+	/**
+	 * When the schedule next expects to run this net, computed on read from
+	 * the expression and the slot the scheduler has already accounted for.
+	 *
+	 * Deliberately not always in the future: a slot the sweep has not reached
+	 * yet — or one waiting on a worker, which ``pending_reason`` explains —
+	 * is reported *in the past*, and that is the case worth showing, because
+	 * a UI that pointed at tomorrow while nothing had run would hide it. Null
+	 * for a paused net, a net that is not on a schedule, and an expression
+	 * that will not parse.
+	 */
+	next_run_at?: string | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -525,6 +542,27 @@ export async function listNetRuns(
 	const qs = params.toString();
 	const res = await get(`/api/nets/${netId}/runs${qs ? `?${qs}` : ''}`);
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to list runs'));
+	return res.json();
+}
+
+/**
+ * Run now: ask the control plane to recycle the net and record the execution.
+ *
+ * The same dispatch the scheduler performs — unload, load, and the auto-start
+ * that follows a load — rather than a start on the process already there,
+ * which is what makes it work on a wedged subprocess and on a one-shot net
+ * that has drained (loaded, desired-running, nothing left to fire).
+ *
+ * No idempotency key: this route has none. What stops a double click from
+ * opening two runs is the server's one-open-run rule, which answers the
+ * second with a 409 naming the run in the way. Its refusals — stopped net,
+ * a load already in flight, no worker, an unreachable worker — arrive as
+ * ``detail`` written for a person, so callers show that string and never the
+ * status code.
+ */
+export async function runNetNow(netId: string): Promise<{ status: string; run_id: string }> {
+	const res = await post(`/api/nets/${netId}/run`);
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to run the net'));
 	return res.json();
 }
 
