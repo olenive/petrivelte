@@ -1437,7 +1437,7 @@
 				<div class="flex items-center gap-2">
 					<button class={btnDefault} onclick={handleStep} disabled={isRunning || isAutoStepping || isStepping || isResetting || isToggling || !selectedNetId} title="Fire a single transition manually.">Step</button>
 					<button class={isAutoStepping ? btnDanger : btnDefault} onclick={handleAutoStep} disabled={isRunning || isResetting || isToggling || !selectedNetId}
-						title={isAutoStepping ? "Stop repeating steps." : "Repeatedly fires one transition at a time (with animation), like clicking Step over and over. Driven by this browser tab — closing or disconnecting it stops the run. To run the net independently of the browser, use Activate."}
+						title={isAutoStepping ? "Stop repeating steps." : `Repeatedly fires one transition at a time (with animation), like clicking Step over and over. Driven by this browser tab — closing or disconnecting it stops the run. To run the net independently of the browser, use ${verbs.activate}.`}
 					>{isAutoStepping ? 'Stop' : 'Repeat Step'}</button>
 					<button class={executionOn ? btnDanger : btnDefault} onclick={handleActivateDeactivate} disabled={isAutoStepping || isResetting || isToggling || !selectedNetId}
 						title={executionOn ? verbs.deactivateTitle : verbs.activateTitle}
