@@ -13,6 +13,8 @@ import {
 	lastRunBadge,
 	netIsRunning,
 	openRunLabel,
+	previousRunLabel,
+	runHeadline,
 	pendingLabel,
 	progressLabel,
 	reasonLabel,
@@ -401,6 +403,100 @@ describe('liveness', () => {
 		});
 		expect(openRunLabel(odd, NOW)?.text).toContain('run open (unknown)');
 		expect(progressLabel(odd, NOW)).toBeNull();
+	});
+});
+
+describe('previousRunLabel', () => {
+	it('says the outcome once, not twice', () => {
+		// "stopped · stopped by user" is the state and a reason that opens with
+		// it; the reason alone carries both.
+		const label = previousRunLabel(lastRun({
+			state: 'stopped',
+			reason: 'user_stop',
+			duration_s: 369,
+		}), NOW);
+
+		expect(label?.text).toBe('previous run: stopped by user · 6m 09s');
+	});
+
+	it('keeps the state when the reason does not already say it', () => {
+		const label = previousRunLabel(lastRun({
+			state: 'succeeded',
+			reason: 'no_enabled_transitions',
+			duration_s: 1864,
+		}), NOW);
+
+		expect(label?.text).toBe('previous run: succeeded · no enabled transitions · 31m 04s');
+	});
+
+	it('leaves the duration out when retention has taken it', () => {
+		const label = previousRunLabel(lastRun({
+			state: 'failed',
+			reason: 'worker_lost',
+			duration_s: null,
+		}), NOW);
+
+		expect(label?.text).toBe('previous run: failed · worker lost');
+	});
+
+	it('keeps the age in the tooltip', () => {
+		expect(previousRunLabel(lastRun({ ended_at: '2026-09-05T11:00:00Z' }), NOW)?.title)
+			.toContain('ended 1h ago');
+	});
+
+	it('says nothing about a net that has never run', () => {
+		expect(previousRunLabel(null, NOW)).toBeNull();
+	});
+});
+
+describe('runHeadline', () => {
+	const open = {
+		id: 'r-9', trigger: 'manual', state: 'running',
+		created_at: '2026-09-05T00:37:59Z', started_at: '2026-09-05T00:38:00Z',
+		scheduled_for: null,
+	};
+
+	it('never shows a bare outcome badge while a run is open', () => {
+		// The production screenshot this exists for: "running since 00:38
+		// (10h) · step 732 · 2m ago  [stopped] stopped by user" — two facts
+		// side by side with no label, read as one contradiction.
+		const headline = runHeadline(netFields({
+			open_run: open,
+			last_run: lastRun({ state: 'stopped', reason: 'user_stop', duration_s: 369 }),
+		}), NOW);
+
+		expect(headline.kind).toBe('open');
+		// The 'open' variant carries no badge at all — the type says so, and
+		// so does this, so a template cannot render one by accident.
+		expect('badge' in headline).toBe(false);
+		if (headline.kind !== 'open') throw new Error('expected an open headline');
+		expect(headline.open.text).toContain('running since');
+		expect(headline.previous?.text).toBe('previous run: stopped by user · 6m 09s');
+	});
+
+	it('leads with the badge when nothing is open', () => {
+		const headline = runHeadline(netFields({
+			open_run: null,
+			last_run: lastRun({ state: 'stopped', reason: 'user_stop' }),
+		}), NOW);
+
+		expect(headline.kind).toBe('last');
+		if (headline.kind !== 'last') throw new Error('expected a last-run headline');
+		expect(headline.badge.label).toBe('stopped');
+		expect(headline.badge.detail).toBe('stopped by user');
+		expect(headline.badge.colour).toBe(runStateColour('stopped'));
+	});
+
+	it('has nothing to say about a net that has never run', () => {
+		expect(runHeadline(netFields(), NOW).kind).toBe('none');
+	});
+
+	it('still leads with the open run when there is no previous one', () => {
+		const headline = runHeadline(netFields({ open_run: open }), NOW);
+
+		expect(headline.kind).toBe('open');
+		if (headline.kind !== 'open') throw new Error('expected an open headline');
+		expect(headline.previous).toBeNull();
 	});
 });
 

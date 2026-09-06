@@ -19,7 +19,7 @@
 		clearLogs, connectRuntimeLogs,
 	} from '$lib/stores/workerLogs';
 	import { netDisplayName, suggestInstanceName } from '$lib/netHelpers';
-	import { applyRunEvent, lastRunBadge, openRunLabel, pendingLabel, progressLabel } from '$lib/runs';
+	import { applyRunEvent, pendingLabel, progressLabel, runHeadline } from '$lib/runs';
 	import { workerMemoryStore, type WorkerMemorySnapshot } from '$lib/stores/workerMemory';
 
 	let workers = $state<Worker[]>([]);
@@ -1129,9 +1129,8 @@
 											{@const params = getNetParams(net.id, worker.id)}
 											{@const hasParams = params.length > 0}
 											<!-- What the net has done, as against what state it is in.
-											     All three are null for a net that has never run. -->
-											{@const runBadge = lastRunBadge(net.last_run)}
-											{@const openRun = openRunLabel(net)}
+											     `headline` is 'none' for a net that has never run. -->
+											{@const headline = runHeadline(net)}
 											{@const progress = progressLabel(net)}
 											{@const pending = pendingLabel(net)}
 											<li class="py-1.5 border-b border-border-light last:border-b-0">
@@ -1174,16 +1173,22 @@
 												<span class="text-xs px-2 py-0.5 rounded-full text-white font-medium" style="background: {badge.color}">{badge.label}</span>
 												<!-- Outlined rather than filled, so the run outcome does
 												     not compete with the load state beside it. -->
-												{#if openRun}
-													<span class="text-xs text-status-info" title={openRun.title}>{openRun.text}</span>
-												{/if}
-												{#if runBadge}
+												{#if headline.kind === 'open'}
+													<span class="text-xs text-status-info" title={headline.open.title}>{headline.open.text}</span>
+													{#if headline.previous}
+														<!-- Labelled and muted while something is open: a bare
+														     outcome chip beside live text reads as a contradiction. -->
+														<span class="text-xs text-foreground-faint" title={headline.previous.title}>
+															{headline.previous.text}
+														</span>
+													{/if}
+												{:else if headline.kind === 'last'}
 													<span
 														class="text-xs inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-border text-foreground-muted"
-														title={runBadge.title}
+														title={headline.badge.title}
 													>
-														<span class="inline-block w-2 h-2 rounded-full" style="background: {runBadge.colour}"></span>
-														last run {runBadge.label}{#if runBadge.detail}<span class="text-foreground-faint"> · {runBadge.detail}</span>{/if}
+														<span class="inline-block w-2 h-2 rounded-full" style="background: {headline.badge.colour}"></span>
+														last run {headline.badge.label}{#if headline.badge.detail}<span class="text-foreground-faint"> · {headline.badge.detail}</span>{/if}
 													</span>
 												{/if}
 												{#if progress}

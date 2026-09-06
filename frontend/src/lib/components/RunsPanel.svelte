@@ -31,8 +31,8 @@
 	import {
 		DAILY_WINDOW_DAYS, DAILY_SEGMENT_STATES,
 		appendRunPage, dailyChart, emptyRunHistory, formatDuration, formatElapsed,
-		formatStamp, hasMoreRuns, lastRunBadge, openRunLabel, progressLabel,
-		refreshRunHistory, reasonLabel, runStateColour, runStateMeta, triggerLabel,
+		formatStamp, hasMoreRuns, progressLabel, refreshRunHistory, reasonLabel,
+		runHeadline, runStateColour, runStateMeta, triggerLabel,
 		type RunHistory,
 	} from '$lib/runs';
 	import DataLoadState from '$lib/components/DataLoadState.svelte';
@@ -60,10 +60,11 @@
 	const tick = setInterval(() => (now = Date.now()), TICK_MS);
 	onDestroy(() => clearInterval(tick));
 
-	let badge = $derived(lastRunBadge(net?.last_run, now));
-	// What is happening now, as against what happened last. Both come off the
-	// net row, so both follow a run event as soon as the page applies it.
-	let openRun = $derived(net ? openRunLabel(net, now) : null);
+	// What is happening now, or — when nothing is — what happened last. Never
+	// both as equals: a bare `stopped` badge beside "running since 00:38" reads
+	// as a contradiction rather than as history. Comes off the net row, so it
+	// follows a run event as soon as the page applies it.
+	let headline = $derived(net ? runHeadline(net, now) : { kind: 'none' } as const);
 	let progress = $derived(net ? progressLabel(net, now) : null);
 	let chart = $derived(dailyChart(daily, { days: DAILY_WINDOW_DAYS, now }));
 
@@ -175,25 +176,28 @@
 	>
 		<span class="text-[0.7rem] text-foreground-muted">{expanded ? '▼' : '▶'}</span>
 		<span>Runs</span>
-		<!-- What is happening now, and what happened last. Both, when there is
-		     both: a net that is running still has a previous outcome, and that
-		     is often the thing being watched for a change. -->
-		{#if openRun}
-			<span class="text-xs text-status-info font-normal" title={openRun.title}>{openRun.text}</span>
+		{#if headline.kind === 'open'}
+			<span class="text-xs text-status-info font-normal" title={headline.open.title}>{headline.open.text}</span>
 			{#if progress}
 				<span class="text-xs text-foreground-muted font-mono font-normal" title={progress.title}>{progress.text}</span>
 			{/if}
-		{/if}
-		{#if badge}
+			{#if headline.previous}
+				<!-- Subordinate and labelled: the net is running, and this is
+				     what it did last time, not what it is doing. -->
+				<span class="text-xs text-foreground-faint font-normal" title={headline.previous.title}>
+					{headline.previous.text}
+				</span>
+			{/if}
+		{:else if headline.kind === 'last'}
 			<span
 				class="text-xs px-2 py-0.5 rounded-full text-white font-medium"
-				style="background: {badge.colour}"
-				title={badge.title}
-			>{badge.label}</span>
-			{#if badge.detail}
-				<span class="text-xs text-foreground-muted font-normal">{badge.detail}</span>
+				style="background: {headline.badge.colour}"
+				title={headline.badge.title}
+			>{headline.badge.label}</span>
+			{#if headline.badge.detail}
+				<span class="text-xs text-foreground-muted font-normal">{headline.badge.detail}</span>
 			{/if}
-		{:else if !openRun}
+		{:else}
 			<span class="text-xs text-foreground-faint font-normal">never run</span>
 		{/if}
 		{#if net?.last_success_at}

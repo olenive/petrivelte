@@ -257,6 +257,57 @@ export function lastRunBadge(lastRun: LastRun | null | undefined, now = Date.now
 }
 
 /**
+ * The last run, said in words rather than shown as a badge.
+ *
+ * For when something is executing now. A bare `stopped` pill beside "running
+ * since 00:38 (10h)" is not a smaller version of the same fact, it is a
+ * contradiction: the first production screenshot of the panel read "running
+ * since 00:38 (10h) · step 732 · 2m ago  [stopped] stopped by user", and the
+ * question it produced was whether the net was running or stopped. Labelled
+ * and demoted to text, the same fact answers that instead of raising it.
+ *
+ * The state is left out when the reason already opens with it — "stopped ·
+ * stopped by user" says it twice — which is what makes the common case read
+ * as "previous run: stopped by user · 6m 09s".
+ */
+export function previousRunLabel(
+	lastRun: LastRun | null | undefined,
+	now = Date.now(),
+): Stamp | null {
+	const badge = lastRunBadge(lastRun, now);
+	if (!badge || !lastRun) return null;
+	const parts = badge.detail && badge.detail.startsWith(badge.label)
+		? [badge.detail]
+		: [badge.label, ...(badge.detail ? [badge.detail] : [])];
+	const took = formatDuration(lastRun.duration_s);
+	if (took) parts.push(took);
+	return { text: `previous run: ${parts.join(' · ')}`, title: badge.title };
+}
+
+/**
+ * What a net's header says about its runs: one of three presentations.
+ *
+ * The decision lives here rather than in each template because it is the same
+ * decision in both places, and because getting it wrong is not a styling slip
+ * — it is showing a live run and a closed one as equals. A net with something
+ * open has no bare badge at all; the type makes that unrepresentable.
+ */
+export type RunHeadline =
+	| { kind: 'open'; open: Stamp; previous: Stamp | null }
+	| { kind: 'last'; badge: RunBadge }
+	| { kind: 'none' };
+
+export function runHeadline(
+	net: Pick<Net, 'open_run' | 'last_run'>,
+	now = Date.now(),
+): RunHeadline {
+	const open = openRunLabel(net, now);
+	if (open) return { kind: 'open', open, previous: previousRunLabel(net.last_run, now) };
+	const badge = lastRunBadge(net.last_run, now);
+	return badge ? { kind: 'last', badge } : { kind: 'none' };
+}
+
+/**
  * True when this net is executing *right now*.
  *
  * Read from the open run, and from nothing else. The tempting inference —
