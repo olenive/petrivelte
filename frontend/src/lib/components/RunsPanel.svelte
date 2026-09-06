@@ -31,7 +31,7 @@
 	import {
 		DAILY_WINDOW_DAYS, DAILY_SEGMENT_STATES,
 		appendRunPage, dailyChart, emptyRunHistory, formatDuration, formatElapsed,
-		formatStamp, hasMoreRuns, progressLabel, refreshRunHistory, reasonLabel,
+		formatStamp, formatUtcStamp, hasMoreRuns, progressLabel, refreshRunHistory, reasonLabel,
 		runHeadline, runStateColour, runStateMeta, triggerLabel,
 		type RunHistory,
 	} from '$lib/runs';
@@ -305,7 +305,7 @@
 							{#each history.runs as run (run.id)}
 								{@const meta = runStateMeta(run.state)}
 								{@const stamp = started(run)}
-								{@const slot = formatStamp(run.scheduled_for, now)}
+								{@const slot = formatUtcStamp(run.scheduled_for, now)}
 								{@const reason = reasonLabel(run.reason)}
 								<tbody class="border-b border-border-light">
 									<tr class="hover:bg-hover">
@@ -313,7 +313,8 @@
 											<span class="text-foreground">{triggerLabel(run.trigger)}</span>
 											{#if slot}
 												<!-- The cron slot this run was fired for, which is not the
-												     same as when it started. -->
+												     same as when it started — and in UTC, because that is
+												     the number written in the net's decorator. -->
 												<span class="block text-foreground-faint" title="Scheduled for {slot.title}">
 													slot {slot.text}
 												</span>
