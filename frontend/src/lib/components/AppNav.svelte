@@ -25,6 +25,7 @@
 		<ThemeToggle />
 		<a href="/wiring" class="text-accent text-sm no-underline hover:underline">Wiring</a>
 		<a href="/nets" class="text-accent text-sm no-underline hover:underline">Nets</a>
+		<a href="/notebooks" class="text-accent text-sm no-underline hover:underline">Notebooks</a>
 		<a href="/workers" class="text-accent text-sm no-underline hover:underline">Workers</a>
 		<a href="/deployments" class="text-accent text-sm no-underline hover:underline">Deployments</a>
 		<a href="/settings" class="text-accent text-sm no-underline hover:underline">Settings</a>

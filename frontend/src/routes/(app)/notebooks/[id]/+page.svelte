@@ -465,7 +465,7 @@
 
 	function cancelAdditional() {
 		pendingRefusal = null;
-		history.length > 1 ? history.back() : goto('/wiring');
+		history.length > 1 ? history.back() : goto('/notebooks');
 	}
 
 	/** Poll-free: occupancy changes only when something is loaded or evicted,
@@ -540,7 +540,7 @@
 <!-- Slim notebook header -->
 <div class="flex items-center justify-between px-6 py-2 border-b border-border bg-card text-sm">
 	<div class="flex items-center gap-3 min-w-0">
-		<a class="text-accent hover:underline" href="/wiring">← Wiring</a>
+		<a class="text-accent hover:underline" href="/notebooks">← Notebooks</a>
 		{#if notebook}
 			<span class="text-foreground-muted">/</span>
 			<span class="font-medium text-foreground truncate">{notebook.instance_name}</span>

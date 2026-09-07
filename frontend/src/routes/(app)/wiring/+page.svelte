@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
+	import { page } from '$app/stores';
 	import { SvelteFlow, Background, Controls, type Node, type Edge } from '@xyflow/svelte';
 	import '@xyflow/svelte/dist/style.css';
 
@@ -110,6 +111,14 @@
 
 	onMount(async () => {
 		await refresh();
+		// Deep link from the notebooks index: `/wiring?add=<workerId>` opens the
+		// add-notebook modal with that worker preselected. Read once, here,
+		// rather than from a reactive statement — the parameter stays in the URL
+		// and anything watching it would reopen the modal every time it closed.
+		// An empty value is the page-level "+ Add notebook" button, which wants
+		// the modal but has no worker in mind.
+		const addParam = $page.url.searchParams.get('add');
+		if (addParam !== null) openAddModal(addParam);
 		// Live updates: react to events emitted by the control plane. We mutate
 		// the in-memory wiring snapshot in place and rebuild the graph; full
 		// refetch still happens after user actions (create/delete/bind/etc.).
