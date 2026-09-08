@@ -67,6 +67,8 @@ function notebook(over: Partial<WiringNotebook> = {}): WiringNotebook {
 		deployment_id: 'dep-1',
 		load_state: 'loaded',
 		load_error: null,
+		idle_timeout_seconds: null,
+		effective_idle_timeout_seconds: 900,
 		slots: [],
 		...over,
 	};

@@ -955,6 +955,16 @@ export interface Notebook {
 	path_in_tarball: string | null;
 	slots: NotebookSlot[];
 	bindings: NotebookBinding[];
+	/** How long the worker leaves this kernel idle before freeing its RAM.
+	 *  `null` = use the worker's own default, `0` = never evict. */
+	idle_timeout_seconds: number | null;
+	/** The setting above resolved against the worker default, by the control
+	 *  plane — so nothing here has to know what that default is. */
+	effective_idle_timeout_seconds: number;
+	/** Only on a PATCH response: whether the new value reached the running
+	 *  subprocess. `false` = saved but the live kernel keeps the old one until
+	 *  its next load; `null`/absent = there was nothing running to tell. */
+	idle_timeout_pushed?: boolean | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -986,7 +996,13 @@ export async function createNotebook(body: {
 
 export async function patchNotebook(
 	id: string,
-	body: { instance_name?: string; worker_id?: string | null },
+	body: {
+		instance_name?: string;
+		worker_id?: string | null;
+		/** `null` resets to the worker default; `0` never evicts; otherwise
+		 *  60..604800, which the control plane enforces. */
+		idle_timeout_seconds?: number | null;
+	},
 ): Promise<Notebook> {
 	const res = await patch(`/api/notebooks/${id}`, body);
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to update notebook'));
@@ -1315,6 +1331,10 @@ export interface WiringNotebook {
 	deployment_id: string | null;
 	load_state: string;
 	load_error: string | null;
+	/** See `Notebook`: the stored setting, and the control plane's resolution
+	 *  of it. Read-only here — the picker lives on the notebook page. */
+	idle_timeout_seconds: number | null;
+	effective_idle_timeout_seconds: number;
 	slots: WiringSlot[];
 }
 

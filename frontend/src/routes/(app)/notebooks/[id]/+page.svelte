@@ -13,6 +13,7 @@
 		getNotebookTimings,
 		getWorkerOccupancy,
 		loadNotebook,
+		patchNotebook,
 		unloadNotebook,
 		type AdditionalNotebookRefusal,
 		type Notebook,
@@ -34,6 +35,11 @@
 		type LoadProgress,
 	} from '$lib/notebookLoadProgress';
 	import { describeLoadError } from '$lib/notebookLoadReason';
+	import {
+		idleTimeoutOptions,
+		idleTimeoutValue,
+		parseIdleTimeoutValue,
+	} from '$lib/notebookIdleTimeout';
 
 	let notebookId = $derived($page.params.id as string);
 	let notebook = $state<Notebook | null>(null);
@@ -41,8 +47,16 @@
 	// nothing has been recorded. Shared with the wiring panel so the two
 	// never disagree about whether an unload was expected.
 	let loadReason = $derived(
-		notebook ? describeLoadError(notebook.load_state, notebook.load_error) : null,
+		notebook
+			? describeLoadError(notebook.load_state, notebook.load_error, {
+					idleTimeoutSeconds: notebook.effective_idle_timeout_seconds,
+				})
+			: null,
 	);
+	// Set when a saved timeout could not be pushed to the running kernel. Not
+	// an error — the value is persisted and travels with the next load — so it
+	// gets a muted line rather than the red banner.
+	let idleTimeoutNote = $state<string | null>(null);
 	let initialising = $state(true);
 	let busy = $state(false);
 	let errorMessage = $state<string | null>(null);
@@ -475,6 +489,9 @@
 		if (!notebook) return;
 		busy = true;
 		errorMessage = null;
+		// The new kernel reads the stored timeout on load, so whatever the push
+		// failed to deliver is delivered now; the note would be stale.
+		idleTimeoutNote = null;
 		// Starts before the unload: a Reload pays unload + load, and the unload
 		// half was 15s in the field.
 		startWallClock();
@@ -499,6 +516,36 @@
 			refreshOccupancy();
 		} catch (e: any) {
 			errorMessage = e?.message ?? String(e);
+		} finally {
+			busy = false;
+		}
+	}
+
+	/**
+	 * Change how long the worker leaves this kernel idle.
+	 *
+	 * The control plane pushes the new value to the running subprocess, so a
+	 * loaded notebook does not need a reload; when that push fails the PATCH
+	 * still succeeds and says so, and the note below is the only place the user
+	 * would otherwise find out that the kernel they are looking at is still on
+	 * the old timeout. On failure the notebook object is replaced with an equal
+	 * one so the `<select>` snaps back to what the server actually holds.
+	 */
+	async function handleIdleTimeoutChange(event: Event) {
+		if (!notebook) return;
+		const chosen = parseIdleTimeoutValue((event.currentTarget as HTMLSelectElement).value);
+		if (chosen === notebook.idle_timeout_seconds) return;
+		busy = true;
+		idleTimeoutNote = null;
+		try {
+			const updated = await patchNotebook(notebookId, { idle_timeout_seconds: chosen });
+			notebook = updated;
+			if (updated.idle_timeout_pushed === false) {
+				idleTimeoutNote = 'saved; the running kernel keeps its old timeout until the next load';
+			}
+		} catch (e: any) {
+			errorMessage = e?.message ?? String(e);
+			notebook = { ...notebook };
 		} finally {
 			busy = false;
 		}
@@ -547,6 +594,27 @@
 				>
 					· {loadReason.label}
 				</span>
+			{/if}
+			<!-- How long this notebook may sit unopened before the worker frees
+			     its kernel. Per notebook, because the right answer depends on
+			     what the notebook is for: an hourly dashboard and a scratch pad
+			     want opposite things, and only the person here knows which. -->
+			<label class="flex items-center gap-1.5 whitespace-nowrap text-[11px] text-foreground-muted">
+				<span>Idle timeout</span>
+				<select
+					class="px-1.5 py-0.5 border border-border rounded bg-card text-foreground text-[11px] disabled:opacity-50"
+					value={idleTimeoutValue(notebook.idle_timeout_seconds)}
+					onchange={handleIdleTimeoutChange}
+					disabled={busy}
+					title="The worker frees this notebook's kernel after this much time without a browser request, to reclaim its ~190MB. Opening the page loads it again."
+				>
+					{#each idleTimeoutOptions(notebook.idle_timeout_seconds, notebook.effective_idle_timeout_seconds) as option (option.value)}
+						<option value={option.value}>{option.label}</option>
+					{/each}
+				</select>
+			</label>
+			{#if idleTimeoutNote}
+				<span class="text-[11px] text-foreground-muted">· {idleTimeoutNote}</span>
 			{/if}
 			{#if notebook.bindings.length > 0}
 				<span class="text-foreground-muted text-xs">

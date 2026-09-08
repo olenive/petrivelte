@@ -38,6 +38,7 @@
 	import NotebookDefectWarning from '$lib/components/NotebookDefectWarning.svelte';
 	import { verdictFor, verdictForInstance } from '$lib/notebookDefects';
 	import { describeLoadError } from '$lib/notebookLoadReason';
+	import { formatIdleTimeout } from '$lib/notebookIdleTimeout';
 
 	// ---- data ----
 
@@ -723,7 +724,9 @@
 					{:else if selection.kind === 'notebook'}
 						{@const nb = findNotebook(selection.id)}
 						{#if nb}
-							{@const reason = describeLoadError(nb.load_state, nb.load_error)}
+							{@const reason = describeLoadError(nb.load_state, nb.load_error, {
+								idleTimeoutSeconds: nb.effective_idle_timeout_seconds,
+							})}
 							<dl class="grid grid-cols-[110px_1fr] gap-y-2 gap-x-3 text-xs">
 								<dt class="text-foreground-muted">Instance</dt>
 								<dd class="text-foreground font-medium">{nb.instance_name}</dd>
@@ -745,6 +748,22 @@
 										title={reason.code}
 									>
 										{reason.label}
+									</dd>
+								{/if}
+								<!-- Read-only here: the picker lives on the notebook page, where
+								     the person who knows what the notebook is for is looking. A
+								     control plane that predates the field sends none, and then the
+								     row is left out rather than guessing. -->
+								{#if typeof nb.effective_idle_timeout_seconds === 'number'}
+									<dt class="text-foreground-muted">Idle timeout</dt>
+									<dd
+										class="text-foreground text-[11px]"
+										title="How long the worker leaves this notebook's kernel idle before freeing it. Change it on the notebook page."
+									>
+										{formatIdleTimeout(nb.effective_idle_timeout_seconds)}
+										{#if nb.idle_timeout_seconds === null || nb.idle_timeout_seconds === undefined}
+											<span class="text-foreground-muted">(default)</span>
+										{/if}
 									</dd>
 								{/if}
 								<dt class="text-foreground-muted">Worker</dt>

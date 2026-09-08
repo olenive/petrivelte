@@ -14,6 +14,8 @@
  * not heard of is not one it can vouch for.
  */
 
+import { formatIdleTimeout } from '$lib/notebookIdleTimeout';
+
 export type LoadReasonTone = 'expected' | 'failure';
 
 export interface LoadReason {
@@ -27,8 +29,10 @@ export interface LoadReason {
 }
 
 const KNOWN_CODES: Record<string, { label: string; tone: LoadReasonTone }> = {
-	// The worker reclaims RAM from kernels no browser has touched for
-	// NOTEBOOK_IDLE_TIMEOUT_S; opening the notebook loads it again.
+	// The worker reclaims RAM from kernels no browser has touched for the
+	// notebook's idle timeout; opening the notebook loads it again. The label
+	// below is the fallback for a payload that does not carry the duration —
+	// callers that have it pass `idleTimeoutSeconds` and get the real one.
 	idle_eviction: {
 		label: 'evicted after 15 min of inactivity (frees worker RAM)',
 		tone: 'expected',
@@ -46,6 +50,35 @@ const KNOWN_CODES: Record<string, { label: string; tone: LoadReasonTone }> = {
 	},
 };
 
+export interface LoadReasonOptions {
+	/**
+	 * The notebook's *effective* idle timeout in seconds, as resolved by the
+	 * control plane. Names the real duration in the eviction label, so a
+	 * notebook set to four hours does not claim it was evicted after fifteen
+	 * minutes. Omit it when the duration is not known.
+	 */
+	idleTimeoutSeconds?: number | null;
+}
+
+/**
+ * The eviction label, which is the one code whose text depends on a setting.
+ *
+ * Three cases rather than two, because "the caller did not say" and "the
+ * caller said this notebook is never evicted" are different states. An absent
+ * option keeps the historical wording (the timeout was a single server-wide
+ * 15 min, and every payload that omits the field comes from a control plane
+ * where it still is). A non-positive or unusable one means eviction is off
+ * now, so the code on the row is from an earlier setting and no duration can
+ * be named honestly.
+ */
+function idleEvictionLabel(fallback: string, seconds: number | null | undefined): string {
+	if (seconds === undefined) return fallback;
+	if (typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0) {
+		return `evicted after ${formatIdleTimeout(seconds)} of inactivity (frees worker RAM)`;
+	}
+	return 'evicted after a period of inactivity (frees worker RAM)';
+}
+
 /**
  * Translate a notebook row's `load_state` + `load_error` into something a
  * panel can show, or `null` when there is nothing to explain.
@@ -53,6 +86,7 @@ const KNOWN_CODES: Record<string, { label: string; tone: LoadReasonTone }> = {
 export function describeLoadError(
 	loadState: string,
 	loadError: string | null | undefined,
+	opts?: LoadReasonOptions,
 ): LoadReason | null {
 	const code = loadError?.trim();
 	if (!code) return null;
@@ -61,8 +95,12 @@ export function describeLoadError(
 	if (loadState === 'loaded') return null;
 
 	const known = KNOWN_CODES[code];
+	const label =
+		known && code === 'idle_eviction'
+			? idleEvictionLabel(known.label, opts?.idleTimeoutSeconds)
+			: (known?.label ?? code);
 	if (loadState === 'error' || !known || known.tone === 'failure') {
-		return { heading: 'Error', label: known?.label ?? code, tone: 'failure', code };
+		return { heading: 'Error', label, tone: 'failure', code };
 	}
-	return { heading: 'Reason', label: known.label, tone: 'expected', code };
+	return { heading: 'Reason', label, tone: 'expected', code };
 }
