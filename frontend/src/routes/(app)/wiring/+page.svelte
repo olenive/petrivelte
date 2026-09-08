@@ -37,6 +37,7 @@
 	import { NOTEBOOK_COST_MB as OCCUPANCY_NOTEBOOK_COST_MB } from '$lib/notebookOccupancy';
 	import NotebookDefectWarning from '$lib/components/NotebookDefectWarning.svelte';
 	import { verdictFor, verdictForInstance } from '$lib/notebookDefects';
+	import { describeLoadError } from '$lib/notebookLoadReason';
 
 	// ---- data ----
 
@@ -722,6 +723,7 @@
 					{:else if selection.kind === 'notebook'}
 						{@const nb = findNotebook(selection.id)}
 						{#if nb}
+							{@const reason = describeLoadError(nb.load_state, nb.load_error)}
 							<dl class="grid grid-cols-[110px_1fr] gap-y-2 gap-x-3 text-xs">
 								<dt class="text-foreground-muted">Instance</dt>
 								<dd class="text-foreground font-medium">{nb.instance_name}</dd>
@@ -736,9 +738,14 @@
 										{nb.load_state}
 									</span>
 								</dd>
-								{#if nb.load_error}
-									<dt class="text-foreground-muted">Error</dt>
-									<dd class="text-red-500 text-[11px]">{nb.load_error}</dd>
+								{#if reason}
+									<dt class="text-foreground-muted">{reason.heading}</dt>
+									<dd
+										class="text-[11px] {reason.tone === 'failure' ? 'text-red-500' : 'text-foreground-muted'}"
+										title={reason.code}
+									>
+										{reason.label}
+									</dd>
 								{/if}
 								<dt class="text-foreground-muted">Worker</dt>
 								<dd class="text-foreground text-[11px]">

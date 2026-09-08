@@ -33,27 +33,16 @@
 		expectedSeconds,
 		type LoadProgress,
 	} from '$lib/notebookLoadProgress';
-
-	// Human-friendly reasons matching what the worker / control plane
-	// stamps on `load_error` when something changes load_state. Keep this
-	// shallow — server-side codes are the source of truth, here we just
-	// translate for display. Unknown codes fall through as-is.
-	const LOAD_ERROR_LABELS: Record<string, string> = {
-		idle_eviction: 'evicted after 15 min of inactivity (frees worker RAM)',
-		subprocess_dead: 'subprocess unreachable — likely crashed',
-		subprocess_gone: 'subprocess is gone (crash, OOM, or worker restart)',
-		worker_deleted: 'worker was deleted',
-		worker_destroyed: 'worker resource was destroyed',
-		worker_stopped: 'worker was stopped',
-	};
-
-	function loadErrorLabel(code: string | null | undefined): string | null {
-		if (!code) return null;
-		return LOAD_ERROR_LABELS[code] ?? code;
-	}
+	import { describeLoadError } from '$lib/notebookLoadReason';
 
 	let notebookId = $derived($page.params.id as string);
 	let notebook = $state<Notebook | null>(null);
+	// Why the notebook is not loaded, in words; null while it is loaded or
+	// nothing has been recorded. Shared with the wiring panel so the two
+	// never disagree about whether an unload was expected.
+	let loadReason = $derived(
+		notebook ? describeLoadError(notebook.load_state, notebook.load_error) : null,
+	);
 	let initialising = $state(true);
 	let busy = $state(false);
 	let errorMessage = $state<string | null>(null);
@@ -551,12 +540,12 @@
 			>
 				{notebook.load_state}
 			</span>
-			{#if notebook.load_state !== 'loaded' && loadErrorLabel(notebook.load_error)}
+			{#if loadReason}
 				<span
-					class="text-foreground-muted text-xs"
+					class="text-xs {loadReason.tone === 'failure' ? 'text-red-500' : 'text-foreground-muted'}"
 					title="Click Reload to restart the subprocess. Your bindings are preserved."
 				>
-					· {loadErrorLabel(notebook.load_error)}
+					· {loadReason.label}
 				</span>
 			{/if}
 			{#if notebook.bindings.length > 0}
@@ -676,8 +665,8 @@
 		<p class="text-foreground">Notebook is not loaded.</p>
 		<p class="text-foreground-muted text-xs mt-1">
 			Load state: <code>{notebook.load_state}</code>
-			{#if notebook.load_error}
-				· error: <code>{notebook.load_error}</code>
+			{#if loadReason}
+				· {loadReason.heading.toLowerCase()}: {loadReason.label}
 			{/if}
 		</p>
 		<button
