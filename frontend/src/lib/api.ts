@@ -614,6 +614,21 @@ export async function getExecutionState(netId: string): Promise<any> {
 	return res.json();
 }
 
+/** The worker's per-net transition history, oldest first. Capped on the
+ *  worker (500), so it is the whole story only for a young subprocess. */
+export async function getExecutionHistory(netId: string): Promise<Array<{
+	timestamp: number;
+	transition: string;
+	duration_ms: number;
+	inputs: Record<string, string[]>;
+	outputs: string[];
+}>> {
+	const res = await get(`/api/nets/${netId}/execution/history`);
+	if (!res.ok) return [];
+	const body = await res.json();
+	return Array.isArray(body) ? body : [];
+}
+
 export async function executionStep(
 	netId: string,
 	idempotencyKey?: string,

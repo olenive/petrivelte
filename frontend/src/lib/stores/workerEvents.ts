@@ -9,13 +9,20 @@
  *   { seq, scope: 'worker' | 'net', net_id, kind, ts, data }
  *
  * Consumers subscribe and filter by kind (and net_id when relevant).
- * Stream resets when the worker restarts: a drop in seq indicates the
- * client should discard local state and refetch via REST.
+ *
+ * The stream is not the truth, only the fast path to it. ``workerStreamStore``
+ * says whether it is currently open and bumps ``generation`` whenever what
+ * the page has heard may no longer be what the worker knows: a reconnect
+ * after a drop, a ``stream_gap`` marker from the worker (its buffer could
+ * not replay what we missed), or a sequence that started over (the worker
+ * restarted). A page refetches over REST on every bump. See
+ * ``$lib/workerStream`` for the rules and their reasons.
  */
 
 import { writable } from 'svelte/store';
 import { API_URL } from '$lib/api';
 import { setWorkerMemory, type WorkerMemorySnapshot } from '$lib/stores/workerMemory';
+import { advanceCursor, initialStreamStatus, type StreamState, type StreamStatus } from '$lib/workerStream';
 
 export interface WorkerEvent {
 	seq: number;
@@ -28,6 +35,18 @@ export interface WorkerEvent {
 
 const { subscribe, set } = writable<WorkerEvent | null>(null);
 
+const status = writable<StreamStatus>(initialStreamStatus);
+export const workerStreamStore = { subscribe: status.subscribe };
+
+function setState(state: StreamState) {
+	status.update((s) => (s.state === state ? s : { ...s, state }));
+}
+
+function markStale(reason: string) {
+	console.info('[worker stream] resync needed:', reason);
+	status.update((s) => ({ ...s, generation: s.generation + 1, lastGap: reason }));
+}
+
 let eventSource: EventSource | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectDelay = 1000;
@@ -35,6 +54,9 @@ const MAX_RECONNECT_DELAY = 30000;
 
 let currentWorkerId: string | null = null;
 let lastSeq = 0;
+// Whether this worker's stream has been open before: a first open seeds
+// nothing (the page fetched on selection), a later one may have missed events.
+let openedBefore = false;
 
 function cleanup() {
 	if (reconnectTimer !== null) {
@@ -54,21 +76,28 @@ function connectSSE() {
 	if (!workerId) return;
 
 	const url = `${API_URL}/api/workers/${workerId}/events?after=${lastSeq}`;
+	setState(openedBefore ? 'reconnecting' : 'connecting');
 	eventSource = new EventSource(url, { withCredentials: true });
 
 	eventSource.onopen = () => {
 		reconnectDelay = 1000;
+		setState('open');
+		// The browser reconnects an EventSource on its own after a sleep or a
+		// network blip, resuming from Last-Event-ID; what the worker could
+		// not replay is not announced on this path, so a reopen is always a
+		// reason to refetch.
+		if (openedBefore) markStale('reconnected');
+		openedBefore = true;
 	};
 
 	eventSource.onmessage = (event) => {
 		try {
 			const parsed = JSON.parse(event.data) as WorkerEvent;
-			// A seq lower than what we've already seen indicates a worker
-			// restart. Reset lastSeq and accept the new sequence.
-			if (parsed.seq <= lastSeq) {
-				lastSeq = 0;
-			}
-			lastSeq = Math.max(lastSeq, parsed.seq);
+			const cursor = advanceCursor(lastSeq, parsed);
+			lastSeq = cursor.lastSeq;
+			if (cursor.gap) markStale(cursor.gap);
+			// A gap marker is addressed to this store, not to the page.
+			if (parsed.kind === 'stream_gap') return;
 			// Memory snapshots feed a dedicated store; downstream consumers
 			// don't need to filter for kind=memory_stats themselves.
 			if (parsed.scope === 'worker' && parsed.kind === 'memory_stats' && workerId) {
@@ -80,9 +109,11 @@ function connectSSE() {
 		}
 	};
 
-	// Server proxy emits this when it can't reach the worker upstream. Stop
-	// reconnecting — something explicit has to bring the worker back
-	// (refresh, manual restart, scheduled wake).
+	// Server proxy emits this when it can't reach the worker upstream. Keep
+	// trying at the slowest cadence: a suspended machine wakes, a rolled one
+	// comes back, and the page must not need a refresh to notice. The page
+	// also reopens the stream the moment the control plane reports the
+	// worker ready again (``liveAction`` in ``$lib/workerStream``).
 	eventSource.addEventListener('worker_unavailable', (event: MessageEvent) => {
 		let reason = 'unreachable';
 		try {
@@ -100,13 +131,19 @@ function connectSSE() {
 			data: { reason },
 		});
 		cleanup();
-		currentWorkerId = null;
+		setState('unavailable');
+		reconnectDelay = MAX_RECONNECT_DELAY;
+		scheduleReconnect();
 	});
 
 	eventSource.onerror = () => {
 		if (eventSource?.readyState === EventSource.CLOSED) {
 			eventSource = null;
+			setState('reconnecting');
 			scheduleReconnect();
+		} else {
+			// The browser is retrying on its own; say so until onopen.
+			setState('reconnecting');
 		}
 	};
 }
@@ -125,7 +162,9 @@ export function connectToWorker(workerId: string) {
 	}
 	currentWorkerId = workerId;
 	lastSeq = 0;
+	openedBefore = false;
 	reconnectDelay = 1000;
+	status.set({ ...initialStreamStatus, workerId });
 	connectSSE();
 }
 
@@ -133,6 +172,8 @@ export function disconnectWorkerEvents() {
 	cleanup();
 	currentWorkerId = null;
 	lastSeq = 0;
+	openedBefore = false;
+	status.set(initialStreamStatus);
 	set(null);
 }
 

@@ -2,7 +2,8 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { workerEventsStore, connectToWorker, disconnectWorkerEvents } from '$lib/stores/workerEvents';
+	import { workerEventsStore, workerStreamStore, connectToWorker, disconnectWorkerEvents } from '$lib/stores/workerEvents';
+	import { statusLabel, liveAction, capHead, capTail, EXECUTION_LOG_CAP, NET_LOG_CAP } from '$lib/workerStream';
 	import { selectedTokenId } from '$lib/stores/tokenSelection';
 	import { isRunEvent, serverEventsStore } from '$lib/stores/serverEvents';
 	import {
@@ -14,7 +15,7 @@
 		logout,
 		listNets, listWorkers, patchNet, loadNet, unloadNet,
 		getExecutionState, executionStep, executionStart, executionStop, executionReset, executionInject,
-		listNetSecrets, setNetSecrets, getNetLogHistory, runNetNow,
+		listNetSecrets, setNetSecrets, getNetLogHistory, getExecutionHistory, runNetNow,
 		type Net, type Worker, type NetParam, type SecretMetadata,
 	} from '$lib/api';
 	import GraphPanel from '$lib/components/GraphPanel.svelte';
@@ -371,7 +372,7 @@
 		netLogLines = [];
 		executionStoppedReason = null;
 		selectedTransitionId = null;
-		// TODO: load logEntries from GET /api/nets/{netId}/execution/history once the endpoint exists
+		logEntries = [];
 
 		// Only connect event stream and fetch execution state if the net has a ready worker
 		const net = availableNets.find(n => n.id === netId);
@@ -386,18 +387,47 @@
 		// does not drop the existing connection.
 		connectToWorker(worker.id);
 
-		// Seed the durable net-log panel from the worker's rotating file so
-		// history survives subprocess/worker restarts. Guard against a slow
-		// response landing after the user switched nets.
-		getNetLogHistory(netId)
-			.then((entries) => {
-				if (selectedNetId !== netId) return;
-				netLogLines = entries.map(formatNetLogEntry);
-			})
-			.catch(() => {});
+		await resyncNet(netId);
+	}
 
-		// Fetch execution state
-		await refreshGraphState(netId);
+	// Replace everything this page believes about the net with what the
+	// worker holds right now: graph, tokens, running flag, transition
+	// history, the durable net log. Called on selection and whenever the
+	// live stream may have let something slip — a reconnect, a gap marker
+	// from the worker, a worker or net state change from the control plane,
+	// the tab coming back into view. Before 2026-09-13 only the selection
+	// fetched, and a tab that slept through more events than the worker
+	// buffers showed a log hours older than the net, under "Connected".
+	// Three reads, each guarded against a slow answer landing after the
+	// user switched nets.
+	async function resyncNet(netId: string) {
+		await Promise.all([
+			refreshGraphState(netId),
+			getExecutionHistory(netId)
+				.then((history) => {
+					if (selectedNetId !== netId) return;
+					// The worker keeps history oldest first; the panel shows
+					// newest first.
+					logEntries = capHead([...history].reverse(), EXECUTION_LOG_CAP);
+				})
+				.catch(() => {}),
+			// Seeded from the worker's rotating file so it survives
+			// subprocess and worker restarts.
+			getNetLogHistory(netId)
+				.then((entries) => {
+					if (selectedNetId !== netId) return;
+					netLogLines = capTail(entries.map(formatNetLogEntry), NET_LOG_CAP);
+				})
+				.catch(() => {}),
+		]);
+	}
+
+	// The worker no longer answers for this net — an unload, or a load that
+	// failed. What is drawn is a subprocess that is gone.
+	function clearLiveState() {
+		graphState = null;
+		tokens = [];
+		isRunning = false;
 	}
 
 	// Pull the worker's current graph state and recompute token positions. Used
@@ -1090,13 +1120,19 @@
 	// off for a net that isn't loaded — an unloaded net can't be running.
 	let runningPollTimer: ReturnType<typeof setInterval> | null = null;
 	const RUNNING_POLL_MS = 5000;
+	// A believed-stopped net is checked too, more slowly: the resume sweep
+	// and the schedule start nets without this page's help, and until
+	// 2026-09-13 the button offered to Activate a net that was firing.
+	const STOPPED_RECONCILE_EVERY = 6;  // every 30s
+	let runningPollTick = 0;
 
 	function reconcileRunningPoll() {
 		const netId = selectedNetId;
-		// Only correct a *believed-running* state — that's the wedged
-		// "Deactivate" case. An idle/stopped net polls nothing, and live token
-		// updates already arrive via the event stream, so this stays cheap.
-		if (!netId || isToggling || !isRunning) return;
+		runningPollTick += 1;
+		if (!netId || isToggling) return;
+		// A believed-running net is checked every tick — that's the wedged
+		// "Deactivate" case. A believed-stopped one every sixth.
+		if (!isRunning && runningPollTick % STOPPED_RECONCILE_EVERY !== 0) return;
 		const net = availableNets.find(n => n.id === netId);
 		if (!net || net.load_state !== 'loaded') {
 			isRunning = false;  // an unloaded/errored net cannot be running
@@ -1117,6 +1153,27 @@
 		// pending note follow immediately rather than after the debounce.
 		if (isRunEvent(event)) {
 			availableNets = availableNets.map(n => applyRunEvent(n, event));
+		}
+		// What the event means for the net on screen, beyond the lists: the
+		// graph, the log and the Activate button all read the worker, and
+		// the worker's stream cannot say that the worker came back, that the
+		// net got a fresh subprocess, or that the schedule started it.
+		switch (liveAction(event, selectedNet())) {
+			case 'reconnect':
+				if (selectedNetId && event.type === 'worker_state_changed') {
+					connectToWorker(event.worker_id);
+					resyncNet(selectedNetId);
+				}
+				break;
+			case 'resync':
+				if (selectedNetId) resyncNet(selectedNetId);
+				break;
+			case 'clear':
+				clearLiveState();
+				break;
+			case 'running':
+				if (selectedNetId) refreshRunningState(selectedNetId);
+				break;
 		}
 		// Pure log events carry no state — skip the REST refetch. Only
 		// state-change events warrant pulling fresh net/worker lists.
@@ -1160,6 +1217,32 @@
 		// Self-healing reconcile of the Activate/Deactivate state.
 		runningPollTimer = setInterval(reconcileRunningPoll, RUNNING_POLL_MS);
 
+		// The stream's own account of itself drives the header badge, and a
+		// higher generation means "what you have heard may be stale". A lower
+		// one is the store starting over for a new worker; nothing to refetch.
+		let seenGeneration = -1;
+		const unsubscribeStream = workerStreamStore.subscribe((s) => {
+			connectionStatus = statusLabel(s);
+			if (s.generation > seenGeneration) {
+				seenGeneration = s.generation;
+				if (selectedNetId) resyncNet(selectedNetId);
+			} else if (s.generation < seenGeneration) {
+				seenGeneration = s.generation;
+			}
+		});
+
+		// A tab coming back into view has usually been throttled or asleep.
+		// The browser reopens the stream on its own; the refetch is ours to
+		// do, and a stream abandoned as unavailable needs reopening.
+		const onVisible = () => {
+			if (document.visibilityState !== 'visible' || !selectedNetId) return;
+			const worker = selectedNetWorker();
+			if (worker?.status !== 'ready') return;
+			connectToWorker(worker.id);
+			resyncNet(selectedNetId);
+		};
+		document.addEventListener('visibilitychange', onVisible);
+
 		// Load workers first — selectNet() (called from fetchNets) needs workers
 		// to determine if a net has a ready worker and set graphState.
 		(async () => {
@@ -1170,9 +1253,6 @@
 
 		const unsubscribe = workerEventsStore.subscribe((event) => {
 			if (!event) return;
-
-			// Mark connection as established
-			connectionStatus = 'Connected';
 
 			// Only net-scoped events drive this view. Filter to the selected net.
 			if (event.scope !== 'net' || event.net_id !== selectedNetId) return;
@@ -1189,7 +1269,7 @@
 			if (kind === 'transition_fired') {
 				isStepping = false;
 				stepError = null;
-				logEntries = [data.log_entry, ...logEntries];
+				logEntries = capHead([data.log_entry, ...logEntries], EXECUTION_LOG_CAP);
 
 				// Resolve auto-step promise: a transition fired
 				if (autoStepResolve) autoStepResolve(true);
@@ -1257,7 +1337,7 @@
 				subprocessLines = [...subprocessLines, data.text];
 				// Also accumulate into the durable, net-wide panel (not cleared
 				// per step). ts comes from the event so it matches file replay.
-				netLogLines = [...netLogLines, formatNetLogEntry({ ts: event.ts, text: data.text })];
+				netLogLines = capTail([...netLogLines, formatNetLogEntry({ ts: event.ts, text: data.text })], NET_LOG_CAP);
 			}
 
 			if (kind === 'execution_stopped') {
@@ -1339,6 +1419,8 @@
 
 		return () => {
 			unsubscribe();
+			unsubscribeStream();
+			document.removeEventListener('visibilitychange', onVisible);
 			disconnectWorkerEvents();
 		};
 	});
