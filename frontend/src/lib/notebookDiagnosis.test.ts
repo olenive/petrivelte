@@ -198,10 +198,51 @@ describe('diagnose', () => {
 	});
 
 	it('reports a dead subprocess as such rather than as a transport fault', () => {
+		// An older worker keeps the dead entry and answers with a dead transport.
 		const d = diagnose(sync({ transport: transport({ alive: false }) }), settled);
 
-		expect(d.state).toBe('worker_unreachable');
+		expect(d.state).toBe('subprocess_gone');
+		expect(d.label).toBe('subprocess gone');
 		expect(d.action).toBe('reload');
+	});
+
+	it('reads a worker that no longer knows the notebook as subprocess gone', () => {
+		const d = diagnose(
+			sync({ reachable: false, reason: 'subprocess_gone', transport: null }),
+			settled,
+		);
+
+		expect(d).toEqual({
+			state: 'subprocess_gone',
+			action: 'reload',
+			label: 'subprocess gone',
+			detail: 'The notebook subprocess died. Reload to respawn it.',
+		});
+	});
+
+	it('reads a probe timeout as a busy worker and takes no action', () => {
+		// A saturated worker is not a dead one; reloading would only add load.
+		const d = diagnose(
+			sync({ reachable: false, reason: 'worker_busy', transport: null }),
+			settled,
+		);
+
+		expect(d.state).toBe('worker_busy');
+		expect(d.label).toBe('worker busy');
+		expect(d.action).toBe('none');
+		expect(d.detail).toBe(
+			'The worker took more than 5 s to answer; it is probably saturated. Nothing is known to be dead.',
+		);
+	});
+
+	it('keeps a refused connection as unreachable', () => {
+		const d = diagnose(
+			sync({ reachable: false, reason: 'worker_unreachable', transport: null }),
+			settled,
+		);
+
+		expect(d.state).toBe('worker_unreachable');
+		expect(d.label).toBe('unreachable');
 	});
 
 	it('takes no action when the server does not report a transport at all', () => {
@@ -240,6 +281,11 @@ describe('diagnose', () => {
 	it('gives the transport failures colours of their own', () => {
 		expect(stateColour('no_transport')).not.toBe(stateColour('live'));
 		expect(stateColour('connecting')).not.toBe(stateColour('no_transport'));
+	});
+
+	it('colours a busy worker amber and a dead subprocess red', () => {
+		expect(stateColour('worker_busy')).toBe('#f59e0b');
+		expect(stateColour('subprocess_gone')).toBe('#ef4444');
 	});
 });
 

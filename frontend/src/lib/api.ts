@@ -1087,6 +1087,65 @@ export class AdditionalNotebookError extends Error {
 	}
 }
 
+/**
+ * The 507 body returned when the worker refuses a load for lack of memory.
+ *
+ * The worker compares what it can give (free RAM plus free swap) with the
+ * notebook's footprint plus a fixed headroom, and refuses before spawning
+ * anything. `message` is written for people and already names the remedies.
+ */
+export interface InsufficientMemoryRefusal {
+	reason: 'insufficient_memory';
+	message: string;
+	available_mb: number | null;
+	swap_free_mb: number | null;
+	footprint_mb: number | null;
+	footprint_source: 'measured' | 'default' | null;
+	headroom_mb: number | null;
+	needed_mb: number | null;
+}
+
+/** Thrown by `loadNotebook` on a 507: a refusal, with nothing to confirm. */
+export class InsufficientMemoryError extends Error {
+	constructor(public readonly refusal: InsufficientMemoryRefusal) {
+		super(refusal.message);
+		this.name = 'InsufficientMemoryError';
+	}
+}
+
+const INSUFFICIENT_MEMORY_FALLBACK =
+	'The worker does not have enough memory to load this notebook. Unload a notebook or add memory.';
+
+function numberOrNull(value: unknown): number | null {
+	return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Read a load response's body as an admission refusal, or null when it is not
+ * one. Missing numbers stay null rather than zero: a zero reads as a
+ * measurement, and an absent field is the absence of one.
+ */
+export function parseInsufficientMemory(body: unknown): InsufficientMemoryRefusal | null {
+	if (!body || typeof body !== 'object') return null;
+	const detail = (body as Record<string, unknown>).detail;
+	if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return null;
+	const d = detail as Record<string, unknown>;
+	if (d.reason !== 'insufficient_memory') return null;
+	const message =
+		typeof d.message === 'string' && d.message.trim() ? d.message : INSUFFICIENT_MEMORY_FALLBACK;
+	const source = d.footprint_source;
+	return {
+		reason: 'insufficient_memory',
+		message,
+		available_mb: numberOrNull(d.available_mb),
+		swap_free_mb: numberOrNull(d.swap_free_mb),
+		footprint_mb: numberOrNull(d.footprint_mb),
+		footprint_source: source === 'measured' || source === 'default' ? source : null,
+		headroom_mb: numberOrNull(d.headroom_mb),
+		needed_mb: numberOrNull(d.needed_mb),
+	};
+}
+
 export async function getWorkerOccupancy(workerId: string): Promise<WorkerOccupancy> {
 	const res = await get(`/api/workers/${workerId}/occupancy`);
 	if (!res.ok) throw new Error('Failed to fetch worker occupancy');
@@ -1100,6 +1159,10 @@ export async function getWorkerOccupancy(workerId: string): Promise<WorkerOccupa
  * to show what is running, then retry with it true. The refusal is the
  * server's, not the dialog's, so an agent hitting the API gets the same
  * information a person does.
+ *
+ * Throws `InsufficientMemoryError` on a 507, when the worker refused because
+ * the notebook would not fit in its free RAM and swap. That one is final:
+ * callers show its message, which names the remedies, and do not retry.
  */
 export async function loadNotebook(
 	id: string,
@@ -1116,6 +1179,12 @@ export async function loadNotebook(
 		if (detail?.reason === 'additional_notebook') {
 			throw new AdditionalNotebookError(detail as AdditionalNotebookRefusal);
 		}
+		throw new Error(extractErrorMessage(body, 'Failed to load notebook'));
+	}
+	if (res.status === 507) {
+		const body = await res.json().catch(() => null);
+		const refusal = parseInsufficientMemory(body);
+		if (refusal) throw new InsufficientMemoryError(refusal);
 		throw new Error(extractErrorMessage(body, 'Failed to load notebook'));
 	}
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to load notebook'));
@@ -1253,7 +1322,17 @@ export interface NotebookSync {
 	// rather than being filled in with zeros that read as "nothing attached".
 	transport?: NotebookTransport | null;
 	reachable?: boolean;
-	reason?: 'no_worker' | 'not_loaded' | 'worker_unreachable' | null;
+	/** Why `reachable` is false. `worker_busy` is the control plane's probe
+	 *  timing out (the worker is saturated, nothing is known to be dead);
+	 *  `worker_unreachable` is a failed connection; `subprocess_gone` is the
+	 *  worker answering that it no longer knows the notebook. */
+	reason?:
+		| 'no_worker'
+		| 'not_loaded'
+		| 'worker_busy'
+		| 'worker_unreachable'
+		| 'subprocess_gone'
+		| null;
 	bindings?: number;
 }
 

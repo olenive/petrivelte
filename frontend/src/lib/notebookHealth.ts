@@ -172,6 +172,12 @@ const SUMMARIES: Record<NotebookState, string> = {
 	worker_unreachable:
 		'The worker running this notebook cannot be reached, so nothing can be drawn ' +
 		'until it comes back.',
+	worker_busy:
+		'The worker is slow to answer, probably because it is saturated. Nothing is known ' +
+		'to have failed; the notebook should catch up once the worker has capacity.',
+	subprocess_gone:
+		'The notebook subprocess has died, so nothing can be drawn. Your nets are unaffected. ' +
+		'Reloading starts a fresh subprocess.',
 	stale: 'The notebook is behind its net.',
 };
 

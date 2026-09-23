@@ -43,16 +43,6 @@
 
 	let notebookId = $derived($page.params.id as string);
 	let notebook = $state<Notebook | null>(null);
-	// Why the notebook is not loaded, in words; null while it is loaded or
-	// nothing has been recorded. Shared with the wiring panel so the two
-	// never disagree about whether an unload was expected.
-	let loadReason = $derived(
-		notebook
-			? describeLoadError(notebook.load_state, notebook.load_error, {
-					idleTimeoutSeconds: notebook.effective_idle_timeout_seconds,
-				})
-			: null,
-	);
 	// Set when a saved timeout could not be pushed to the running kernel. Not
 	// an error — the value is persisted and travels with the next load — so it
 	// gets a muted line rather than the red banner.
@@ -69,6 +59,19 @@
 	// this load would add a notebook, and it wants that said out loud first.
 	let occupancy = $state<WorkerOccupancy | null>(null);
 	let pendingRefusal = $state<AdditionalNotebookRefusal | null>(null);
+
+	// Why the notebook is not loaded, in words; null while it is loaded or
+	// nothing has been recorded. Shared with the wiring panel so the two
+	// never disagree about whether an unload was expected.
+	// The worker's size, from occupancy, is named in an OOM kill's label.
+	let loadReason = $derived(
+		notebook
+			? describeLoadError(notebook.load_state, notebook.load_error, {
+					idleTimeoutSeconds: notebook.effective_idle_timeout_seconds,
+					workerMemoryMb: occupancy?.memory.container_total_mb ?? null,
+				})
+			: null,
+	);
 
 	// What the load is doing, so the wait is legible rather than a spinner.
 	// The spawn is ~99% of a cold load and used to report nothing at all, which
@@ -456,6 +459,8 @@
 			// on the worker. Opening the page loads it automatically, so without
 			// this the ~190MB would be spent by following a link — show what is
 			// running and let the user decide.
+			// A 507 (`InsufficientMemoryError`) is a refusal with nothing to
+			// confirm; its message names the remedies and is shown as it came.
 			if (e instanceof AdditionalNotebookError) {
 				pendingRefusal = e.refusal;
 			} else {

@@ -127,6 +127,29 @@ describe('the observed freeze', () => {
 	});
 });
 
+describe('summaries for the new states', () => {
+	it('says a busy worker has not been found dead', () => {
+		const diagnosis = diagnose(
+			sync({ reachable: false, reason: 'worker_busy', transport: null }),
+			{ sinceBurstSettledS: 60 },
+		);
+		expect(diagnosis.state).toBe('worker_busy');
+		expect(healthSummary(diagnosis)).toMatch(/Nothing is known to have failed/);
+	});
+
+	it('says a dead subprocess leaves the nets alone and names the reload', () => {
+		for (const s of [
+			sync({ reachable: false, reason: 'subprocess_gone', transport: null }),
+			sync({ transport: transport({ alive: false }) }),
+		]) {
+			const diagnosis = diagnose(s, { sinceBurstSettledS: 60 });
+			expect(diagnosis.state).toBe('subprocess_gone');
+			expect(healthSummary(diagnosis)).toMatch(/subprocess has died/);
+			expect(healthSummary(diagnosis)).toMatch(/nets are unaffected/);
+		}
+	});
+});
+
 describe('copyable diagnostics', () => {
 	it('carries the evidence rather than just the conclusion', () => {
 		const diagnosis = diagnose(OBSERVED_FREEZE, { sinceBurstSettledS: 200 });

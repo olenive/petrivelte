@@ -311,6 +311,8 @@
 			// notebook on the worker — a notebook subprocess is the largest
 			// process on a machine, so that spend gets a decision attached to
 			// it rather than being made by a click.
+			// A 507 (`InsufficientMemoryError`) is a refusal, not a question:
+			// its message names the remedies, so it is shown as it came.
 			if (e instanceof AdditionalNotebookError) {
 				pendingRefusal = { id: nb.id, refusal: e.refusal };
 			} else {
@@ -362,7 +364,13 @@
 	// -- row helpers --
 
 	function badgeFor(row: NotebookRow) {
-		return notebookBadge(row.notebook, syncById.get(row.notebook.id) ?? null, errorsById.get(row.notebook.id) ?? 0);
+		const worker = wiring?.workers.find((w) => w.id === row.notebook.worker_id);
+		return notebookBadge(
+			row.notebook,
+			syncById.get(row.notebook.id) ?? null,
+			errorsById.get(row.notebook.id) ?? 0,
+			{ workerMemoryMb: worker?.memory_mb ?? null },
+		);
 	}
 
 	function lastChange(id: string): string | null {

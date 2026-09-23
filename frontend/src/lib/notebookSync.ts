@@ -142,7 +142,9 @@ export type NotebookState =
 	| 'frames_stalled'
 	| 'bridge_missing'
 	| 'bridge_stalled'
+	| 'worker_busy'
 	| 'worker_unreachable'
+	| 'subprocess_gone'
 	| 'not_loaded';
 
 /**
@@ -170,7 +172,9 @@ const TRANSPORT_COLOURS: Record<string, string> = {
 	frames_stalled: '#ef4444',
 	bridge_missing: '#f59e0b',
 	bridge_stalled: '#f59e0b',
+	worker_busy: '#f59e0b',
 	worker_unreachable: '#ef4444',
+	subprocess_gone: '#ef4444',
 	not_loaded: '#6b7280',
 };
 
@@ -189,6 +193,13 @@ export function stateColour(state: NotebookState): string {
 export interface DiagnoseContext {
 	sinceBurstSettledS: number | null;
 }
+
+const SUBPROCESS_GONE: Diagnosis = {
+	state: 'subprocess_gone',
+	action: 'reload',
+	label: 'subprocess gone',
+	detail: 'The notebook subprocess died. Reload to respawn it.',
+};
 
 /**
  * Name the broken hop and say what to do, from server-side evidence only.
@@ -210,6 +221,19 @@ export function diagnose(sync: NotebookSync, ctx: DiagnoseContext): Diagnosis {
 						: 'The notebook subprocess is not running.',
 			};
 		}
+		if (sync.reason === 'worker_busy') {
+			// A timeout says the worker is slow to answer, not that anything
+			// died. Reloading would add load to a machine already short of it.
+			return {
+				state: 'worker_busy',
+				action: 'none',
+				label: 'worker busy',
+				detail:
+					'The worker took more than 5 s to answer; it is probably saturated. ' +
+					'Nothing is known to be dead.',
+			};
+		}
+		if (sync.reason === 'subprocess_gone') return { ...SUBPROCESS_GONE };
 		return {
 			state: 'worker_unreachable',
 			action: 'reload',
@@ -232,14 +256,10 @@ export function diagnose(sync: NotebookSync, ctx: DiagnoseContext): Diagnosis {
 		};
 	}
 
-	if (!transport.alive) {
-		return {
-			state: 'worker_unreachable',
-			action: 'reload',
-			label: 'subprocess gone',
-			detail: 'The notebook subprocess died. Reload to respawn it.',
-		};
-	}
+	// An older worker keeps a dead entry and answers for it with a dead
+	// transport; a newer one forgets it and the control plane reports
+	// `subprocess_gone`. Both mean the same thing.
+	if (!transport.alive) return { ...SUBPROCESS_GONE };
 
 	if (transport.ws_sessions < 1) {
 		// Still within the window where not being connected is just "loading".

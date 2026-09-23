@@ -161,6 +161,97 @@ describe('the badge table', () => {
 		expect(badge.detail).toContain('updated');
 	});
 
+	it('says why an unloaded row is unloaded, muted for an expected reason', () => {
+		const badge = notebookBadge(
+			notebook({ load_state: 'unloaded', load_error: 'idle_eviction' }),
+			null,
+		);
+		expect(badge.name).toBe('unloaded');
+		expect(badge.label).toBe('unloaded');
+		expect(badge.colour).toBe('#9ca3af');
+		// The row's own effective timeout (900 s) names the duration.
+		expect(badge.detail).toBe('evicted after 15 min of inactivity (frees worker RAM)');
+		expect(badge.title).toContain('reason code: idle_eviction');
+	});
+
+	it('turns an unloaded row red when it died of a failure', () => {
+		for (const code of [
+			'oom_killed',
+			'subprocess_killed',
+			'subprocess_crashed',
+			'subprocess_exited',
+			'subprocess_gone',
+		]) {
+			const badge = notebookBadge(notebook({ load_state: 'unloaded', load_error: code }), null);
+			expect(badge.name, code).toBe('unloaded');
+			expect(badge.label, code).toBe('unloaded');
+			expect(badge.colour, code).toBe('#ef4444');
+			expect(badge.detail, code).not.toBeNull();
+			expect(badge.title, code).toContain(`reason code: ${code}`);
+		}
+	});
+
+	it('names the worker size on an OOM kill when it is known', () => {
+		const badge = notebookBadge(
+			notebook({ load_state: 'unloaded', load_error: 'oom_killed' }),
+			null,
+			0,
+			{ workerMemoryMb: 2048 },
+		);
+		expect(badge.detail).toBe("killed by the worker's kernel: out of memory on a 2048 MB worker");
+		expect(badge.title).toContain('The notebook subprocess stopped:');
+	});
+
+	it('keeps the plain unloaded badge when no reason is recorded', () => {
+		const badge = notebookBadge(notebook({ load_state: 'unloaded', load_error: null }), null);
+		expect(badge.colour).toBe('#9ca3af');
+		expect(badge.detail).toBeNull();
+		expect(badge.title).toBe('The notebook subprocess is not running. Load starts it.');
+	});
+
+	it('reads a probe timeout as a busy worker, not an unreachable one', () => {
+		const badge = notebookBadge(
+			notebook(),
+			sync({ reachable: false, reason: 'worker_busy', slots: [] }),
+		);
+		expect(badge.name).toBe('busy');
+		expect(badge.label).toBe('worker busy');
+		expect(badge.colour).toBe('#f59e0b');
+	});
+
+	it('reads a worker that forgot the notebook as subprocess gone', () => {
+		const badge = notebookBadge(
+			notebook(),
+			sync({ reachable: false, reason: 'subprocess_gone', slots: [] }),
+		);
+		expect(badge.name).toBe('gone');
+		expect(badge.label).toBe('subprocess gone');
+		expect(badge.colour).toBe('#ef4444');
+		expect(badge.title).toBe('The notebook subprocess died. Reload to respawn it.');
+	});
+
+	it('reads a dead transport as gone, never as stale, even with ageing slots', () => {
+		// The incident: a killed kernel's slots keep their last report and age,
+		// which used to read as 'stale'.
+		const badge = notebookBadge(
+			notebook(),
+			sync({
+				transport: transport({ alive: false }),
+				slots: [slot({ synced: true, report_age_s: 600, last_sync_age_s: 600 })],
+			}),
+		);
+		expect(badge.name).toBe('gone');
+		expect(badge.label).toBe('subprocess gone');
+	});
+
+	it('reads a dead transport as gone even with nothing bound', () => {
+		const badge = notebookBadge(
+			notebook(),
+			sync({ transport: transport({ alive: false }), slots: [], bindings: 0 }),
+		);
+		expect(badge.name).toBe('gone');
+	});
+
 	it('reads an unreachable sync as unreachable', () => {
 		const badge = notebookBadge(
 			notebook(),

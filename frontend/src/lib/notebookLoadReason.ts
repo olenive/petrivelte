@@ -48,6 +48,24 @@ const KNOWN_CODES: Record<string, { label: string; tone: LoadReasonTone }> = {
 		label: 'subprocess is gone (crash, OOM, or worker restart)',
 		tone: 'failure',
 	},
+	// The worker read the subprocess's exit and classified it. `oom_killed`
+	// needs both a SIGKILL and a rise in the kernel's oom_kill counter, so it
+	// is exact rather than a guess; `subprocess_killed` is a SIGKILL without
+	// that rise, which means something other than the kernel sent it.
+	oom_killed: { label: "killed by the worker's kernel: out of memory", tone: 'failure' },
+	subprocess_killed: {
+		label: "killed by a signal, not the kernel's OOM killer",
+		tone: 'failure',
+	},
+	subprocess_crashed: { label: 'subprocess crashed', tone: 'failure' },
+	// Exit 0 still counts as a failure: the manager did not ask it to stop.
+	subprocess_exited: { label: 'subprocess exited on its own', tone: 'failure' },
+	// A load the worker refused before spawning because the notebook would not
+	// fit. The control plane does not store it; it arrives as a 507 detail.
+	insufficient_memory: {
+		label: 'load refused: not enough memory on the worker',
+		tone: 'failure',
+	},
 };
 
 export interface LoadReasonOptions {
@@ -58,6 +76,18 @@ export interface LoadReasonOptions {
 	 * minutes. Omit it when the duration is not known.
 	 */
 	idleTimeoutSeconds?: number | null;
+	/**
+	 * The worker's configured RAM in MB. When given, the OOM label names it,
+	 * so the reader sees the size of the machine that ran out.
+	 */
+	workerMemoryMb?: number | null;
+}
+
+function oomLabel(fallback: string, memoryMb: number | null | undefined): string {
+	if (typeof memoryMb === 'number' && Number.isFinite(memoryMb) && memoryMb > 0) {
+		return `${fallback} on a ${Math.round(memoryMb)} MB worker`;
+	}
+	return fallback;
 }
 
 /**
@@ -95,10 +125,13 @@ export function describeLoadError(
 	if (loadState === 'loaded') return null;
 
 	const known = KNOWN_CODES[code];
-	const label =
-		known && code === 'idle_eviction'
+	const label = !known
+		? code
+		: code === 'idle_eviction'
 			? idleEvictionLabel(known.label, opts?.idleTimeoutSeconds)
-			: (known?.label ?? code);
+			: code === 'oom_killed'
+				? oomLabel(known.label, opts?.workerMemoryMb)
+				: known.label;
 	if (loadState === 'error' || !known || known.tone === 'failure') {
 		return { heading: 'Error', label, tone: 'failure', code };
 	}

@@ -21,6 +21,7 @@
 
 import type { NotebookSync, WiringNotebook, WiringResponse, WiringWorker } from '$lib/api';
 import { dataFact, netFact } from '$lib/notebookHealth';
+import { describeLoadError } from '$lib/notebookLoadReason';
 import { slotSyncState } from '$lib/notebookSync';
 
 // -- sections -------------------------------------------------------------
@@ -181,6 +182,8 @@ export type NotebookBadgeName =
 	| 'tracking'
 	| 'stale'
 	| 'unreachable'
+	| 'busy'
+	| 'gone'
 	| 'idle'
 	| 'checking';
 
@@ -202,12 +205,28 @@ const COLOURS: Record<NotebookBadgeName, string> = {
 	tracking: '#22c55e',
 	stale: '#f59e0b',
 	unreachable: '#ef4444',
+	busy: '#f59e0b',
+	gone: '#ef4444',
 	idle: '#6b7280',
 	checking: '#9ca3af',
 };
 
-/** The fields of a notebook row the badge is allowed to read. */
-export type BadgeSource = Pick<WiringNotebook, 'load_state' | 'load_error'>;
+/** The fields of a notebook row the badge is allowed to read. The idle
+ *  timeout is optional so a caller holding only the two load fields can still
+ *  ask; without it the eviction label falls back to its generic wording. */
+export type BadgeSource = Pick<WiringNotebook, 'load_state' | 'load_error'> &
+	Partial<Pick<WiringNotebook, 'effective_idle_timeout_seconds'>>;
+
+/** Context from outside the notebook row. */
+export interface BadgeContext {
+	/** The worker's configured RAM, named in an OOM kill's label. */
+	workerMemoryMb?: number | null;
+}
+
+/** Red, for an unloaded row whose reason is a failure. */
+const FAILURE_COLOUR = '#ef4444';
+
+const GONE_TITLE = 'The notebook subprocess died. Reload to respawn it.';
 
 function factLine(fact: { label: string; value: string; note?: string }): string {
 	return fact.note ? `${fact.label}: ${fact.value} — ${fact.note}` : `${fact.label}: ${fact.value}`;
@@ -238,6 +257,7 @@ export function notebookBadge(
 	notebook: BadgeSource,
 	sync: NotebookSync | null,
 	errorCount = 0,
+	ctx: BadgeContext = {},
 ): NotebookIndexBadge {
 	const badge = (
 		name: NotebookBadgeName,
@@ -253,9 +273,32 @@ export function notebookBadge(
 	});
 
 	if (notebook.load_state === 'unloaded') {
-		return badge('unloaded', 'unloaded', [
-			'The notebook subprocess is not running. Load starts it.',
-		]);
+		// Say why it is unloaded. An expected reason (idle eviction, a stopped
+		// worker) is shown muted; a failure (OOM kill, crash) turns the row red
+		// so it stands out on the index, while the label still says what the
+		// state is.
+		const reason = describeLoadError(notebook.load_state, notebook.load_error, {
+			idleTimeoutSeconds: notebook.effective_idle_timeout_seconds,
+			workerMemoryMb: ctx.workerMemoryMb,
+		});
+		if (!reason) {
+			return badge('unloaded', 'unloaded', [
+				'The notebook subprocess is not running. Load starts it.',
+			]);
+		}
+		const failed = reason.tone === 'failure';
+		const unloaded = badge(
+			'unloaded',
+			'unloaded',
+			[
+				failed
+					? `The notebook subprocess stopped: ${reason.label}. Load starts it again.`
+					: `The notebook subprocess is not running: ${reason.label}. Load starts it.`,
+				`reason code: ${reason.code}`,
+			],
+			reason.label,
+		);
+		return failed ? { ...unloaded, colour: FAILURE_COLOUR } : unloaded;
 	}
 
 	if (notebook.load_state === 'loading') {
@@ -281,6 +324,14 @@ export function notebookBadge(
 	}
 
 	if (sync.reachable === false) {
+		if (sync.reason === 'worker_busy') {
+			return badge('busy', 'worker busy', [
+				'The worker took more than 5 s to answer; it is probably saturated. Nothing is known to be dead.',
+			]);
+		}
+		if (sync.reason === 'subprocess_gone') {
+			return badge('gone', 'subprocess gone', [GONE_TITLE]);
+		}
 		return badge('unreachable', 'unreachable', [
 			sync.reason === 'no_worker'
 				? 'This notebook is not assigned to a worker.'
@@ -288,6 +339,12 @@ export function notebookBadge(
 					? 'The notebook subprocess is not running.'
 					: 'The control plane could not reach this notebook’s worker.',
 		]);
+	}
+
+	// Before any slot check: a dead kernel's slots keep their last report and
+	// only age, which would otherwise read as 'stale' rather than dead.
+	if (sync.transport && !sync.transport.alive) {
+		return badge('gone', 'subprocess gone', [GONE_TITLE]);
 	}
 
 	const slots = sync.slots ?? [];

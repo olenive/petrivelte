@@ -37,6 +37,39 @@ describe('describeLoadError', () => {
 		}
 	});
 
+	it('names each classified death in the failure tone', () => {
+		const expected: Record<string, string> = {
+			oom_killed: "killed by the worker's kernel: out of memory",
+			subprocess_killed: "killed by a signal, not the kernel's OOM killer",
+			subprocess_crashed: 'subprocess crashed',
+			subprocess_exited: 'subprocess exited on its own',
+			insufficient_memory: 'load refused: not enough memory on the worker',
+		};
+		for (const [code, label] of Object.entries(expected)) {
+			expect(describeLoadError('unloaded', code), code).toEqual({
+				heading: 'Error',
+				label,
+				tone: 'failure',
+				code,
+			});
+		}
+	});
+
+	it('names the worker size on an OOM kill only when it is given', () => {
+		expect(describeLoadError('unloaded', 'oom_killed', { workerMemoryMb: 2048 })?.label).toBe(
+			"killed by the worker's kernel: out of memory on a 2048 MB worker",
+		);
+		for (const mb of [null, undefined, 0, -1, Number.NaN]) {
+			expect(describeLoadError('unloaded', 'oom_killed', { workerMemoryMb: mb })?.label, String(mb)).toBe(
+				"killed by the worker's kernel: out of memory",
+			);
+		}
+		// Only the OOM label carries it.
+		expect(
+			describeLoadError('unloaded', 'subprocess_crashed', { workerMemoryMb: 2048 })?.label,
+		).toBe('subprocess crashed');
+	});
+
 	it('passes an unknown code through verbatim in the failure tone', () => {
 		expect(describeLoadError('unloaded', 'something_new')).toEqual({
 			heading: 'Error',
