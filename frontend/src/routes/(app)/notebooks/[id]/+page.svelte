@@ -135,10 +135,10 @@
 	let syncPoll: ReturnType<typeof setTimeout> | null = null;
 	const SYNC_POLL_MS = 5000;
 
-	// Self-heal state. `remountAttempts` is reset by planRemount once the
-	// notebook recovers, so a page left open for days is not gradually
-	// consumed by unrelated hiccups hours apart.
-	let remountAttempts = $state(0);
+	// Self-heal state. `remountHistory` holds the epoch seconds of automatic
+	// remounts; planRemount prunes it to its sliding window, so a recovery
+	// does not refund the budget but time does.
+	let remountHistory = $state<number[]>([]);
 	let remountExhausted = $state(false);
 	let remountPending: ReturnType<typeof setTimeout> | null = null;
 
@@ -192,8 +192,8 @@
 			return;
 		}
 
-		const plan = planRemount(diagnosis, remountAttempts);
-		remountAttempts = plan.attempts;
+		const plan = planRemount(diagnosis, remountHistory, Date.now() / 1000);
+		remountHistory = plan.history;
 		remountExhausted = plan.exhausted;
 		if (!plan.remount) return;
 		remountPending = setTimeout(() => {
@@ -211,7 +211,7 @@
 		}, plan.delayS * 1000);
 	}
 
-	// The same remount, on request. Resets the attempt count: the automatic
+	// The same remount, on request. Resets the remount history: the automatic
 	// budget exists to stop an unattended page looping, and a person asking for
 	// one is not that.
 	function remountNow() {
@@ -219,7 +219,7 @@
 			clearTimeout(remountPending);
 			remountPending = null;
 		}
-		remountAttempts = 0;
+		remountHistory = [];
 		remountExhausted = false;
 		mountToken += 1;
 		if (timingsPoll) clearTimeout(timingsPoll);
@@ -506,7 +506,7 @@
 		// times it was manually rescued in between.
 		if (remountPending) clearTimeout(remountPending);
 		remountPending = null;
-		remountAttempts = 0;
+		remountHistory = [];
 		remountExhausted = false;
 		burstSettledAt = null;
 		try {

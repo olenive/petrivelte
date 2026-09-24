@@ -5,7 +5,8 @@ import {
 	BRIDGE_START_DEADLINE_S,
 	FRAME_STALL_S,
 	REMOUNT_BACKOFF_S,
-	REMOUNT_MAX_ATTEMPTS,
+	REMOUNT_BUDGET,
+	REMOUNT_WINDOW_S,
 	WS_OPEN_DEADLINE_S,
 	diagnose,
 	planRemount,
@@ -292,44 +293,90 @@ describe('diagnose', () => {
 describe('planRemount', () => {
 	const broken = { state: 'no_transport', action: 'remount', label: '', detail: '' } as const;
 	const healthy = { state: 'live', action: 'none', label: '', detail: '' } as const;
+	const T0 = 1_000_000;
+
+	/** Drive the policy the way the page does: one plan per poll, carrying history. */
+	const remountAt = (history: readonly number[], nowS: number) => planRemount(broken, history, nowS);
 
 	it('remounts on the first transport failure', () => {
-		const plan = planRemount(broken, 0);
+		const plan = remountAt([], T0);
 
 		expect(plan.remount).toBe(true);
 		expect(plan.delayS).toBe(REMOUNT_BACKOFF_S[0]);
-		expect(plan.attempts).toBe(1);
+		expect(plan.history).toEqual([T0 + REMOUNT_BACKOFF_S[0]]);
 	});
 
-	it('backs off further on the second', () => {
+	it('backs off by how many remounts are already in the window', () => {
 		// The usual cause of a slow connect is a busy worker, and remounting
 		// immediately adds another asset burst to whatever is saturating it.
-		expect(planRemount(broken, 1).delayS).toBe(REMOUNT_BACKOFF_S[1]);
+		expect(remountAt([T0 - 60], T0).delayS).toBe(REMOUNT_BACKOFF_S[1]);
+		expect(remountAt([T0 - 120, T0 - 60], T0).delayS).toBe(
+			REMOUNT_BACKOFF_S[REMOUNT_BACKOFF_S.length - 1],
+		);
+		// An entry that has aged out no longer counts toward the backoff.
+		expect(remountAt([T0 - REMOUNT_WINDOW_S - 1], T0).delayS).toBe(REMOUNT_BACKOFF_S[0]);
 	});
 
-	it('gives up rather than looping forever', () => {
-		const plan = planRemount(broken, REMOUNT_MAX_ATTEMPTS);
+	it('spends the budget within one window, then gives up', () => {
+		let history: number[] = [];
+		let now = T0;
+		for (let i = 0; i < REMOUNT_BUDGET; i++) {
+			const plan = remountAt(history, now);
+			expect(plan.remount).toBe(true);
+			history = plan.history;
+			now += 60;
+		}
+		const plan = remountAt(history, now);
 
 		expect(plan.remount).toBe(false);
 		expect(plan.exhausted).toBe(true);
+		expect(plan.history).toEqual(history);
+	});
+
+	it('does not refund the budget when the notebook recovers in between', () => {
+		// A CPU-starved worker flapped stalled/live every minute or two, and
+		// refunding on each recovery let one page remount 43 times in 80
+		// minutes, each new session adding to the starvation.
+		let history: number[] = [];
+		let now = T0;
+		for (let i = 0; i < REMOUNT_BUDGET; i++) {
+			history = remountAt(history, now).history;
+			now += 60;
+			const recovered = planRemount(healthy, history, now);
+			expect(recovered.history).toEqual(history);
+			history = recovered.history;
+			now += 60;
+		}
+
+		expect(remountAt(history, now).exhausted).toBe(true);
+	});
+
+	it('restores one remount when the oldest ages out of the window', () => {
+		const history = [T0, T0 + 60, T0 + 120];
+		expect(remountAt(history, T0 + REMOUNT_WINDOW_S - 1).exhausted).toBe(true);
+
+		const plan = remountAt(history, T0 + REMOUNT_WINDOW_S);
+
+		expect(plan.remount).toBe(true);
+		expect(plan.history).toEqual([T0 + 60, T0 + 120, T0 + REMOUNT_WINDOW_S + plan.delayS]);
 	});
 
 	it('never remounts for a failure a remount cannot fix', () => {
 		const wedged = { state: 'frames_stalled', action: 'reload', label: '', detail: '' } as const;
 
-		expect(planRemount(wedged, 0).remount).toBe(false);
-		expect(planRemount(wedged, 0).exhausted).toBe(false);
+		expect(planRemount(wedged, [], T0).remount).toBe(false);
+		expect(planRemount(wedged, [], T0).exhausted).toBe(false);
 	});
 
-	it('forgets past attempts once the notebook recovers', () => {
-		// Otherwise a page left open for days is consumed by unrelated hiccups
-		// hours apart, and has no attempts left when it finally matters.
-		expect(planRemount(healthy, REMOUNT_MAX_ATTEMPTS).attempts).toBe(0);
-	});
-
-	it('keeps the count while still connecting', () => {
+	it('returns the pruned history unchanged for a diagnosis that needs no remount', () => {
 		const connecting = { state: 'connecting', action: 'none', label: '', detail: '' } as const;
+		const history = [T0 - REMOUNT_WINDOW_S - 10, T0 - 300, T0 - 30];
 
-		expect(planRemount(connecting, 1).attempts).toBe(1);
+		for (const diagnosis of [connecting, healthy]) {
+			const plan = planRemount(diagnosis, history, T0);
+			expect(plan.remount).toBe(false);
+			expect(plan.exhausted).toBe(false);
+			expect(plan.history).toEqual([T0 - 300, T0 - 30]);
+		}
 	});
 });

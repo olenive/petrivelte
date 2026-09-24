@@ -344,44 +344,72 @@ export function diagnose(sync: NotebookSync, ctx: DiagnoseContext): Diagnosis {
 
 // -- self-heal policy -----------------------------------------------------
 
-/** Mirrors NOTEBOOK_REMOUNT_MAX_ATTEMPTS / _BACKOFF_S in timeouts.py. */
-export const REMOUNT_MAX_ATTEMPTS = 2;
+/**
+ * The automatic remount budget: at most `REMOUNT_BUDGET` remounts in any
+ * `REMOUNT_WINDOW_S` window (three in fifteen minutes). Once spent, the page
+ * stops guessing and says so (exhausted) until the oldest remount ages out of
+ * the window.
+ *
+ * Mirrored for documentation in petritype-server's timeouts.py, which still
+ * names the older per-outage cap NOTEBOOK_REMOUNT_MAX_ATTEMPTS; whoever
+ * updates that mirror should replace it with REMOUNT_BUDGET and
+ * REMOUNT_WINDOW_S, and keep NOTEBOOK_REMOUNT_BACKOFF_S matching
+ * REMOUNT_BACKOFF_S.
+ */
+export const REMOUNT_BUDGET = 3;
+export const REMOUNT_WINDOW_S = 900;
+/** Delay before a remount, indexed by how many remounts are already in the window. */
 export const REMOUNT_BACKOFF_S = [5, 20];
 
 export interface RemountPlan {
 	/** Remount the iframe after `delayS`. */
 	remount: boolean;
 	delayS: number;
-	/** Tried everything; the page should now ask the user. */
+	/** The budget is spent; the page should now ask the user. */
 	exhausted: boolean;
-	/** Attempt count to carry into the next poll. */
-	attempts: number;
+	/**
+	 * Epoch seconds of remounts still inside the window, to carry into the
+	 * next poll. When `remount` is true it includes this one, stamped at
+	 * `nowS + delayS`: the moment its Marimo session starts.
+	 */
+	history: number[];
 }
 
 /**
- * Decide whether to reload the iframe, given a diagnosis and what we already tried.
+ * Decide whether to reload the iframe, given a diagnosis and the remounts
+ * already made. Pure: the caller supplies the clock as `nowS`.
  *
  * Capped rather than looping. Each remount is a fresh Marimo session, which
- * costs the chart's in-memory history and respawns a kernel; retrying forever
- * against a persistently broken worker turns one frozen page into a permanent
- * reload loop that also keeps making work for the worker. Past the cap the
- * page stops guessing and says what it found, which a person can act on with
- * information this code does not have.
+ * costs the chart's in-memory history and starts a kernel thread that keeps
+ * running on the worker; retrying forever against a persistently broken
+ * worker turns one frozen page into a permanent reload loop that also keeps
+ * making work for the worker. Past the cap the page stops guessing and says
+ * what it found, which a person can act on with information this code does
+ * not have.
  *
- * A recovered notebook resets the count, so a page left open for days is not
- * gradually consumed by unrelated hiccups hours apart.
+ * The cap bounds remounts over time, and a recovery does not refund it. A
+ * CPU-starved worker flaps between stalled and live every minute or two; when
+ * recovery reset the count, one page remounted 43 times in 80 minutes, and
+ * every extra session made the starvation worse. Ageing out of the window is
+ * what restores budget, so a page left open for days still heals from
+ * unrelated hiccups hours apart.
  */
-export function planRemount(diagnosis: Diagnosis, attempts: number): RemountPlan {
-	const recovered = diagnosis.state === 'live' || diagnosis.state === 'syncing';
+export function planRemount(
+	diagnosis: Diagnosis,
+	history: readonly number[],
+	nowS: number,
+): RemountPlan {
+	const recent = history.filter((t) => t > nowS - REMOUNT_WINDOW_S);
 	if (diagnosis.action !== 'remount') {
-		return { remount: false, delayS: 0, exhausted: false, attempts: recovered ? 0 : attempts };
+		return { remount: false, delayS: 0, exhausted: false, history: recent };
 	}
-	if (attempts >= REMOUNT_MAX_ATTEMPTS) {
-		return { remount: false, delayS: 0, exhausted: true, attempts };
+	if (recent.length >= REMOUNT_BUDGET) {
+		return { remount: false, delayS: 0, exhausted: true, history: recent };
 	}
 	// Backing off between tries, because the common cause of a slow connect is
-	// a busy worker — and remounting immediately adds a fresh asset burst to
+	// a busy worker, and remounting immediately adds a fresh asset burst to
 	// whatever is already saturating it.
-	const delayS = REMOUNT_BACKOFF_S[attempts] ?? REMOUNT_BACKOFF_S[REMOUNT_BACKOFF_S.length - 1];
-	return { remount: true, delayS, exhausted: false, attempts: attempts + 1 };
+	const delayS =
+		REMOUNT_BACKOFF_S[recent.length] ?? REMOUNT_BACKOFF_S[REMOUNT_BACKOFF_S.length - 1];
+	return { remount: true, delayS, exhausted: false, history: [...recent, nowS + delayS] };
 }
