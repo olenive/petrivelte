@@ -214,6 +214,41 @@ export async function changePassword(currentPassword: string, newPassword: strin
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to change password'));
 }
 
+/** A personal API token as the control plane lists it. The secret itself is
+ * never listed; `prefix` is the 8 characters after `petri_pat_`. */
+export interface ApiToken {
+	id: string;
+	name: string;
+	prefix: string;
+	created_at: string;
+	expires_at: string;
+	last_used_at: string | null;
+	revoked_at: string | null;
+}
+
+/** Returned once, on creation: the only time the full `token` is available. */
+export interface ApiTokenCreated extends ApiToken {
+	token: string;
+}
+
+export async function listApiTokens(): Promise<ApiToken[]> {
+	const res = await get('/api/auth/tokens');
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json().catch(() => null), 'Failed to load API tokens'));
+	return res.json();
+}
+
+export async function createApiToken(name: string, expiresInDays: number): Promise<ApiTokenCreated> {
+	const res = await post('/api/auth/tokens', { name, expires_in_days: expiresInDays });
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json().catch(() => null), 'Failed to create API token'));
+	return res.json();
+}
+
+export async function revokeApiToken(id: string): Promise<{ status: string }> {
+	const res = await del(`/api/auth/tokens/${encodeURIComponent(id)}`);
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json().catch(() => null), 'Failed to revoke API token'));
+	return res.json();
+}
+
 export async function forgotPassword(email: string): Promise<void> {
 	const res = await post('/api/auth/forgot-password', { email });
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to send reset email'));

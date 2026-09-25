@@ -12,9 +12,24 @@
 		getGitHubStatus,
 		getGitHubConnectUrl,
 		disconnectGitHub,
+		listApiTokens,
+		createApiToken,
+		revokeApiToken,
 		type AccountStatus,
 		type GitHubStatus,
+		type ApiToken,
+		type ApiTokenCreated,
 	} from '$lib/api';
+	import {
+		DEFAULT_EXPIRY_DAYS,
+		EXPIRY_CHOICES,
+		describeExpiry,
+		describeLastUsed,
+		formatCreated,
+		tokenLabel,
+		tokenStatus,
+		type ApiTokenStatus,
+	} from '$lib/apiTokens';
 	import AppNav from '$lib/components/AppNav.svelte';
 
 	let account = $state<AccountStatus | null>(null);
@@ -45,7 +60,26 @@
 	let githubSuccess = $state('');
 	let githubLoading = $state(false);
 
+	// API tokens
+	let tokens = $state<ApiToken[]>([]);
+	let tokensNow = $state(Date.now());
+	let tokenName = $state('');
+	let tokenExpiryDays = $state(DEFAULT_EXPIRY_DAYS);
+	let tokensError = $state('');
+	let tokenLoading = $state(false);
+	let revokingId = $state<string | null>(null);
+	let createdToken = $state<ApiTokenCreated | null>(null);
+	let copied = $state(false);
+
+	const STATUS_BADGE: Record<ApiTokenStatus, string> = {
+		active: 'bg-success-bg text-success',
+		expiring: 'bg-status-warning-bg text-status-warning',
+		expired: 'bg-error-bg text-error',
+		revoked: 'bg-border text-foreground-faint',
+	};
+
 	onMount(async () => {
+		void loadTokens();
 		account = await getAccountStatus();
 		github = await getGitHubStatus();
 
@@ -151,6 +185,63 @@
 			githubError = e.message || 'Failed to disconnect GitHub';
 		} finally {
 			githubLoading = false;
+		}
+	}
+
+	async function loadTokens() {
+		try {
+			tokens = await listApiTokens();
+			tokensNow = Date.now();
+		} catch (e: any) {
+			tokensError = e.message || 'Failed to load API tokens';
+		}
+	}
+
+	async function handleCreateToken() {
+		tokensError = '';
+		createdToken = null;
+		copied = false;
+		const name = tokenName.trim();
+		if (!name) {
+			tokensError = 'Please enter a name for the token';
+			return;
+		}
+		tokenLoading = true;
+		try {
+			createdToken = await createApiToken(name, tokenExpiryDays);
+			tokenName = '';
+			await loadTokens();
+		} catch (e: any) {
+			tokensError = e.message || 'Failed to create API token';
+		} finally {
+			tokenLoading = false;
+		}
+	}
+
+	async function handleRevokeToken(token: ApiToken) {
+		if (!confirm(`Revoke "${token.name}" (${tokenLabel(token.prefix)})? Scripts using it stop working at once.`)) {
+			return;
+		}
+		tokensError = '';
+		revokingId = token.id;
+		try {
+			await revokeApiToken(token.id);
+			if (createdToken?.id === token.id) createdToken = null;
+			await loadTokens();
+		} catch (e: any) {
+			tokensError = e.message || 'Failed to revoke API token';
+		} finally {
+			revokingId = null;
+		}
+	}
+
+	async function handleCopyToken() {
+		if (!createdToken) return;
+		try {
+			await navigator.clipboard.writeText(createdToken.token);
+			copied = true;
+		} catch {
+			tokensError = 'Could not copy automatically; select the token and copy it by hand';
 		}
 	}
 
@@ -272,6 +363,113 @@
 						<a href="/deployments" class="text-accent hover:underline">Manage repositories and deployments →</a>
 					</p>
 				{/if}
+			</section>
+
+			<!-- API Tokens -->
+			<section class="mb-8 pb-6 border-b border-border">
+				<h2 class="mb-4 text-lg font-medium text-foreground">API tokens</h2>
+
+				<p class="mb-4 text-sm text-foreground-muted leading-relaxed">
+					A token lets scripts and automation call the control plane as you. It cannot change
+					your password or email, and it cannot mint more tokens. See
+					<code class="text-xs">AUTHENTICATION.md</code> in the petritype-server repository for
+					how scripts use it and how to replace one.
+				</p>
+
+				{#if tokensError}
+					<div class="mb-4 px-3 py-2.5 rounded-md bg-error-bg text-error text-sm">{tokensError}</div>
+				{/if}
+
+				{#if createdToken}
+					<div class="mb-4 p-3 rounded-md border border-accent bg-success-bg text-sm">
+						<p class="mb-2 font-medium text-success">
+							Token "{createdToken.name}" created. Copy it now; it is not shown again.
+						</p>
+						<div class="flex items-center gap-2">
+							<code class="flex-1 min-w-0 px-2 py-1.5 rounded bg-surface text-foreground text-xs break-all select-all">{createdToken.token}</code>
+							<button
+								class="shrink-0 px-3 py-1.5 rounded-md text-xs border border-accent bg-accent text-accent-foreground cursor-pointer transition-opacity hover:opacity-90"
+								onclick={handleCopyToken}
+							>
+								{copied ? 'Copied' : 'Copy'}
+							</button>
+						</div>
+						<p class="mt-2 text-xs text-foreground-muted leading-relaxed">
+							Scripts read it from <code>~/.config/petrify/control-plane-token</code> or the
+							<code>PETRIFY_API_TOKEN</code> environment variable.
+						</p>
+						<button
+							class="mt-2 text-xs text-foreground-faint bg-transparent border-0 p-0 cursor-pointer hover:underline"
+							onclick={() => { createdToken = null; copied = false; }}
+						>
+							Done, hide it
+						</button>
+					</div>
+				{/if}
+
+				{#if tokens.length > 0}
+					<ul class="mb-4 flex flex-col gap-2">
+						{#each tokens as token (token.id)}
+							{@const status = tokenStatus(token, tokensNow)}
+							<li class="p-3 bg-muted rounded-md">
+								<div class="flex items-start justify-between gap-2">
+									<div class="min-w-0">
+										<div class="flex items-center gap-2">
+											<span class="text-foreground truncate">{token.name}</span>
+											<span class="text-xs px-2 py-0.5 rounded-sm {STATUS_BADGE[status]}">{status}</span>
+										</div>
+										<code class="text-xs text-foreground-muted">{tokenLabel(token.prefix)}</code>
+									</div>
+									{#if status !== 'revoked'}
+										<button
+											class="shrink-0 px-3 py-1.5 rounded-md text-xs border border-border bg-transparent text-foreground-muted cursor-pointer transition-colors hover:border-destructive hover:text-destructive disabled:opacity-50 disabled:cursor-not-allowed"
+											onclick={() => handleRevokeToken(token)}
+											disabled={revokingId === token.id}
+										>
+											{revokingId === token.id ? 'Revoking...' : 'Revoke'}
+										</button>
+									{/if}
+								</div>
+								<p class="mt-1 text-xs text-foreground-faint">
+									created {formatCreated(token)} · {describeExpiry(token, tokensNow)} · {describeLastUsed(token, tokensNow)}
+								</p>
+							</li>
+						{/each}
+					</ul>
+				{:else}
+					<p class="mb-4 text-sm text-foreground-faint">You have no API tokens.</p>
+				{/if}
+
+				<form class="flex flex-col gap-4" onsubmit={(e) => { e.preventDefault(); handleCreateToken(); }}>
+					<label class="flex flex-col gap-1 text-sm text-foreground-muted">
+						Name
+						<input
+							type="text"
+							bind:value={tokenName}
+							required
+							maxlength="100"
+							placeholder="e.g. laptop scripts"
+							class="px-3 py-2.5 border border-border rounded-md bg-surface text-foreground text-base focus:outline-none focus:border-accent"
+						/>
+					</label>
+
+					<label class="flex flex-col gap-1 text-sm text-foreground-muted">
+						Expires after
+						<select
+							bind:value={tokenExpiryDays}
+							class="px-3 py-2.5 border border-border rounded-md bg-surface text-foreground text-base focus:outline-none focus:border-accent"
+						>
+							{#each EXPIRY_CHOICES as choice (choice.days)}
+								<option value={choice.days}>{choice.label}</option>
+							{/each}
+						</select>
+					</label>
+
+					<button type="submit" disabled={tokenLoading}
+						class="w-full mt-2 py-2.5 border border-accent rounded-md bg-accent text-accent-foreground text-base font-semibold cursor-pointer transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed">
+						{tokenLoading ? 'Creating...' : 'Create token'}
+					</button>
+				</form>
 			</section>
 
 			<!-- Password Section -->
