@@ -205,6 +205,18 @@ describe('the badge table', () => {
 		expect(badge.title).toContain('reason code: idle_eviction');
 	});
 
+	it('shows a worker delete muted in the Unassigned section, not as a failure', () => {
+		const badge = notebookBadge(
+			notebook({ worker_id: null, load_state: 'unloaded', load_error: 'worker_deleted' }),
+			null,
+			T,
+		);
+		expect(badge.name).toBe('unloaded');
+		expect(badge.colour).toBe('#9ca3af');
+		expect(badge.detail).toBe('worker was deleted');
+		expect(badge.title).toContain('reason code: worker_deleted');
+	});
+
 	it('turns an unloaded row red when it died of a failure', () => {
 		for (const code of [
 			'oom_killed',

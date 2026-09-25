@@ -25,6 +25,7 @@
 	import NotebookOccupancyBanner from '$lib/components/NotebookOccupancyBanner.svelte';
 	import {
 		AdditionalNotebookError,
+		deleteNotebook,
 		getNotebook,
 		getNotebookSync,
 		getWiring,
@@ -33,7 +34,9 @@
 		listNotebooks,
 		loadNotebook,
 		unloadNotebook,
+		upgradeNotebook,
 		type AdditionalNotebookRefusal,
+		type Provenance,
 		type NotebookSync,
 		type Operation,
 		type OperationSummary,
@@ -59,6 +62,8 @@
 		type ServerEvent,
 	} from '$lib/stores/serverEvents';
 	import OperationStatus from '$lib/components/OperationStatus.svelte';
+	import ProvenanceChip from '$lib/components/ProvenanceChip.svelte';
+	import { upgradeAction } from '$lib/provenance';
 	import {
 		applyOperationEvent,
 		emptyBook,
@@ -86,6 +91,10 @@
 	/** Each notebook's running operation as its last response reported it,
 	 *  weighed against the event stream's newer word in `operations`. */
 	let reportedOpById = $state<Map<string, OperationSummary | null>>(new Map());
+	/** Which deployment each notebook runs and whether a newer one exists.
+	 *  On the notebook rows, not the wiring payload, so it rides the same
+	 *  list call as `updated_at`. */
+	let provenanceById = $state<Map<string, Provenance>>(new Map());
 	let operations = $state<OperationBook>(emptyBook());
 
 	let busyId = $state<string | null>(null);
@@ -120,6 +129,12 @@
 			wiring = w;
 			updatedById = new Map(notebooks.map((n) => [n.id, n.updated_at]));
 			reportedOpById = new Map(notebooks.map((n) => [n.id, n.active_operation ?? null]));
+			provenanceById = new Map(
+				notebooks.map((n) => [
+					n.id,
+					{ deployment: n.deployment, newer_deployment: n.newer_deployment },
+				]),
+			);
 			loadError = null;
 			await refreshLoadedDetail();
 		} catch (e) {
@@ -177,6 +192,11 @@
 			});
 			updatedById = new Map(updatedById).set(id, fresh.updated_at);
 			reportedOpById = new Map(reportedOpById).set(id, fresh.active_operation ?? null);
+			// An upgrade moves the deployment pin, so the chip is re-read too.
+			provenanceById = new Map(provenanceById).set(id, {
+				deployment: fresh.deployment,
+				newer_deployment: fresh.newer_deployment,
+			});
 			if (fresh.load_state === 'loaded') {
 				await refreshDetailFor(id);
 			} else {
@@ -393,6 +413,38 @@
 		}
 	}
 
+	/** Unload, re-point to the newer deployment and load again, all on the
+	 *  server; the 202 is the load's operation, followed like any other. */
+	async function handleUpgrade(nb: WiringNotebook) {
+		busyId = nb.id;
+		actionError = null;
+		try {
+			const operation = await upgradeNotebook(nb.id);
+			await followLoad(nb.id, operation);
+			void refreshOccupancy(nb);
+		} catch (e) {
+			actionError = message(e);
+		} finally {
+			busyId = null;
+		}
+	}
+
+	/** Only offered for an unassigned notebook: one on a worker is unloaded
+	 *  or moved first, where its bindings and load are in view. */
+	async function handleDelete(nb: WiringNotebook) {
+		if (!confirm(`Delete notebook ${nb.instance_name}? Its bindings go with it.`)) return;
+		busyId = nb.id;
+		actionError = null;
+		try {
+			await deleteNotebook(nb.id);
+			await refreshAll();
+		} catch (e) {
+			actionError = message(e);
+		} finally {
+			busyId = null;
+		}
+	}
+
 	/** A 202 carries the load's operation: the row shows it at once and the
 	 *  event stream carries it to the end. Null is a load the server
 	 *  finished inside the request, so the row is simply re-read. */
@@ -551,6 +603,8 @@
 								{@const errors = errorsById.get(nb.id) ?? 0}
 								{@const changed = lastChange(nb.id)}
 								{@const operation = nb.load_state === 'loading' ? operationOf(nb.id) : null}
+								{@const provenance = provenanceById.get(nb.id)}
+								{@const upgrade = upgradeAction({ ...nb, ...provenance })}
 								<div
 									class="flex items-center gap-3 flex-wrap px-3 py-2 border-b border-border last:border-b-0 text-sm"
 								>
@@ -566,6 +620,10 @@
 									<span class="text-xs text-foreground-muted font-mono truncate"
 										>{nb.definition_name}</span
 									>
+									<ProvenanceChip
+										deployment={provenance?.deployment}
+										newer={provenance?.newer_deployment}
+									/>
 									<span
 										class="text-[11px] px-2 py-0.5 rounded-full text-white font-medium whitespace-nowrap"
 										style="background: {badge.colour}"
@@ -619,6 +677,11 @@
 											<a class="text-xs text-accent no-underline hover:underline" href="/wiring"
 												>Assign in wiring</a
 											>
+											<button
+												class="text-xs text-red-500 hover:underline disabled:opacity-50"
+												onclick={() => void handleDelete(nb)}
+												disabled={busyId === nb.id}>Delete</button
+											>
 										{:else if nb.load_state === 'loaded'}
 											<button
 												class="text-xs text-accent hover:underline disabled:opacity-50"
@@ -637,6 +700,12 @@
 												disabled={busyId === nb.id || nb.load_state === 'loading'}>Load</button
 											>
 										{/if}
+										<button
+											class="text-xs text-accent hover:underline disabled:opacity-50 disabled:no-underline disabled:cursor-not-allowed"
+											onclick={() => void handleUpgrade(nb)}
+											disabled={busyId === nb.id || !upgrade.enabled}
+											title={upgrade.reason}>Upgrade</button
+										>
 										{#if busyId === nb.id}
 											<span class="text-xs text-foreground-muted">working…</span>
 										{/if}

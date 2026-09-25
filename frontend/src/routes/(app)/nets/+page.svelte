@@ -7,6 +7,8 @@
 	import { selectedTokenId } from '$lib/stores/tokenSelection';
 	import { isOperationEvent, isRunEvent, serverEventsStore } from '$lib/stores/serverEvents';
 	import OperationStatus from '$lib/components/OperationStatus.svelte';
+	import ProvenanceChip from '$lib/components/ProvenanceChip.svelte';
+	import { provenanceSuffix } from '$lib/provenance';
 	import { applyOperationEvent, emptyBook, operationFor, type OperationBook } from '$lib/operations';
 	import {
 		workerMemoryStore,
@@ -1467,7 +1469,7 @@
 					<select id="net-select" bind:value={selectedNetId} onchange={handleNetSelect}
 						class="px-4 py-2 border border-border rounded bg-card text-foreground text-sm cursor-pointer hover:border-accent">
 						{#each availableNets as net}
-							<option value={net.id}>{netFullLabel(net, availableNets)}</option>
+							<option value={net.id}>{netFullLabel(net, availableNets)}{provenanceSuffix(net)}</option>
 						{/each}
 					</select>
 				</div>
@@ -1493,6 +1495,12 @@
 								{selectedNet()?.load_state === 'loaded' ? 'Loaded' : selectedNet()?.load_state === 'error' ? 'Error' : selectedNet()?.load_state === 'loading' ? 'Loading' : 'Unloaded'}
 							</span>
 						{/if}
+						<!-- Nets stay pinned to their deployment: newer code means a
+						     new instance, so the marker says it exists and no more. -->
+						<ProvenanceChip
+							deployment={selectedNet()?.deployment}
+							newer={selectedNet()?.newer_deployment}
+						/>
 						{#if selectedNetOperation()}
 							<OperationStatus operation={selectedNetOperation()!} compact />
 						{/if}
@@ -1806,7 +1814,7 @@
 						<select bind:value={selectedNetId} onchange={handleNetSelect}
 							class="px-4 py-2 border border-border rounded bg-card text-foreground text-sm cursor-pointer hover:border-accent">
 							{#each availableNets as net}
-								<option value={net.id}>{netFullLabel(net, availableNets)}</option>
+								<option value={net.id}>{netFullLabel(net, availableNets)}{provenanceSuffix(net)}</option>
 							{/each}
 						</select>
 					</div>

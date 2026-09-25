@@ -11,8 +11,8 @@
  * is type-check coverage on the parts that matter.
  */
 import type {
-	DailyRollup, Deployment, DiscoveredNotebook, LastRun, Net, NotebookDefect, NotebookSlot,
-	OpenRun, Operation, OperationSummary, RunPage, RunRecord,
+	DailyRollup, Deployment, DeploymentSummary, DiscoveredNotebook, LastRun, Net, Notebook,
+	NotebookDefect, NotebookSlot, OpenRun, WorkerDeleteResult, Operation, OperationSummary, RunPage, RunRecord,
 } from './api';
 
 // -- Regression lock: Deployment must expose discovered_notebooks --
@@ -224,6 +224,38 @@ const _daily_shape: DailyRollup = {
 	duration_total_s: 2000.5,
 	duration_max_s: 1858.0,
 };
+
+// Provenance: which deployment a net or notebook runs, and the newer one when
+// there is one. The chips and the notebook Upgrade action read these fields.
+const _deployment_summary: DeploymentSummary = {
+	id: '44444444-4444-4444-4444-444444444444',
+	git_commit: '0123456789abcdef0123456789abcdef01234567',
+	git_commit_short: '0123456',
+	git_ref: 'main',
+	created_at: '2026-09-25T10:04:00Z',
+	build_status: 'success',
+};
+
+const _net_provenance: Pick<Net, 'deployment' | 'newer_deployment'> = {
+	deployment: _deployment_summary,
+	newer_deployment: null,
+};
+
+const _notebook_provenance: Pick<Notebook, 'deployment' | 'newer_deployment'> = {
+	deployment: null,
+	newer_deployment: _deployment_summary,
+};
+
+const _worker_delete_result: WorkerDeleteResult = {
+	notebooks_unassigned: 1,
+	notebook_ids: ['55555555-5555-5555-5555-555555555555'],
+};
+
+export const __provenance_contract_check = [
+	_net_provenance,
+	_notebook_provenance,
+	_worker_delete_result,
+];
 
 // Suppress unused-locals warnings while keeping the type-checks.
 export const __api_contract_check = [

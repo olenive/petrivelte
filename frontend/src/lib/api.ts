@@ -53,7 +53,7 @@ function _isStreamingPath(path: string): boolean {
 // (throw/5xx/429) are still classified; see backendHealth.reportOutcome.
 const _EXPECTED_SLOW_SUFFIXES = [
 	'/load', '/unload', '/provision', '/start', '/stop', '/destroy',
-	'/health-check', '/trigger',
+	'/health-check', '/trigger', '/upgrade',
 ];
 function _isExpectedSlowPath(method: string, path: string): boolean {
 	if (_EXPECTED_SLOW_SUFFIXES.some((s) => path.endsWith(s))) return true;
@@ -386,7 +386,33 @@ export interface OpenRun {
 	scheduled_for: string | null;
 }
 
-export interface Net {
+/**
+ * Which code an instance runs: the deployment it is pinned to, in the few
+ * fields a row needs to name it. Carried on nets and notebooks as
+ * `deployment`, and again as `newer_deployment` for the newest successful
+ * deployment of the same repo that still contains the instance's definition.
+ */
+export interface DeploymentSummary {
+	id: string;
+	/** Full commit hash; null for a build that did not record one. */
+	git_commit: string | null;
+	/** The first seven characters of `git_commit`, as the server cut them. */
+	git_commit_short: string | null;
+	git_ref: string;
+	created_at: string;
+	build_status: string;
+}
+
+/** The provenance pair on a net or notebook response. Optional so a control
+ *  plane predating it reads as "not reported" rather than failing to parse. */
+export interface Provenance {
+	/** Null when the deployment row is gone. */
+	deployment?: DeploymentSummary | null;
+	/** Set when a newer successful deployment contains the same definition. */
+	newer_deployment?: DeploymentSummary | null;
+}
+
+export interface Net extends Provenance {
 	id: string;
 	definition_name: string;
 	instance_name: string;
@@ -812,9 +838,26 @@ export async function createWorker(body: {
 	return res.json();
 }
 
-export async function deleteWorker(workerId: string): Promise<void> {
+/** What a worker delete left behind. Its nets and secrets go with it; its
+ *  notebooks stay, unassigned, with `load_error = 'worker_deleted'`. */
+export interface WorkerDeleteResult {
+	notebooks_unassigned: number;
+	notebook_ids: string[];
+}
+
+export async function deleteWorker(workerId: string): Promise<WorkerDeleteResult> {
 	const res = await del(`/api/workers/${workerId}`);
-	if (!res.ok) throw new Error('Failed to delete worker');
+	if (!res.ok) {
+		throw new Error(extractErrorMessage(await res.json().catch(() => null), 'Failed to delete worker'));
+	}
+	const body = await res.json().catch(() => null);
+	const ids: unknown = body?.notebook_ids;
+	const notebookIds = Array.isArray(ids) ? ids.filter((x): x is string => typeof x === 'string') : [];
+	const count: unknown = body?.notebooks_unassigned;
+	return {
+		notebooks_unassigned: typeof count === 'number' ? count : notebookIds.length,
+		notebook_ids: notebookIds,
+	};
 }
 
 export async function provisionWorker(workerId: string): Promise<{ status: string; url: string }> {
@@ -999,7 +1042,7 @@ export interface NotebookBinding {
 	net_id: string;
 }
 
-export interface Notebook {
+export interface Notebook extends Provenance {
 	id: string;
 	definition_name: string;
 	instance_name: string;
@@ -1238,6 +1281,28 @@ export async function loadNotebook(
 	}
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to load notebook'));
 	if (res.status !== 202) return null;
+	return res.json();
+}
+
+/** Move a notebook to newer code.
+ *
+ * The control plane unloads the notebook if it is loaded, re-points its
+ * deployment (to `deploymentId`, or to its `newer_deployment` when omitted),
+ * keeps its bindings and idle timeout, and starts an ordinary
+ * `notebook_load`. It answers 202 with that operation, which callers follow
+ * exactly as they follow a Load. A 409 means there is nothing to upgrade to,
+ * the notebook has no worker, or the target deployment lacks the definition
+ * or one of its bound slots; its `detail` is the message thrown.
+ */
+export async function upgradeNotebook(id: string, deploymentId?: string): Promise<Operation> {
+	const res = await post(
+		`/api/notebooks/${id}/upgrade`,
+		deploymentId ? { deployment_id: deploymentId } : undefined,
+		withIdempotency(newIdempotencyKey()),
+	);
+	if (!res.ok) {
+		throw new Error(extractErrorMessage(await res.json().catch(() => null), 'Failed to upgrade notebook'));
+	}
 	return res.json();
 }
 

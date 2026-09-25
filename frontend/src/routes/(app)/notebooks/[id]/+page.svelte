@@ -15,6 +15,7 @@
 		loadNotebook,
 		patchNotebook,
 		unloadNotebook,
+		upgradeNotebook,
 		type AdditionalNotebookRefusal,
 		type Notebook,
 		type NotebookSync,
@@ -23,6 +24,8 @@
 		type WorkerOccupancy,
 	} from '$lib/api';
 	import OperationStatus from '$lib/components/OperationStatus.svelte';
+	import ProvenanceChip from '$lib/components/ProvenanceChip.svelte';
+	import { upgradeAction } from '$lib/provenance';
 	import {
 		applyOperationEvent,
 		emptyBook,
@@ -614,16 +617,11 @@
 		}
 	}
 
-	async function handleReload() {
-		if (!notebook) return;
-		busy = true;
-		errorMessage = null;
-		// The new kernel reads the stored timeout on load, so whatever the push
-		// failed to deliver is delivered now; the note would be stale.
-		idleTimeoutNote = null;
-		// Starts before the unload: a Reload pays unload + load, and the unload
-		// half was 15s in the field.
-		startWallClock();
+	let upgrade = $derived(notebook ? upgradeAction(notebook) : null);
+
+	/** The self-heal state a fresh subprocess must not inherit, reset when the
+	 *  user starts one by hand (Reload or Upgrade). */
+	function resetForNewSubprocess() {
 		// The user has taken over, so the self-heal budget starts again. Not
 		// resetting it would leave a page that had already exhausted its
 		// retries unable to heal itself for the rest of its life, however many
@@ -635,6 +633,43 @@
 		burstSettledAt = null;
 		undrawnPushAt = null;
 		carriedPushAgeS = null;
+	}
+
+	/**
+	 * Move this notebook to the newer deployment. The server unloads it,
+	 * re-points the deployment keeping the bindings, and starts a load whose
+	 * operation the 202 carries; from there it is followed like a Reload.
+	 */
+	async function handleUpgrade() {
+		if (!notebook || !upgrade?.enabled) return;
+		busy = true;
+		errorMessage = null;
+		idleTimeoutNote = null;
+		startWallClock();
+		resetForNewSubprocess();
+		try {
+			const operation = await upgradeNotebook(notebookId);
+			startLoadStream();
+			await followLoad(operation);
+			refreshOccupancy();
+		} catch (e: any) {
+			errorMessage = e?.message ?? String(e);
+		} finally {
+			busy = false;
+		}
+	}
+
+	async function handleReload() {
+		if (!notebook) return;
+		busy = true;
+		errorMessage = null;
+		// The new kernel reads the stored timeout on load, so whatever the push
+		// failed to deliver is delivered now; the note would be stale.
+		idleTimeoutNote = null;
+		// Starts before the unload: a Reload pays unload + load, and the unload
+		// half was 15s in the field.
+		startWallClock();
+		resetForNewSubprocess();
 		try {
 			if (notebook.load_state === 'loaded') {
 				await unloadNotebook(notebookId);
@@ -713,6 +748,7 @@
 			<span class="text-foreground-muted">/</span>
 			<span class="font-medium text-foreground truncate">{notebook.instance_name}</span>
 			<span class="text-foreground-muted text-xs font-mono">({notebook.definition_name})</span>
+			<ProvenanceChip deployment={notebook.deployment} newer={notebook.newer_deployment} />
 			<span
 				class="inline-block px-2 py-0.5 rounded-full text-white text-[11px] font-medium"
 				style="background: {statusColor(notebook.load_state)}"
@@ -797,6 +833,16 @@
 		{/if}
 	</div>
 	<div class="flex items-center gap-2">
+		{#if notebook && upgrade}
+			<button
+				class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-xs font-medium hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+				onclick={handleUpgrade}
+				disabled={busy || notebookOperation !== null || !upgrade.enabled}
+				title={notebookOperation ? 'A load is already in flight' : upgrade.reason}
+			>
+				Upgrade
+			</button>
+		{/if}
 		{#if notebook}
 			<button
 				class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-xs font-medium hover:bg-accent hover:text-accent-foreground disabled:opacity-50"

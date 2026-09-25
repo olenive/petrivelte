@@ -6,8 +6,9 @@
 		listNets, createNet, patchNet, loadNet, unloadNet,
 		listNetSecrets, setNetSecrets,
 		listDeployments,
+		listNotebooks,
 		type Worker, type WorkerDetail, type Net, type NetParam, type SecretMetadata,
-		type Deployment,
+		type Deployment, type Notebook,
 	} from '$lib/api';
 	import AppNav from '$lib/components/AppNav.svelte';
 	import DataLoadState from '$lib/components/DataLoadState.svelte';
@@ -15,6 +16,8 @@
 	import LogViewer from '$lib/components/LogViewer.svelte';
 	import { isOperationEvent, isRunEvent, serverEventsStore } from '$lib/stores/serverEvents';
 	import OperationStatus from '$lib/components/OperationStatus.svelte';
+	import ProvenanceChip from '$lib/components/ProvenanceChip.svelte';
+	import { notebooksOnWorker, workerDeleteWarning, workerDeletedMessage } from '$lib/workerDelete';
 	import {
 		applyOperationEvent,
 		emptyBook,
@@ -33,6 +36,8 @@
 	let workers = $state<Worker[]>([]);
 	let nets = $state<Net[]>([]);
 	let deployments = $state<Deployment[]>([]);
+	/** Only read to say how many notebooks a worker delete would strand. */
+	let notebooks = $state<Notebook[]>([]);
 	let expandedWorkerIds = $state<Record<string, boolean>>({});
 	let workerDetails = $state<Map<string, WorkerDetail>>(new Map());
 	// Tracks the first fetch outcome so we can distinguish "haven't fetched
@@ -57,6 +62,8 @@
 	// Loading/error state
 	let actionInProgress = $state<string | null>(null);
 	let errorMessage = $state('');
+	/** A finished action's outcome worth reading, such as what a delete left. */
+	let noticeMessage = $state('');
 
 	// Log viewer expand state (log data comes from shared workerLogsStore)
 	let workerLogs = $state<Map<string, string[]>>(new Map());
@@ -184,6 +191,9 @@
 
 	function startDeleteCountdown(workerId: string) {
 		cancelDeleteCountdown(workerId);
+		// The warning counts from the page's list; re-read it so the count is
+		// the one true now rather than when the page was opened.
+		void refreshNotebooks();
 		const entry = { countdown: 10, timerId: 0 as unknown as ReturnType<typeof setInterval> };
 		entry.timerId = setInterval(() => {
 			entry.countdown -= 1;
@@ -256,8 +266,16 @@
 		}
 	}
 
+	async function refreshNotebooks() {
+		try {
+			notebooks = await listNotebooks();
+		} catch {
+			// non-fatal: the list only feeds the delete warning's count
+		}
+	}
+
 	async function refreshAll() {
-		await Promise.all([refreshWorkers(), refreshNets(), refreshDeployments()]);
+		await Promise.all([refreshWorkers(), refreshNets(), refreshDeployments(), refreshNotebooks()]);
 	}
 
 	interface InstantiableDefinition {
@@ -538,8 +556,12 @@
 	}
 
 	async function handleDelete(workerId: string) {
+		const name = workers.find((w) => w.id === workerId)?.name ?? 'the worker';
+		noticeMessage = '';
 		await withAction(workerId, async () => {
-			await deleteWorker(workerId);
+			const result = await deleteWorker(workerId);
+			noticeMessage = workerDeletedMessage(name, result.notebooks_unassigned);
+			void refreshNotebooks();
 			const { [workerId]: _, ...rest } = expandedWorkerIds;
 			expandedWorkerIds = rest;
 			await refreshWorkers();
@@ -878,6 +900,16 @@
 		</div>
 	{/if}
 
+	{#if noticeMessage}
+		<div class="flex items-center justify-between px-4 py-3 bg-card border border-border text-foreground rounded-md mb-4 text-sm">
+			<span>
+				{noticeMessage}
+				<a class="text-accent hover:underline ml-1" href="/notebooks">Notebooks</a>
+			</span>
+			<button class="text-foreground-muted font-bold cursor-pointer px-1" onclick={() => (noticeMessage = '')}>x</button>
+		</div>
+	{/if}
+
 	<!-- Create Worker Form -->
 	<div class="p-4 bg-card border border-border rounded-md mb-6">
 	<div class="flex items-center gap-4 flex-wrap">
@@ -1055,6 +1087,7 @@
 							{#if deleteTimers.has(worker.id)}
 								<span class="inline-flex items-center gap-1.5 text-sm text-destructive font-medium">
 									Deleting in {deleteTimers.get(worker.id)!.countdown}s...
+									<span class="font-normal">{workerDeleteWarning(notebooksOnWorker(notebooks, worker.id))}</span>
 									<button
 										class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-sm font-medium cursor-pointer transition-all hover:bg-accent hover:text-accent-foreground"
 										onclick={(e) => { e.stopPropagation(); cancelDeleteCountdown(worker.id); }}
@@ -1182,6 +1215,7 @@
 												{#if pending}
 													<span class="text-xs text-status-warning" title={pending.title}>{pending.text}</span>
 												{/if}
+												<ProvenanceChip deployment={net.deployment} newer={net.newer_deployment} />
 												<span class="text-xs text-foreground-faint font-mono" title="Definition · entry module:function">
 													{net.definition_name}
 													{#if net.entry_module && net.entry_function}
