@@ -434,6 +434,9 @@ export interface Net {
 	 * that will not parse.
 	 */
 	next_run_at?: string | null;
+	/** The slow operation running on this net (a load or an unload), or null.
+	 *  Optional so a control plane predating operations reads as "none". */
+	active_operation?: OperationSummary | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -765,6 +768,8 @@ export interface Worker {
 	status: string;
 	status_detail: string | null;
 	url: string | null;
+	/** Running operations on this worker. Optional for an older control plane. */
+	active_operations?: number;
 	created_at: string;
 	updated_at: string;
 }
@@ -1015,6 +1020,8 @@ export interface Notebook {
 	 *  subprocess. `false` = saved but the live kernel keeps the old one until
 	 *  its next load; `null`/absent = there was nothing running to tell. */
 	idle_timeout_pushed?: boolean | null;
+	/** The slow operation running on this notebook (its load), or null. */
+	active_operation?: OperationSummary | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -1187,10 +1194,17 @@ export async function getWorkerOccupancy(workerId: string): Promise<WorkerOccupa
 	return res.json();
 }
 
-/** Spawn a notebook's subprocess.
+/** Start a notebook's subprocess.
+ *
+ * The load runs in the background on the control plane: a 202 carries the
+ * `notebook_load` operation, and the row moves `loading` then `loaded`, or
+ * `unloaded` with `load_error`. Callers show the operation and follow it on
+ * the event stream rather than waiting here. Resolves to null when the server
+ * finished the load inside the request, which is what a control plane from
+ * before operations does; the row is then already settled.
  *
  * Throws `AdditionalNotebookError` when the target worker is already running a
- * different notebook and `confirmAdditional` was not set — the caller is meant
+ * different notebook and `confirmAdditional` was not set: the caller is meant
  * to show what is running, then retry with it true. The refusal is the
  * server's, not the dialog's, so an agent hitting the API gets the same
  * information a person does.
@@ -1202,7 +1216,7 @@ export async function getWorkerOccupancy(workerId: string): Promise<WorkerOccupa
 export async function loadNotebook(
 	id: string,
 	opts?: { confirmAdditional?: boolean },
-): Promise<{ status: string; port: number | null }> {
+): Promise<Operation | null> {
 	const res = await post(
 		`/api/notebooks/${id}/load`,
 		opts?.confirmAdditional ? { confirm_additional: true } : undefined,
@@ -1223,6 +1237,7 @@ export async function loadNotebook(
 		throw new Error(extractErrorMessage(body, 'Failed to load notebook'));
 	}
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to load notebook'));
+	if (res.status !== 202) return null;
 	return res.json();
 }
 
@@ -1379,6 +1394,10 @@ export interface NotebookSync {
 		| 'subprocess_gone'
 		| null;
 	bindings?: number;
+	/** The oldest running operation on this notebook's worker, or null. While
+	 *  one runs the worker is known to be busy, and the page waits rather than
+	 *  remounting. Optional for an older control plane. */
+	worker_busy_with?: OperationSummary | null;
 }
 
 /** The viewer's thresholds, served by the control plane from the same
@@ -1441,6 +1460,82 @@ export async function dismissNotebookErrors(notebookId: string): Promise<number>
 }
 
 // -- wiring (one-shot fetch for the graph view) --
+
+// -- operations --
+//
+// The control plane's record of every slow operation: a net load or unload, a
+// notebook load, a deployment being prepared. Each carries its current step
+// and a heartbeat, so a page can say "busy doing X since T" instead of
+// inferring "dead" from silence. Started, advanced and finished on the same
+// `/api/events` stream as every other state change.
+
+export type OperationKind =
+	| 'net_load'
+	| 'net_unload'
+	| 'notebook_load'
+	| 'deployment_prepare'
+	// More kinds arrive later; an unknown one renders by its raw name.
+	| (string & {});
+
+export type OperationSubjectKind = 'net' | 'notebook' | 'deployment' | 'worker';
+
+export type OperationTrigger = 'user' | 'schedule' | 'resume' | 'system';
+
+export type OperationState = 'running' | 'succeeded' | 'failed' | 'abandoned';
+
+export interface Operation {
+	id: string;
+	user_id: string;
+	kind: OperationKind;
+	subject_kind: OperationSubjectKind;
+	subject_id: string;
+	worker_id: string | null;
+	trigger: OperationTrigger;
+	state: OperationState;
+	step: string | null;
+	step_message: string | null;
+	started_at: string;
+	heartbeat_at: string;
+	finished_at: string | null;
+	error: string | null;
+}
+
+/** What a net, notebook or sync response says about its running operation.
+ *  Always a running one, so it carries no state. */
+export type OperationSummary = Pick<
+	Operation,
+	'id' | 'kind' | 'trigger' | 'step' | 'step_message' | 'started_at' | 'heartbeat_at'
+>;
+
+export interface OperationQuery {
+	active?: boolean;
+	subject_kind?: OperationSubjectKind;
+	subject_id?: string;
+	worker_id?: string;
+	limit?: number;
+}
+
+export async function listOperations(query: OperationQuery = {}): Promise<Operation[]> {
+	const params = new URLSearchParams();
+	if (query.active !== undefined) params.set('active', String(query.active));
+	if (query.subject_kind) params.set('subject_kind', query.subject_kind);
+	if (query.subject_id) params.set('subject_id', query.subject_id);
+	if (query.worker_id) params.set('worker_id', query.worker_id);
+	if (query.limit !== undefined) params.set('limit', String(query.limit));
+	const qs = params.toString();
+	const path = `/api/operations${qs ? `?${qs}` : ''}`;
+	return coalesce(`GET ${path}`, async () => {
+		const res = await get(path);
+		if (!res.ok) throw new Error('Failed to list operations');
+		return res.json();
+	});
+}
+
+export async function getOperation(id: string): Promise<Operation> {
+	const res = await get(`/api/operations/${id}`);
+	if (!res.ok) throw new Error('Failed to get operation');
+	return res.json();
+}
 
 export interface WiringWorker {
 	id: string;

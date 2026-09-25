@@ -1,4 +1,5 @@
-import type { NotebookSync, NotebookSyncSlot } from './api';
+import type { NotebookSync, NotebookSyncSlot, Operation, OperationSummary } from './api';
+import { kindLabel, stepLabel } from './operations';
 import { slotInterval, type NotebookViewerThresholds } from './notebookThresholds';
 
 /**
@@ -187,25 +188,36 @@ export type NotebookState =
 	| 'worker_busy'
 	| 'worker_unreachable'
 	| 'subprocess_gone'
-	| 'not_loaded';
+	| 'not_loaded'
+	| 'busy';
 
 /**
- * What the page may do about it without being asked.
+ * The recovery a diagnosis suggests.
  *
  * `remount` reloads the iframe: cheap, recovers a render channel that never
  * came up, and costs the chart's in-memory history. `reload` respawns the
- * subprocess and is never automatic — it is heavier, and the states that
- * suggest it (a wedged kernel, a bridge that stopped mid-run) are ones where a
- * human can see things this code cannot.
+ * subprocess and is heavier. Either is offered as a button; `automatic` on
+ * the diagnosis says whether the page may also act without being asked.
  */
 export type NotebookAction = 'none' | 'remount' | 'reload';
 
 export interface Diagnosis {
 	state: NotebookState;
 	action: NotebookAction;
+	/**
+	 * Whether the page may take `action` on its own. True for exactly one
+	 * case: a socket that never opened after the asset burst settled, with no
+	 * operation in flight on the notebook or its worker. Every other action
+	 * is a suggestion a person takes with a button, because a guess acted on
+	 * without being asked is how a busy worker got a fresh asset burst on top
+	 * of whatever was already keeping it busy.
+	 */
+	automatic: boolean;
 	label: string;
 	/** One line naming the broken hop, for the badge tooltip. */
 	detail: string;
+	/** The operation a `busy` verdict names. */
+	operation?: Operation | OperationSummary | null;
 }
 
 const TRANSPORT_COLOURS: Record<string, string> = {
@@ -219,6 +231,7 @@ const TRANSPORT_COLOURS: Record<string, string> = {
 	worker_unreachable: '#ef4444',
 	subprocess_gone: '#ef4444',
 	not_loaded: '#6b7280',
+	busy: '#eab308',
 };
 
 export function stateColour(state: NotebookState): string {
@@ -241,11 +254,21 @@ export interface DiagnoseContext {
 	 * remembers none, and then only this reading's pushes count.
 	 */
 	carriedPushAgeS?: number | null;
+	/** The running operation on this notebook (its load), or null. */
+	notebookOperation?: Operation | OperationSummary | null;
+	/**
+	 * The running operation on the notebook's worker, or null. Absent means
+	 * the caller has nothing better than the sync report's own
+	 * `worker_busy_with`, which is used instead; an explicit null means the
+	 * caller knows the worker is idle (the stream saw that operation finish).
+	 */
+	workerOperation?: Operation | OperationSummary | null;
 }
 
 const SUBPROCESS_GONE: Diagnosis = {
 	state: 'subprocess_gone',
 	action: 'reload',
+	automatic: false,
 	label: 'subprocess gone',
 	detail: 'The notebook subprocess died. Reload to respawn it.',
 };
@@ -257,9 +280,44 @@ const SUBPROCESS_GONE: Diagnosis = {
 export const CHECKING: Diagnosis = {
 	state: 'checking',
 	action: 'none',
+	automatic: false,
 	label: 'checking',
 	detail: 'Loading the thresholds this page judges by.',
 };
+
+/**
+ * The verdict while an operation is in flight on the notebook or its worker.
+ *
+ * Busy is known, not inferred: the control plane holds a heartbeating record
+ * of the work. Nothing is remounted while it runs, because a remount is a new
+ * Marimo session and a new asset burst on a worker whose capacity the
+ * operation is already using. The notebook's own operation is named first:
+ * it is the one the page is waiting for.
+ */
+export function busyDiagnosis(
+	notebookOperation: Operation | OperationSummary | null,
+	workerOperation: Operation | OperationSummary | null,
+): Diagnosis | null {
+	const operation = notebookOperation ?? workerOperation;
+	if (!operation) return null;
+	const kind = kindLabel(operation.kind);
+	const step = stepLabel(operation.step);
+	const doing = step ? `${kind.toLowerCase()}, ${step}` : kind.toLowerCase();
+	const message = operation.step_message?.trim();
+	return {
+		state: 'busy',
+		action: 'none',
+		automatic: false,
+		label: `busy · ${step ?? kind.toLowerCase()}`,
+		detail:
+			(notebookOperation
+				? `This notebook is busy ${doing}`
+				: `Its worker is busy ${doing}`) +
+			(message ? ` (${message})` : '') +
+			'. The page waits for it rather than reconnecting.',
+		operation,
+	};
+}
 
 /**
  * Name the broken hop and say what to do, from server-side evidence only.
@@ -273,6 +331,15 @@ export function diagnose(
 	thresholds: NotebookViewerThresholds | null,
 	ctx: DiagnoseContext,
 ): Diagnosis {
+	// Ahead of every other check, thresholds included: a verdict that knows
+	// what the worker is doing needs no budget to judge by, and a later check
+	// must not reach a remount while the worker is working.
+	const busy = busyDiagnosis(
+		ctx.notebookOperation ?? null,
+		ctx.workerOperation !== undefined ? ctx.workerOperation : (sync.worker_busy_with ?? null),
+	);
+	if (busy) return busy;
+
 	if (thresholds === null) return { ...CHECKING };
 
 	if (sync.reachable === false) {
@@ -280,6 +347,7 @@ export function diagnose(
 			return {
 				state: 'not_loaded',
 				action: 'none',
+				automatic: false,
 				label: 'not loaded',
 				detail:
 					sync.reason === 'no_worker'
@@ -293,6 +361,7 @@ export function diagnose(
 			return {
 				state: 'worker_busy',
 				action: 'none',
+				automatic: false,
 				label: 'worker busy',
 				detail:
 					'The worker took more than 5 s to answer; it is probably saturated. ' +
@@ -303,6 +372,7 @@ export function diagnose(
 		return {
 			state: 'worker_unreachable',
 			action: 'reload',
+			automatic: false,
 			label: 'unreachable',
 			detail: 'The control plane could not reach this notebook’s worker.',
 		};
@@ -317,6 +387,7 @@ export function diagnose(
 		return {
 			state: badge?.state ?? 'syncing',
 			action: 'none',
+			automatic: false,
 			label: badge?.label ?? 'syncing',
 			detail: badge?.title ?? 'No render-channel reporting from this worker.',
 		};
@@ -337,18 +408,25 @@ export function diagnose(
 			return {
 				state: 'connecting',
 				action: 'none',
+				automatic: false,
 				label: 'connecting',
 				detail: 'Waiting for the notebook to open its connection.',
 			};
 		}
+		// Only a socket that never opened is remounted without asking: that
+		// is the one failure a fresh iframe reliably fixes, and the busy check
+		// above has already ruled out a worker with work in flight. A socket
+		// that opened and dropped may be the worker shedding load, so a
+		// person decides.
+		const neverOpened = transport.ws_opened_total === 0;
 		return {
 			state: 'no_transport',
 			action: 'remount',
-			label: 'reconnecting',
-			detail:
-				transport.ws_opened_total > 0
-					? 'The notebook’s connection dropped and did not come back.'
-					: 'The notebook never opened its connection.',
+			automatic: neverOpened,
+			label: neverOpened ? 'reconnecting' : 'disconnected',
+			detail: neverOpened
+				? 'The notebook never opened its connection.'
+				: 'The notebook’s connection dropped and did not come back.',
 		};
 	}
 
@@ -362,6 +440,7 @@ export function diagnose(
 			return {
 				state: 'connecting',
 				action: 'none',
+				automatic: false,
 				label: 'starting',
 				detail: 'Waiting for the notebook to start tracking its nets.',
 			};
@@ -369,6 +448,7 @@ export function diagnose(
 		return {
 			state: 'bridge_missing',
 			action: 'remount',
+			automatic: false,
 			label: 'not tracking',
 			detail: 'The notebook is connected but never started tracking its nets.',
 		};
@@ -380,6 +460,7 @@ export function diagnose(
 		return {
 			state: 'frames_stalled',
 			action: 'reload',
+			automatic: false,
 			label: 'not drawing',
 			detail:
 				transport.last_frame_age_s === null
@@ -396,6 +477,7 @@ export function diagnose(
 		return {
 			state: 'live',
 			action: 'none',
+			automatic: false,
 			label: 'live',
 			detail: 'Connected and drawing. No nets bound.',
 		};
@@ -404,11 +486,18 @@ export function diagnose(
 		return {
 			state: 'bridge_stalled',
 			action: 'reload',
+			automatic: false,
 			label: badge.label,
 			detail: badge.title,
 		};
 	}
-	return { state: badge.state, action: 'none', label: badge.label, detail: badge.title };
+	return {
+		state: badge.state,
+		action: 'none',
+		automatic: false,
+		label: badge.label,
+		detail: badge.title,
+	};
 }
 
 // -- self-heal policy -----------------------------------------------------
@@ -434,8 +523,13 @@ export interface RemountPlan {
 }
 
 /**
- * Decide whether to reload the iframe, given a diagnosis and the remounts
- * already made. Pure: the caller supplies the clock as `nowS`.
+ * Decide whether to reload the iframe on the page's own initiative, given a
+ * diagnosis and the remounts already made. Pure: the caller supplies the
+ * clock as `nowS`.
+ *
+ * Only an `automatic` diagnosis is acted on, which is the socket that never
+ * opened with nothing in flight; a remount the diagnosis merely suggests
+ * waits for its button, and a busy verdict plans nothing at all.
  *
  * Capped rather than looping. Each remount is a fresh Marimo session, which
  * costs the chart's in-memory history and starts a kernel thread that keeps
@@ -461,7 +555,7 @@ export function planRemount(
 	const { remount_budget: budget, remount_window_s: window, remount_backoff_s: backoff } =
 		thresholds;
 	const recent = history.filter((t) => t > nowS - window);
-	if (diagnosis.action !== 'remount') {
+	if (!diagnosis.automatic || diagnosis.action !== 'remount') {
 		return { remount: false, delayS: 0, exhausted: false, history: recent };
 	}
 	if (recent.length >= budget) {

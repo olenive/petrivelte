@@ -35,6 +35,8 @@
 		unloadNotebook,
 		type AdditionalNotebookRefusal,
 		type NotebookSync,
+		type Operation,
+		type OperationSummary,
 		type WiringNotebook,
 		type WiringResponse,
 		type WorkerOccupancy,
@@ -51,7 +53,18 @@
 		type NotebookViewerThresholds,
 	} from '$lib/notebookThresholds';
 	import { formatElapsed } from '$lib/runs';
-	import { serverEventsStore, type ServerEvent } from '$lib/stores/serverEvents';
+	import {
+		isOperationEvent,
+		serverEventsStore,
+		type ServerEvent,
+	} from '$lib/stores/serverEvents';
+	import OperationStatus from '$lib/components/OperationStatus.svelte';
+	import {
+		applyOperationEvent,
+		emptyBook,
+		operationFor,
+		type OperationBook,
+	} from '$lib/operations';
 
 	// -- state --
 
@@ -70,6 +83,10 @@
 	/** `updated_at` is on the notebook rows, not on the wiring payload, so it
 	 *  comes from one extra list call rather than from a per-row fetch. */
 	let updatedById = $state<Map<string, string>>(new Map());
+	/** Each notebook's running operation as its last response reported it,
+	 *  weighed against the event stream's newer word in `operations`. */
+	let reportedOpById = $state<Map<string, OperationSummary | null>>(new Map());
+	let operations = $state<OperationBook>(emptyBook());
 
 	let busyId = $state<string | null>(null);
 
@@ -102,6 +119,7 @@
 			]);
 			wiring = w;
 			updatedById = new Map(notebooks.map((n) => [n.id, n.updated_at]));
+			reportedOpById = new Map(notebooks.map((n) => [n.id, n.active_operation ?? null]));
 			loadError = null;
 			await refreshLoadedDetail();
 		} catch (e) {
@@ -158,6 +176,7 @@
 				worker_id: fresh.worker_id,
 			});
 			updatedById = new Map(updatedById).set(id, fresh.updated_at);
+			reportedOpById = new Map(reportedOpById).set(id, fresh.active_operation ?? null);
 			if (fresh.load_state === 'loaded') {
 				await refreshDetailFor(id);
 			} else {
@@ -199,6 +218,16 @@
 	let lastEventSeq = -1;
 
 	function applyServerEvent(evt: ServerEvent) {
+		if (isOperationEvent(evt)) {
+			operations = applyOperationEvent(operations, evt);
+			// The row the load left behind carries its outcome (`load_error`);
+			// `notebook_state_changed` usually brings it first, and this re-read
+			// covers the case where it did not.
+			if (evt.type === 'operation_finished' && evt.subject_kind === 'notebook') {
+				void refreshNotebook(evt.subject_id);
+			}
+			return;
+		}
 		if (!wiring) return;
 		if (evt.type === 'worker_state_changed') {
 			const w = wiring.workers.find((x) => x.id === evt.worker_id);
@@ -312,9 +341,9 @@
 		busyId = nb.id;
 		actionError = null;
 		try {
-			await loadNotebook(nb.id, { confirmAdditional });
+			const operation = await loadNotebook(nb.id, { confirmAdditional });
 			pendingRefusal = null;
-			await refreshNotebook(nb.id);
+			await followLoad(nb.id, operation);
 			void refreshOccupancy(nb);
 		} catch (e) {
 			// The server refuses once when this would be an *additional*
@@ -354,14 +383,31 @@
 			// Confirmed by construction: restarting a notebook the user already
 			// had is not an additional one, and after the unload above the
 			// server would otherwise see it as adding one back.
-			await loadNotebook(nb.id, { confirmAdditional: true });
-			await refreshNotebook(nb.id);
+			const operation = await loadNotebook(nb.id, { confirmAdditional: true });
+			await followLoad(nb.id, operation);
 			void refreshOccupancy(nb);
 		} catch (e) {
 			actionError = message(e);
 		} finally {
 			busyId = null;
 		}
+	}
+
+	/** A 202 carries the load's operation: the row shows it at once and the
+	 *  event stream carries it to the end. Null is a load the server
+	 *  finished inside the request, so the row is simply re-read. */
+	async function followLoad(id: string, operation: Operation | null) {
+		if (!operation) {
+			await refreshNotebook(id);
+			return;
+		}
+		operations = applyOperationEvent(operations, operation);
+		patchNotebookRow(id, { load_state: 'loading', load_error: null });
+		dropDetail(id);
+	}
+
+	function operationOf(id: string) {
+		return operationFor(operations, 'notebook', id, reportedOpById.get(id) ?? null);
 	}
 
 	function confirmPending() {
@@ -380,7 +426,7 @@
 			syncById.get(row.notebook.id) ?? null,
 			thresholds,
 			errorsById.get(row.notebook.id) ?? 0,
-			{ workerMemoryMb: worker?.memory_mb ?? null },
+			{ workerMemoryMb: worker?.memory_mb ?? null, operation: operationOf(row.notebook.id) },
 		);
 	}
 
@@ -504,6 +550,7 @@
 								{@const viewers = viewersHint(syncById.get(nb.id) ?? null)}
 								{@const errors = errorsById.get(nb.id) ?? 0}
 								{@const changed = lastChange(nb.id)}
+								{@const operation = nb.load_state === 'loading' ? operationOf(nb.id) : null}
 								<div
 									class="flex items-center gap-3 flex-wrap px-3 py-2 border-b border-border last:border-b-0 text-sm"
 								>
@@ -526,6 +573,11 @@
 									>
 										{badge.label}
 									</span>
+									{#if operation}
+										<!-- The badge names the step; this adds how long the load
+										     has run and when the worker was last heard from. -->
+										<OperationStatus {operation} compact agesOnly />
+									{/if}
 									{#if badge.detail}
 										<span class="text-xs text-foreground-muted whitespace-nowrap" title={badge.title}
 											>{badge.detail}</span

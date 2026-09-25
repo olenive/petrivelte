@@ -5,7 +5,9 @@
 	import { workerEventsStore, workerStreamStore, connectToWorker, disconnectWorkerEvents } from '$lib/stores/workerEvents';
 	import { statusLabel, liveAction, capHead, capTail, EXECUTION_LOG_CAP, NET_LOG_CAP } from '$lib/workerStream';
 	import { selectedTokenId } from '$lib/stores/tokenSelection';
-	import { isRunEvent, serverEventsStore } from '$lib/stores/serverEvents';
+	import { isOperationEvent, isRunEvent, serverEventsStore } from '$lib/stores/serverEvents';
+	import OperationStatus from '$lib/components/OperationStatus.svelte';
+	import { applyOperationEvent, emptyBook, operationFor, type OperationBook } from '$lib/operations';
 	import {
 		workerMemoryStore,
 		workerMemoryUsedMb,
@@ -136,6 +138,10 @@
 	// Worker state
 	let workers = $state<Worker[]>([]);
 	let workerActionInProgress = $state(false);
+	// Slow operations from the event stream. The selected net's load or
+	// unload is shown beside its load badge, from the stream's copy when it
+	// has one and from the net row's `active_operation` otherwise.
+	let operations = $state<OperationBook>(emptyBook());
 
 	// Factory params dialog state
 	let showParamsDialog = $state(false);
@@ -847,6 +853,11 @@
 		animationTimeouts = [timeout1];
 	}
 
+	function selectedNetOperation() {
+		const net = selectedNet();
+		return net ? operationFor(operations, 'net', net.id, net.active_operation) : null;
+	}
+
 	function selectedNet(): Net | undefined {
 		return availableNets.find(n => n.id === selectedNetId);
 	}
@@ -1148,6 +1159,12 @@
 
 	const unsubscribeSSE = serverEventsStore.subscribe((event) => {
 		if (!event) return;
+		if (isOperationEvent(event)) {
+			operations = applyOperationEvent(operations, event);
+			// Progress is a step and a heartbeat, not a change of state; the
+			// start and the finish fall through to the refetch below.
+			if (event.type === 'operation_progress') return;
+		}
 		// A run event carries the whole transition, so the net's summary is
 		// updated from the event itself — the Runs panel header and the
 		// pending note follow immediately rather than after the debounce.
@@ -1472,9 +1489,12 @@
 								<button class={btnSmall} onclick={handleUnloadNet} disabled={workerActionInProgress}>Unload</button>
 							{/if}
 							<span class="text-xs px-2 py-0.5 rounded-full text-white font-medium"
-								style="background: {selectedNet()?.load_state === 'loaded' ? 'var(--status-ready)' : selectedNet()?.load_state === 'error' ? 'var(--status-error)' : 'var(--status-stopped)'}">
-								{selectedNet()?.load_state === 'loaded' ? 'Loaded' : selectedNet()?.load_state === 'error' ? 'Error' : 'Unloaded'}
+								style="background: {selectedNet()?.load_state === 'loaded' ? 'var(--status-ready)' : selectedNet()?.load_state === 'error' ? 'var(--status-error)' : selectedNet()?.load_state === 'loading' ? 'var(--status-provisioning)' : 'var(--status-stopped)'}">
+								{selectedNet()?.load_state === 'loaded' ? 'Loaded' : selectedNet()?.load_state === 'error' ? 'Error' : selectedNet()?.load_state === 'loading' ? 'Loading' : 'Unloaded'}
 							</span>
+						{/if}
+						{#if selectedNetOperation()}
+							<OperationStatus operation={selectedNetOperation()!} compact />
 						{/if}
 						{#if pendingNote}
 							<span class="text-xs text-status-warning" title={pendingNote.title}>{pendingNote.text}</span>

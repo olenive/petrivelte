@@ -12,7 +12,7 @@
  */
 import type {
 	DailyRollup, Deployment, DiscoveredNotebook, LastRun, Net, NotebookDefect, NotebookSlot,
-	OpenRun, RunPage, RunRecord,
+	OpenRun, Operation, OperationSummary, RunPage, RunRecord,
 } from './api';
 
 // -- Regression lock: Deployment must expose discovered_notebooks --
@@ -244,3 +244,35 @@ export const __runs_contract_check = [
 	_paused_net_schedule_fields,
 	_daily_shape,
 ];
+
+// -- Operation contract --
+//
+// The operations component, the busy verdict and the Load button's 202 all
+// read these fields; the summary is what net, notebook and sync responses
+// carry for a running operation.
+const _operation_shape: Operation = {
+	id: 'op-1',
+	user_id: 'u-1',
+	kind: 'notebook_load',
+	subject_kind: 'notebook',
+	subject_id: 'nb-1',
+	worker_id: 'w-1',
+	trigger: 'user',
+	state: 'running',
+	step: 'dependencies',
+	step_message: 'resolving packages',
+	started_at: '2026-09-25T10:00:00Z',
+	heartbeat_at: '2026-09-25T10:00:05Z',
+	finished_at: null,
+	error: null,
+};
+
+const _operation_summary_shape: OperationSummary = {
+	id: 'op-1',
+	kind: 'net_load',
+	trigger: 'schedule',
+	step: null,
+	step_message: null,
+	started_at: '2026-09-25T10:00:00Z',
+	heartbeat_at: '2026-09-25T10:00:05Z',
+};

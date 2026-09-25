@@ -189,9 +189,15 @@ const SUMMARIES: Record<NotebookState, string> = {
 		'The notebook subprocess has died, so nothing can be drawn. Your nets are unaffected. ' +
 		'Reloading starts a fresh subprocess.',
 	stale: 'The notebook is behind its net.',
+	busy:
+		'Work is in flight on this notebook or its worker. Nothing is known to have failed; ' +
+		'the page waits for it rather than reconnecting.',
 };
 
 export function healthSummary(diagnosis: Diagnosis): string {
+	// A busy verdict's own detail names the operation and its step, which is
+	// more than any fixed sentence could say.
+	if (diagnosis.state === 'busy') return diagnosis.detail;
 	return SUMMARIES[diagnosis.state] ?? diagnosis.detail;
 }
 
@@ -230,6 +236,7 @@ export function diagnosticsText(
 		),
 		'',
 		`transport ${JSON.stringify(sync.transport ?? null)}`,
+		`operation ${JSON.stringify(diagnosis.operation ?? sync.worker_busy_with ?? null)}`,
 		`slots     ${JSON.stringify(sync.slots ?? [])}`,
 		`captured  ${new Date().toISOString()}`,
 	];

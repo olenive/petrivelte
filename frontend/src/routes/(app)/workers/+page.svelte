@@ -13,7 +13,15 @@
 	import DataLoadState from '$lib/components/DataLoadState.svelte';
 	import { portal } from '$lib/actions/portal';
 	import LogViewer from '$lib/components/LogViewer.svelte';
-	import { isRunEvent, serverEventsStore } from '$lib/stores/serverEvents';
+	import { isOperationEvent, isRunEvent, serverEventsStore } from '$lib/stores/serverEvents';
+	import OperationStatus from '$lib/components/OperationStatus.svelte';
+	import {
+		applyOperationEvent,
+		emptyBook,
+		operationFor,
+		stepLabel,
+		type OperationBook,
+	} from '$lib/operations';
 	import {
 		workerLogsStore, setNets, seedFromNetErrors, loadHistory as loadLogHistory,
 		clearLogs, connectRuntimeLogs,
@@ -91,19 +99,16 @@
 	const PROVISION_STEPS = ['provisioning', 'ready'] as const;
 	let provisionProgress = $state<Map<string, { step: number; total: number; label: string }>>(new Map());
 
-	// Net load phase tracking (from net_load_log SSE events)
-	let netLoadPhase = $state<Map<string, string>>(new Map());
-	let netLastEvent = $state<Map<string, number>>(new Map()); // net_id → timestamp ms
-	let netStale = $state<Set<string>>(new Set());
-	let staleCheckTimer: ReturnType<typeof setInterval> | null = null;
-	const STALE_THRESHOLD_MS = 30_000;
+	// Net loads in flight, as operations: the step each has reached and when
+	// its worker last heartbeat. The stream's copy is newer than the net
+	// row's `active_operation`, which covers loads begun before the page
+	// opened. The heartbeat age replaces a local "no events for 30s" guess:
+	// the control plane knows when it last heard from the worker.
+	let operations = $state<OperationBook>(emptyBook());
 
-	const STEP_LABELS: Record<string, string> = {
-		download: 'downloading code',
-		extract: 'extracting code',
-		dependencies: 'installing dependencies',
-		spawn: 'starting subprocess',
-	};
+	function netOperation(net: Net) {
+		return operationFor(operations, 'net', net.id, net.active_operation);
+	}
 
 	// Per-net inline parameter values and expanded state
 	let netParamValues = $state<Map<string, Record<string, string>>>(new Map());
@@ -359,25 +364,12 @@
 			}
 		}
 
-		if (event.type === 'net_load_log') {
-			netLoadPhase.set(event.net_id, event.step);
-			netLoadPhase = new Map(netLoadPhase);
-			netLastEvent.set(event.net_id, Date.now());
-			netLastEvent = new Map(netLastEvent);
-			netStale.delete(event.net_id);
-			netStale = new Set(netStale);
-		}
-
-		if (event.type === 'net_state_changed') {
-			// Clear phase tracking when loading finishes
-			if (event.load_state !== 'loading') {
-				netLoadPhase.delete(event.net_id);
-				netLoadPhase = new Map(netLoadPhase);
-				netLastEvent.delete(event.net_id);
-				netLastEvent = new Map(netLastEvent);
-				netStale.delete(event.net_id);
-				netStale = new Set(netStale);
-			}
+		if (isOperationEvent(event)) {
+			operations = applyOperationEvent(operations, event);
+			// A step and a heartbeat, not a change of state. The start and the
+			// finish fall through to the refetch, which moves the worker's
+			// running-operations count.
+			if (event.type === 'operation_progress') return;
 		}
 
 		if (event.type === 'worker_state_changed') {
@@ -735,12 +727,11 @@
 		showSecretsDialog = false;
 	}
 
-	function loadStateBadge(state: string, netId?: string): { label: string; color: string } {
-		switch (state) {
+	function loadStateBadge(net: Net): { label: string; color: string } {
+		switch (net.load_state) {
 			case 'loaded': return { label: 'Loaded', color: 'var(--status-ready)' };
 			case 'loading': {
-				const step = netId ? netLoadPhase.get(netId) : undefined;
-				const phaseLabel = step ? STEP_LABELS[step] : undefined;
+				const phaseLabel = stepLabel(netOperation(net)?.step);
 				const label = phaseLabel ? `Loading... (${phaseLabel})` : 'Loading...';
 				return { label, color: 'var(--status-provisioning)' };
 			}
@@ -859,22 +850,6 @@
 		mounted = true; // trigger the reconciliation effect
 		document.addEventListener('visibilitychange', handleVisibilityChange);
 
-		// Stall detection: check every 10s for loading nets with no recent events
-		staleCheckTimer = setInterval(() => {
-			const now = Date.now();
-			let changed = false;
-			for (const net of nets) {
-				if (net.load_state !== 'loading') continue;
-				const last = netLastEvent.get(net.id);
-				if (last && now - last > STALE_THRESHOLD_MS) {
-					if (!netStale.has(net.id)) {
-						netStale.add(net.id);
-						changed = true;
-					}
-				}
-			}
-			if (changed) netStale = new Set(netStale);
-		}, 10_000);
 	});
 
 	onDestroy(() => {
@@ -886,7 +861,6 @@
 		runtimeDisconnects.clear();
 		cancelAllDeleteCountdowns();
 		if (sseDebounceTimer) clearTimeout(sseDebounceTimer);
-		if (staleCheckTimer) clearInterval(staleCheckTimer);
 		if (typeof document !== 'undefined') {
 			document.removeEventListener('visibilitychange', handleVisibilityChange);
 		}
@@ -1002,6 +976,16 @@
 							</span>
 							{#if worker.status === 'error' && errorExplanation(worker.status_detail)}
 								<span class="text-xs text-foreground-muted">{errorExplanation(worker.status_detail)}</span>
+							{/if}
+							{#if (worker.active_operations ?? 0) > 0}
+								<!-- Known work in flight: a busy worker says so rather than
+								     leaving slowness to be read as a fault. -->
+								<span
+									class="text-xs px-2 py-0.5 rounded-sm bg-status-warning-bg text-status-warning"
+									title="Loads, unloads and other slow operations running on this worker"
+								>
+									{worker.active_operations} operation{worker.active_operations === 1 ? '' : 's'} running
+								</span>
 							{/if}
 						</div>
 						<div class="flex items-center gap-2 flex-wrap">
@@ -1125,7 +1109,8 @@
 								{:else}
 									<ul class="list-none m-0 p-0 mb-3">
 										{#each netsForWorker(worker.id) as net (net.id)}
-											{@const badge = loadStateBadge(net.load_state, net.id)}
+											{@const badge = loadStateBadge(net)}
+											{@const operation = net.load_state === 'loading' ? netOperation(net) : null}
 											{@const params = getNetParams(net.id, worker.id)}
 											{@const hasParams = params.length > 0}
 											<!-- What the net has done, as against what state it is in.
@@ -1253,9 +1238,8 @@
 												{#if net.load_state === 'error' && net.load_error}
 													<p class="text-red-500 text-xs mt-1">{net.load_error}</p>
 												{/if}
-												{#if net.load_state === 'loading' && netStale.has(net.id)}
-													{@const elapsed = Math.round((Date.now() - (netLastEvent.get(net.id) ?? Date.now())) / 1000)}
-													<p class="text-yellow-500 text-xs mt-1">No updates for {elapsed}s...</p>
+												{#if operation}
+													<p class="mt-1"><OperationStatus {operation} compact agesOnly /></p>
 												{/if}
 												<!-- Inline collapsible parameters -->
 												<div class="mt-1.5">

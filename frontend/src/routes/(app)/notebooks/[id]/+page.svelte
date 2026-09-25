@@ -19,8 +19,18 @@
 		type Notebook,
 		type NotebookSync,
 		type NotebookTimings,
+		type Operation,
 		type WorkerOccupancy,
 	} from '$lib/api';
+	import OperationStatus from '$lib/components/OperationStatus.svelte';
+	import {
+		applyOperationEvent,
+		emptyBook,
+		operationFor,
+		operationOnWorker,
+		pickOperation,
+		type OperationBook,
+	} from '$lib/operations';
 	import NotebookOccupancyBanner from '$lib/components/NotebookOccupancyBanner.svelte';
 	import NotebookLoadConfirm from '$lib/components/NotebookLoadConfirm.svelte';
 	import { diagnose, planRemount, undrawnPushAgeS, type Diagnosis } from '$lib/notebookSync';
@@ -28,7 +38,7 @@
 		loadNotebookThresholds,
 		type NotebookViewerThresholds,
 	} from '$lib/notebookThresholds';
-	import { serverEventsStore } from '$lib/stores/serverEvents';
+	import { isOperationEvent, serverEventsStore } from '$lib/stores/serverEvents';
 	import NotebookLoadPanel from '$lib/components/NotebookLoadPanel.svelte';
 	import NotebookHealthPanel from '$lib/components/NotebookHealthPanel.svelte';
 	import {
@@ -151,6 +161,21 @@
 	let undrawnPushAt: number | null = null;
 	let carriedPushAgeS = $state<number | null>(null);
 
+	// Slow operations, from the event stream. The notebook's own (its load)
+	// and its worker's are what `diagnose` reads to tell busy from broken, and
+	// what the page shows while it waits. A load answers 202 with its
+	// operation and the page follows it here rather than holding the request.
+	let operations = $state<OperationBook>(emptyBook());
+	let notebookOperation = $derived(
+		notebook ? operationFor(operations, 'notebook', notebookId, notebook.active_operation) : null,
+	);
+	let workerOperation = $derived(
+		operationOnWorker(operations, notebook?.worker_id, syncState?.worker_busy_with),
+	);
+	// The last load of this notebook that ended badly, shown beside the
+	// "not loaded" panel so the step it died in stays readable.
+	let failedLoad = $state<Operation | null>(null);
+
 	// Self-heal state. `remountHistory` holds the epoch seconds of automatic
 	// remounts; planRemount prunes it to its sliding window, so a recovery
 	// does not refund the budget but time does.
@@ -169,6 +194,11 @@
 		if (thresholds === null) {
 			thresholds = await loadNotebookThresholds().catch(() => null);
 		}
+		if (notebook?.load_state === 'loading') {
+			// The event stream reports the end of a load; this re-read is the
+			// fallback for a stream that dropped it.
+			notebook = await getNotebook(notebookId).catch(() => notebook);
+		}
 		if (notebook?.load_state !== 'loaded') {
 			syncState = null;
 			diagnosis = null;
@@ -185,11 +215,7 @@
 				undrawnPushAt = undrawn === null ? null : nowS - undrawn;
 				carriedPushAgeS = carried;
 				syncState = reading;
-				diagnosis = diagnose(reading, thresholds, {
-					sinceBurstSettledS: sinceBurstSettledS(),
-					carriedPushAgeS: carried,
-				});
-				considerRemount();
+				rediagnose();
 			} catch {
 				// A failed poll says nothing about the notebook, only about
 				// this request, so leave the last reading in place and let its
@@ -200,6 +226,24 @@
 			pollSync,
 			thresholds ? thresholds.sync_poll_s * 1000 : THRESHOLDS_RETRY_MS,
 		);
+	}
+
+	// Judge the last reading again. Run on every poll, and whenever an
+	// operation starts or ends: a worker that has just become busy must stop
+	// a queued remount now, not at the next poll.
+	function rediagnose() {
+		if (!syncState) return;
+		diagnosis = diagnose(syncState, thresholds, {
+			sinceBurstSettledS: sinceBurstSettledS(),
+			carriedPushAgeS,
+			notebookOperation,
+			workerOperation: operationOnWorker(
+				operations,
+				notebook?.worker_id,
+				syncState.worker_busy_with,
+			),
+		});
+		considerRemount();
 	}
 
 	// The render channel is the half of this system nothing used to watch. It
@@ -218,8 +262,9 @@
 			// arrive every 5s and the backoff is longer than that, so
 			// re-planning here would spend the whole retry budget waiting for
 			// the first retry. The only decision left is whether to call it
-			// off, which a notebook that recovered on its own has earned.
-			if (diagnosis.action !== 'remount') {
+			// off, which a notebook that recovered on its own has earned, and
+			// so has one whose worker has since become busy.
+			if (!diagnosis.automatic) {
 				clearTimeout(remountPending);
 				remountPending = null;
 			}
@@ -427,6 +472,16 @@
 	// in place.
 	const unsubscribeEvents = serverEventsStore.subscribe((evt) => {
 		if (!evt) return;
+		if (isOperationEvent(evt)) {
+			operations = applyOperationEvent(operations, evt);
+			const own = evt.subject_kind === 'notebook' && evt.subject_id === notebookId;
+			if (own && evt.type === 'operation_finished') {
+				failedLoad = evt.state === 'succeeded' ? null : pickOperation(evt);
+				void settleLoad();
+			}
+			if (own || (notebook?.worker_id && evt.worker_id === notebook.worker_id)) rediagnose();
+			return;
+		}
 		if (evt.type !== 'notebook_state_changed') return;
 		if (evt.notebook_id !== notebookId) return;
 		if (!notebook) return;
@@ -435,6 +490,9 @@
 			load_state: evt.load_state,
 			load_error: evt.load_error ?? null,
 			worker_id: evt.worker_id ?? notebook.worker_id,
+			// A row that has left `loading` has no load in flight, so the
+			// operation read with it must not hold the page in `busy`.
+			active_operation: evt.load_state === 'loading' ? notebook.active_operation : null,
 		};
 	});
 
@@ -463,7 +521,9 @@
 			.catch(() => {});
 		try {
 			notebook = await getNotebook(notebookId);
-			if (notebook.load_state !== 'loaded') {
+			// A notebook already loading has its operation running; asking
+			// again would be refused, so the page follows the one in flight.
+			if (notebook.load_state !== 'loaded' && notebook.load_state !== 'loading') {
 				await ensureLoaded();
 			}
 			refreshOccupancy();
@@ -471,10 +531,40 @@
 			errorMessage = e?.message ?? String(e);
 		} finally {
 			initialising = false;
-			// The spawn is over either way; the burst that follows is reported
-			// by the timings poll, which the iframe's onload starts.
-			stopLoadStream();
+			// The load stream stays open while the load's operation runs;
+			// once it has ended, the burst that follows is reported by the
+			// timings poll, which the iframe's onload starts.
+			if (notebook?.load_state !== 'loading') stopLoadStream();
 		}
+	}
+
+	/**
+	 * Follow a load the server accepted. The 202 carries its operation, which
+	 * the page shows at once; the end arrives as `operation_finished` and
+	 * `notebook_state_changed` on the event stream. Null is a server that
+	 * finished the load inside the request, so the row is re-read instead.
+	 */
+	async function followLoad(operation: Operation | null) {
+		if (!operation) {
+			notebook = await getNotebook(notebookId);
+			stopLoadStream();
+			return;
+		}
+		operations = applyOperationEvent(operations, operation);
+		failedLoad = null;
+		if (notebook) notebook = { ...notebook, load_state: 'loading', load_error: null };
+		if (!loadEvents) startLoadStream();
+	}
+
+	/** The load's operation ended: read the row it left behind. */
+	async function settleLoad() {
+		try {
+			notebook = await getNotebook(notebookId);
+		} catch {
+			// The next poll re-reads it.
+		}
+		if (notebook?.load_state !== 'loading') stopLoadStream();
+		refreshOccupancy();
 	}
 
 	async function ensureLoaded(confirmAdditional = false) {
@@ -485,9 +575,9 @@
 		}
 		busy = true;
 		try {
-			await loadNotebook(notebookId, { confirmAdditional });
+			const operation = await loadNotebook(notebookId, { confirmAdditional });
 			pendingRefusal = null;
-			notebook = await getNotebook(notebookId);
+			await followLoad(operation);
 		} catch (e: any) {
 			// The server refuses once when this would be an additional notebook
 			// on the worker. Opening the page loads it automatically, so without
@@ -552,8 +642,9 @@
 			// Confirmed by construction: restarting a notebook the user already
 			// had is not an additional one, and after the unload above the
 			// server would otherwise see this as adding one back.
-			await loadNotebook(notebookId, { confirmAdditional: true });
-			notebook = await getNotebook(notebookId);
+			const operation = await loadNotebook(notebookId, { confirmAdditional: true });
+			startLoadStream();
+			await followLoad(operation);
 			refreshOccupancy();
 		} catch (e: any) {
 			errorMessage = e?.message ?? String(e);
@@ -678,6 +769,12 @@
 					onact={diagnosis.action === 'remount' ? remountNow : handleReload}
 				/>
 			{/if}
+			{#if notebookOperation ?? workerOperation}
+				<!-- Known work in flight. While it runs the page waits and does
+				     not remount, so it says what it is waiting for. -->
+				<span class="text-foreground-muted text-xs">·</span>
+				<OperationStatus operation={(notebookOperation ?? workerOperation)!} compact />
+			{/if}
 			{#if remountExhausted}
 				<!-- Tried what it could and stopped, rather than looping. Says
 				     so explicitly: a page that had silently given up would look
@@ -704,7 +801,8 @@
 			<button
 				class="px-2.5 py-1 border border-accent rounded bg-card text-accent text-xs font-medium hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
 				onclick={handleReload}
-				disabled={busy}
+				disabled={busy || notebookOperation !== null}
+				title={notebookOperation ? 'A load is already in flight' : undefined}
 			>
 				{busy ? 'Working…' : 'Reload'}
 			</button>
@@ -729,7 +827,12 @@
 		onconfirm={() => ensureLoaded(true)}
 		oncancel={cancelAdditional}
 	/>
-{:else if initialising}
+{:else if initialising || notebook?.load_state === 'loading'}
+	{#if notebookOperation}
+		<div class="mx-6 mt-4 max-w-xl">
+			<OperationStatus operation={notebookOperation} />
+		</div>
+	{/if}
 	<NotebookLoadPanel
 		progress={displayedProgress}
 		elapsedSeconds={loadElapsedS}
@@ -766,10 +869,6 @@
 			}}
 		></iframe>
 	{/key}
-{:else if notebook && notebook.load_state === 'loading'}
-	<div class="flex items-center justify-center h-[calc(100vh-104px)] text-foreground-muted">
-		Loading notebook on worker…
-	</div>
 {:else if notebook}
 	<!-- Not loaded yet — either failed silently or no worker -->
 	<div class="m-6 p-4 border border-border rounded bg-card text-sm">
@@ -780,6 +879,11 @@
 				· {loadReason.heading.toLowerCase()}: {loadReason.label}
 			{/if}
 		</p>
+		{#if failedLoad}
+			<div class="mt-3 max-w-xl">
+				<OperationStatus operation={failedLoad} />
+			</div>
+		{/if}
 		<button
 			class="mt-3 px-3 py-1.5 border border-accent rounded bg-card text-accent text-xs font-medium hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
 			onclick={() => ensureLoaded()}

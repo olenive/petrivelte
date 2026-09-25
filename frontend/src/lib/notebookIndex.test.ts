@@ -135,6 +135,27 @@ describe('the badge table', () => {
 		expect(badge.label).toBe('loading… spawning subprocess');
 	});
 
+	it('names the step of the load’s operation, ahead of the row’s phase', () => {
+		const badge = notebookBadge(
+			notebook({ load_state: 'loading', load_error: 'spawning subprocess' }),
+			null,
+			T,
+			0,
+			{
+				operation: {
+					id: 'op-1',
+					kind: 'notebook_load',
+					trigger: 'user',
+					step: 'dependencies',
+					step_message: null,
+					started_at: '2026-09-25T10:00:00Z',
+					heartbeat_at: '2026-09-25T10:00:05Z',
+				},
+			},
+		);
+		expect(badge.label).toBe('loading… installing dependencies');
+	});
+
 	it('reads a failed load as error and puts load_error in the tooltip', () => {
 		const badge = notebookBadge(
 			notebook({ load_state: 'error', load_error: 'subprocess_gone' }),

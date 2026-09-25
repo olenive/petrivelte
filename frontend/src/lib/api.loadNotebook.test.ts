@@ -29,6 +29,23 @@ const REFUSAL = {
 	needed_mb: 428,
 };
 
+const OPERATION = {
+	id: 'op-1',
+	user_id: 'u-1',
+	kind: 'notebook_load',
+	subject_kind: 'notebook',
+	subject_id: 'nb-1',
+	worker_id: 'w-1',
+	trigger: 'user',
+	state: 'running',
+	step: null,
+	step_message: null,
+	started_at: '2026-09-25T10:00:00Z',
+	heartbeat_at: '2026-09-25T10:00:00Z',
+	finished_at: null,
+	error: null,
+};
+
 function respond(status: number, body: unknown) {
 	vi.stubGlobal(
 		'fetch',
@@ -97,8 +114,16 @@ describe('loadNotebook', () => {
 		expect(err).toBeInstanceOf(AdditionalNotebookError);
 	});
 
-	it('returns the body on success', async () => {
+	it('returns the operation on a 202, without waiting for the load', async () => {
+		// The load runs in the background on the control plane; the page
+		// follows the operation on the event stream instead of this request.
+		respond(202, OPERATION);
+		await expect(loadNotebook('nb-1')).resolves.toEqual(OPERATION);
+	});
+
+	it('resolves to null when the server finished the load inside the request', async () => {
+		// A control plane from before operations answers 200 once loaded.
 		respond(200, { status: 'loaded', port: 2718 });
-		await expect(loadNotebook('nb-1')).resolves.toEqual({ status: 'loaded', port: 2718 });
+		await expect(loadNotebook('nb-1')).resolves.toBeNull();
 	});
 });

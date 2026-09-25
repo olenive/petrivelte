@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { NotebookSync, NotebookSyncSlot, NotebookTransport } from './api';
+import type { NotebookSync, NotebookSyncSlot, NotebookTransport, OperationSummary } from './api';
 import { diagnose, planRemount, stateColour, undrawnPushAgeS } from './notebookSync';
 import { testThresholds } from './notebookThresholds.testing';
 
@@ -86,6 +86,7 @@ describe('diagnose', () => {
 
 		expect(d.state).toBe('no_transport');
 		expect(d.action).toBe('remount');
+		expect(d.automatic).toBe(true);
 		expect(d.detail).toContain('never opened');
 	});
 
@@ -129,6 +130,11 @@ describe('diagnose', () => {
 
 		expect(never.detail).not.toBe(dropped.detail);
 		expect(dropped.detail).toContain('dropped');
+		// Only the socket that never opened is remounted unasked; a dropped
+		// one may be the worker shedding load, so it is a button.
+		expect(never.automatic).toBe(true);
+		expect(dropped.action).toBe('remount');
+		expect(dropped.automatic).toBe(false);
 	});
 
 	it('catches a notebook that connected but never started tracking', () => {
@@ -140,6 +146,7 @@ describe('diagnose', () => {
 
 		expect(d.state).toBe('bridge_missing');
 		expect(d.action).toBe('remount');
+		expect(d.automatic).toBe(false);
 	});
 
 	it('gives the bridge time to start before calling it missing', () => {
@@ -236,6 +243,7 @@ describe('diagnose', () => {
 		expect(d).toEqual({
 			state: 'subprocess_gone',
 			action: 'reload',
+			automatic: false,
 			label: 'subprocess gone',
 			detail: 'The notebook subprocess died. Reload to respawn it.',
 		});
@@ -503,8 +511,8 @@ describe('frame stall is relative to the last push', () => {
 });
 
 describe('planRemount', () => {
-	const broken = { state: 'no_transport', action: 'remount', label: '', detail: '' } as const;
-	const healthy = { state: 'live', action: 'none', label: '', detail: '' } as const;
+	const broken = { state: 'no_transport', action: 'remount', automatic: true, label: '', detail: '' } as const;
+	const healthy = { state: 'live', action: 'none', automatic: false, label: '', detail: '' } as const;
 	const T0 = 1_000_000;
 
 	/** Drive the policy the way the page does: one plan per poll, carrying history. */
@@ -574,7 +582,7 @@ describe('planRemount', () => {
 	});
 
 	it('never remounts for a failure a remount cannot fix', () => {
-		const wedged = { state: 'frames_stalled', action: 'reload', label: '', detail: '' } as const;
+		const wedged = { state: 'frames_stalled', action: 'reload', automatic: false, label: '', detail: '' } as const;
 
 		expect(planRemount(wedged, [], T0, T).remount).toBe(false);
 		expect(planRemount(wedged, [], T0, T).exhausted).toBe(false);
@@ -591,7 +599,7 @@ describe('planRemount', () => {
 	});
 
 	it('returns the pruned history unchanged for a diagnosis that needs no remount', () => {
-		const connecting = { state: 'connecting', action: 'none', label: '', detail: '' } as const;
+		const connecting = { state: 'connecting', action: 'none', automatic: false, label: '', detail: '' } as const;
 		const history = [T0 - REMOUNT_WINDOW_S - 10, T0 - 300, T0 - 30];
 
 		for (const diagnosis of [connecting, healthy]) {
@@ -600,5 +608,182 @@ describe('planRemount', () => {
 			expect(plan.exhausted).toBe(false);
 			expect(plan.history).toEqual([T0 - 300, T0 - 30]);
 		}
+	});
+});
+
+describe('an operation in flight', () => {
+	/**
+	 * Busy is known, not inferred: while the control plane holds a running
+	 * operation on the notebook or its worker, the verdict names it and the
+	 * page does nothing on its own. A remount on a worker installing
+	 * dependencies adds an asset burst to the load that made it slow.
+	 */
+	const op = (over: Partial<OperationSummary> = {}): OperationSummary => ({
+		id: 'op-1',
+		kind: 'net_load',
+		trigger: 'schedule',
+		step: 'dependencies',
+		step_message: 'resolving 41 packages',
+		started_at: '2026-09-25T10:00:00Z',
+		heartbeat_at: '2026-09-25T10:00:30Z',
+		...over,
+	});
+	const neverOpened = sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 0 }) });
+
+	it('reads busy, names the step and plans no remount for the worker’s operation', () => {
+		const d = diagnose(neverOpened, T, { ...settled, workerOperation: op() });
+
+		expect(d.state).toBe('busy');
+		expect(d.label).toContain('installing dependencies');
+		expect(d.detail).toContain('worker');
+		expect(d.detail).toContain('resolving 41 packages');
+		expect(d.action).toBe('none');
+		expect(d.automatic).toBe(false);
+		expect(d.operation?.id).toBe('op-1');
+		expect(planRemount(d, [], 1_000_000, T).remount).toBe(false);
+	});
+
+	it('reads busy for the notebook’s own operation, and names it ahead of the worker’s', () => {
+		const own = op({ id: 'op-own', kind: 'notebook_load', step: 'spawn', step_message: null });
+		const d = diagnose(neverOpened, T, {
+			...settled,
+			notebookOperation: own,
+			workerOperation: op(),
+		});
+
+		expect(d.state).toBe('busy');
+		expect(d.operation?.id).toBe('op-own');
+		expect(d.label).toContain('starting subprocess');
+		expect(d.detail).toContain('This notebook');
+	});
+
+	it('takes the worker’s operation from the sync report when the caller has none', () => {
+		const d = diagnose({ ...neverOpened, worker_busy_with: op() }, T, settled);
+
+		expect(d.state).toBe('busy');
+	});
+
+	it('lets the caller overrule a report whose operation the stream saw finish', () => {
+		const d = diagnose({ ...neverOpened, worker_busy_with: op() }, T, {
+			...settled,
+			workerOperation: null,
+		});
+
+		expect(d.state).toBe('no_transport');
+		expect(d.automatic).toBe(true);
+	});
+
+	it('holds over every other verdict while it runs, a dead subprocess included', () => {
+		for (const reading of [
+			sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 3 }) }),
+			sync({ transport: transport({ first_report_age_s: null }) }),
+			sync({ transport: transport({ alive: false }) }),
+			sync({ reachable: false, reason: 'worker_unreachable', transport: null }),
+		]) {
+			const d = diagnose(reading, T, { ...settled, workerOperation: op() });
+			expect(d.state).toBe('busy');
+			expect(d.action).toBe('none');
+		}
+	});
+
+	it('does not need the thresholds to say what the worker is doing', () => {
+		const d = diagnose(neverOpened, null, { ...settled, workerOperation: op() });
+
+		expect(d.state).toBe('busy');
+	});
+
+	it('names the kind when the operation has not reported a step yet', () => {
+		const d = diagnose(neverOpened, T, {
+			...settled,
+			workerOperation: op({ step: null, step_message: null }),
+		});
+
+		expect(d.label).toBe('busy · loading net');
+	});
+
+	it('returns to the ordinary verdict once the operation is gone', () => {
+		const d = diagnose(neverOpened, T, {
+			...settled,
+			notebookOperation: null,
+			workerOperation: null,
+		});
+
+		expect(d.state).toBe('no_transport');
+	});
+});
+
+describe('the narrowed remount', () => {
+	/**
+	 * The page remounts on its own for one diagnosis only: a socket that never
+	 * opened after the asset burst settled, with nothing in flight. Every
+	 * other diagnosis carries its recovery as a suggestion for a button.
+	 */
+	const T0 = 1_000_000;
+	const plan = (reading: NotebookSync, ctx = settled as Parameters<typeof diagnose>[2]) =>
+		planRemount(diagnose(reading, T, ctx), [], T0, T);
+
+	it('remounts a socket that never opened after the burst settled', () => {
+		const p = plan(sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 0 }) }));
+
+		expect(p.remount).toBe(true);
+	});
+
+	it('does not remount before the burst has settled', () => {
+		const p = plan(sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 0 }) }), {
+			sinceBurstSettledS: null,
+		});
+
+		expect(p.remount).toBe(false);
+	});
+
+	it('suggests, and does not take, a remount for a socket that dropped', () => {
+		const reading = sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 2 }) });
+		const d = diagnose(reading, T, settled);
+
+		expect(d.action).toBe('remount');
+		expect(d.automatic).toBe(false);
+		expect(plan(reading).remount).toBe(false);
+		// A suggestion spends no budget and so is never reported as exhausted.
+		expect(plan(reading).exhausted).toBe(false);
+	});
+
+	it('suggests, and does not take, a remount for a bridge that never started', () => {
+		const p = plan(sync({ transport: transport({ first_report_age_s: null }) }));
+
+		expect(p.remount).toBe(false);
+	});
+
+	it('never acts on a reload suggestion', () => {
+		for (const reading of [
+			sync({ transport: transport({ alive: false }) }),
+			sync({ reachable: false, reason: 'worker_unreachable', transport: null }),
+		]) {
+			const d = diagnose(reading, T, settled);
+			expect(d.action).toBe('reload');
+			expect(d.automatic).toBe(false);
+			expect(planRemount(d, [], T0, T).remount).toBe(false);
+		}
+	});
+
+	it('marks exactly one diagnosis automatic', () => {
+		const readings = [
+			sync(),
+			sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 0 }) }),
+			sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 5 }) }),
+			sync({ transport: transport({ first_report_age_s: null }) }),
+			sync({ transport: transport({ alive: false }) }),
+			sync({ transport: null }),
+			sync({ reachable: false, reason: 'worker_busy', transport: null }),
+			sync({ reachable: false, reason: 'worker_unreachable', transport: null }),
+			sync({ reachable: false, reason: 'subprocess_gone', transport: null }),
+			sync({ reachable: false, reason: 'not_loaded', transport: null }),
+			sync({ slots: [slot({ last_error: 'boom' })] }),
+		];
+		const automatic = readings
+			.map((r) => diagnose(r, T, settled))
+			.filter((d) => d.automatic)
+			.map((d) => d.state);
+
+		expect(automatic).toEqual(['no_transport']);
 	});
 });

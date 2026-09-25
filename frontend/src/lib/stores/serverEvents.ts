@@ -11,7 +11,7 @@
  */
 
 import { writable } from 'svelte/store';
-import { API_URL, getEventsAfter } from '$lib/api';
+import { API_URL, getEventsAfter, type Operation } from '$lib/api';
 
 export type ServerEvent =
 	| { seq?: number; type: 'worker_state_changed'; worker_id: string; status: string; status_detail?: string | null; ts?: string }
@@ -27,7 +27,14 @@ export type ServerEvent =
 	// ``$lib/runs``, never raw.
 	| ({ type: 'net_run_started' } & RunEventFields)
 	| ({ type: 'net_run_finished' } & RunEventFields)
-	| ({ type: 'net_run_skipped' } & RunEventFields);
+	| ({ type: 'net_run_skipped' } & RunEventFields)
+	// Operation lifecycle, carrying every field of the operation row. Fold
+	// them with `applyOperationEvent` from `$lib/operations`.
+	| ({ type: 'operation_started' } & OperationEventFields)
+	| ({ type: 'operation_progress' } & OperationEventFields)
+	| ({ type: 'operation_finished' } & OperationEventFields);
+
+type OperationEventFields = Operation & { seq?: number; ts?: string };
 
 /**
  * What every run event carries.
@@ -61,6 +68,19 @@ export type RunEvent = Extract<ServerEvent, { type: (typeof RUN_EVENT_TYPES)[num
 
 export function isRunEvent(event: ServerEvent): event is RunEvent {
 	return (RUN_EVENT_TYPES as readonly string[]).includes(event.type);
+}
+
+/** The operation-lifecycle event types. */
+export const OPERATION_EVENT_TYPES = [
+	'operation_started',
+	'operation_progress',
+	'operation_finished',
+] as const;
+
+export type OperationEvent = Extract<ServerEvent, { type: (typeof OPERATION_EVENT_TYPES)[number] }>;
+
+export function isOperationEvent(event: ServerEvent): event is OperationEvent {
+	return (OPERATION_EVENT_TYPES as readonly string[]).includes(event.type);
 }
 
 export type ConnectionState = 'connecting' | 'connected' | 'disconnected';

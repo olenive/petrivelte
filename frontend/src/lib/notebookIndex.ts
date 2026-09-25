@@ -19,7 +19,15 @@
  * without a browser.
  */
 
-import type { NotebookSync, WiringNotebook, WiringResponse, WiringWorker } from '$lib/api';
+import type {
+	NotebookSync,
+	Operation,
+	OperationSummary,
+	WiringNotebook,
+	WiringResponse,
+	WiringWorker,
+} from '$lib/api';
+import { stepLabel } from '$lib/operations';
 import { dataFact, netFact } from '$lib/notebookHealth';
 import { describeLoadError } from '$lib/notebookLoadReason';
 import { slotSyncState } from '$lib/notebookSync';
@@ -222,6 +230,8 @@ export type BadgeSource = Pick<WiringNotebook, 'load_state' | 'load_error'> &
 export interface BadgeContext {
 	/** The worker's configured RAM, named in an OOM kill's label. */
 	workerMemoryMb?: number | null;
+	/** The notebook's running operation (its load), when one is known. */
+	operation?: Operation | OperationSummary | null;
 }
 
 /** Red, for an unloaded row whose reason is a failure. */
@@ -307,9 +317,9 @@ export function notebookBadge(
 	}
 
 	if (notebook.load_state === 'loading') {
-		// The worker stamps the phase it has reached onto the row while a load
-		// is in flight; a load that has not reached one yet leaves it null.
-		const phase = notebook.load_error?.trim() || null;
+		// The load's operation names its step; before one is known, the
+		// worker's phase stamped onto the row is the next best witness.
+		const phase = stepLabel(ctx.operation?.step) ?? (notebook.load_error?.trim() || null);
 		return badge(
 			'loading',
 			phase ? `loading… ${phase}` : 'loading…',
