@@ -46,6 +46,10 @@
 		viewersHint,
 		type NotebookRow,
 	} from '$lib/notebookIndex';
+	import {
+		loadNotebookThresholds,
+		type NotebookViewerThresholds,
+	} from '$lib/notebookThresholds';
 	import { formatElapsed } from '$lib/runs';
 	import { serverEventsStore, type ServerEvent } from '$lib/stores/serverEvents';
 
@@ -60,6 +64,9 @@
 	 *  which the badge renders as `checking…` rather than as a verdict. */
 	let syncById = $state<Map<string, NotebookSync>>(new Map());
 	let errorsById = $state<Map<string, number>>(new Map());
+	/** Served by the control plane. Loaded rows read `checking…` until they
+	 *  arrive; a failed fetch is retried with the next sync poll. */
+	let thresholds = $state<NotebookViewerThresholds | null>(null);
 	/** `updated_at` is on the notebook rows, not on the wiring payload, so it
 	 *  comes from one extra list call rather than from a per-row fetch. */
 	let updatedById = $state<Map<string, string>>(new Map());
@@ -110,6 +117,9 @@
 	 * and asking anyway would be N pointless round trips on a page whose whole
 	 * point is not having to open each notebook. */
 	async function refreshLoadedDetail() {
+		if (thresholds === null) {
+			thresholds = await loadNotebookThresholds().catch(() => null);
+		}
 		const ids = (wiring?.notebooks ?? []).filter(isLoaded).map((n) => n.id);
 		if (ids.length === 0) return;
 		const results = await Promise.all(
@@ -368,6 +378,7 @@
 		return notebookBadge(
 			row.notebook,
 			syncById.get(row.notebook.id) ?? null,
+			thresholds,
 			errorsById.get(row.notebook.id) ?? 0,
 			{ workerMemoryMb: worker?.memory_mb ?? null },
 		);

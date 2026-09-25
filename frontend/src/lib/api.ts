@@ -1322,6 +1322,16 @@ export interface NotebookSyncSlot {
 	last_error: string | null;
 	last_sync_age_s: number | null;
 	report_age_s: number;
+	/** Which marking the notebook holds; null before its first fetch. */
+	marking_version: number | null;
+	/** The bridge's current check interval. It widens when fetches are slow,
+	 *  so staleness is judged against it rather than a fixed cadence. Null
+	 *  when the bridge has not reported one. */
+	reconcile_interval_s: number | null;
+	/** How long before the report the bridge last handed state to marimo.
+	 *  Aged at the report's stamp, so the push happened
+	 *  `report_age_s + last_push_age_s` ago. Null when it never has. */
+	last_push_age_s: number | null;
 }
 
 /**
@@ -1369,6 +1379,15 @@ export interface NotebookSync {
 		| 'subprocess_gone'
 		| null;
 	bindings?: number;
+}
+
+/** The viewer's thresholds, served by the control plane from the same
+ *  module the worker and SDK read. Validated by the caller; see
+ *  `notebookThresholds.ts`. */
+export async function getNotebookViewerThresholds(): Promise<unknown> {
+	const res = await get('/api/config/notebook-viewer');
+	if (!res.ok) throw new Error('Failed to get notebook viewer thresholds');
+	return res.json();
 }
 
 export async function getNotebookSync(id: string): Promise<NotebookSync> {

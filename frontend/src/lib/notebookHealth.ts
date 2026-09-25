@@ -22,7 +22,8 @@
  */
 
 import type { NotebookSync } from './api';
-import type { Diagnosis, NotebookState } from './notebookSync';
+import { framesStalled, type Diagnosis, type NotebookState } from './notebookSync';
+import type { NotebookViewerThresholds } from './notebookThresholds';
 
 /** `ok: null` means "cannot tell from here" — never rendered as a failure. */
 export interface HealthFact {
@@ -45,14 +46,6 @@ function ageLabel(seconds: number | null): string {
 function countLabel(n: number): string {
 	return n.toLocaleString();
 }
-
-/**
- * Seconds without a frame before the page is treated as not drawing.
- * Matches `FRAME_STALL_S` in `notebookSync.ts`; kept as its own constant so a
- * change there shows up here as a failing test rather than as a panel that
- * quietly disagrees with the badge above it.
- */
-export const FRAME_STALL_S = 30;
 
 export function netFact(sync: NotebookSync): HealthFact {
 	const slots = sync.slots ?? [];
@@ -105,7 +98,16 @@ export function dataFact(sync: NotebookSync): HealthFact {
 	};
 }
 
-export function frameFact(sync: NotebookSync): HealthFact {
+/**
+ * Whether the page is drawing what it is given. Judged by `framesStalled`,
+ * the same rule as the badge above it, so the two cannot disagree: a frame is
+ * owed only after a push, and a quiet net with nothing new is not a fault.
+ */
+export function frameFact(
+	sync: NotebookSync,
+	thresholds: NotebookViewerThresholds | null,
+	carriedPushAgeS: number | null = null,
+): HealthFact {
 	const transport = sync.transport;
 	if (!transport) {
 		return {
@@ -126,7 +128,10 @@ export function frameFact(sync: NotebookSync): HealthFact {
 		};
 	}
 	const age = transport.last_frame_age_s;
-	const stalled = age === null || age > FRAME_STALL_S;
+	if (thresholds === null) {
+		return { label: 'Page updating', value: 'checking', ok: null };
+	}
+	const stalled = framesStalled(sync, thresholds, carriedPushAgeS);
 	// Naming the session count is the point of this row when it fails: a
 	// second session on one subprocess is the shape of the known freeze, and
 	// it is the fact that decides whether reloading is worth the user's time.
@@ -141,8 +146,12 @@ export function frameFact(sync: NotebookSync): HealthFact {
 	};
 }
 
-export function healthFacts(sync: NotebookSync): HealthFact[] {
-	return [netFact(sync), dataFact(sync), frameFact(sync)];
+export function healthFacts(
+	sync: NotebookSync,
+	thresholds: NotebookViewerThresholds | null,
+	carriedPushAgeS: number | null = null,
+): HealthFact[] {
+	return [netFact(sync), dataFact(sync), frameFact(sync, thresholds, carriedPushAgeS)];
 }
 
 /**
@@ -154,6 +163,7 @@ export function healthFacts(sync: NotebookSync): HealthFact[] {
  */
 const SUMMARIES: Record<NotebookState, string> = {
 	live: 'Everything is connected and up to date.',
+	checking: 'Loading the thresholds this page judges by.',
 	syncing: 'Connected. Waiting for the first update from the net.',
 	connecting: 'The page is still connecting to the notebook.',
 	disconnected: 'The notebook is not reporting, so nothing can be drawn.',
@@ -206,13 +216,15 @@ export function diagnosticsText(
 	sync: NotebookSync,
 	diagnosis: Diagnosis,
 	notebookId: string,
+	thresholds: NotebookViewerThresholds | null,
+	carriedPushAgeS: number | null = null,
 ): string {
 	const lines = [
 		`notebook ${notebookId}`,
 		`state    ${diagnosis.state} (${diagnosis.label})`,
 		`detail   ${diagnosis.detail}`,
 		'',
-		...healthFacts(sync).map(
+		...healthFacts(sync, thresholds, carriedPushAgeS).map(
 			(f) => `${f.ok === true ? 'ok  ' : f.ok === false ? 'BAD ' : '?   '}${f.label}: ${f.value}` +
 				(f.note ? ` — ${f.note}` : ''),
 		),

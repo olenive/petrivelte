@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 
 import type { NotebookSync, NotebookSyncSlot, NotebookTransport } from './api';
 import { diagnose } from './notebookSync';
+import { testThresholds } from './notebookThresholds.testing';
 import {
 	dataFact,
 	diagnosticsText,
@@ -21,6 +22,9 @@ function slot(over: Partial<NotebookSyncSlot> = {}): NotebookSyncSlot {
 		last_error: null,
 		last_sync_age_s: 0.07,
 		report_age_s: 0.07,
+		marking_version: 67319,
+		reconcile_interval_s: 5,
+		last_push_age_s: 1,
 		...over,
 	};
 }
@@ -42,11 +46,16 @@ function sync(over: Partial<NotebookSync> = {}): NotebookSync {
 	return { slots: [slot()], transport: transport(), reachable: true, bindings: 1, ...over };
 }
 
+const T = testThresholds();
+
 // The reading taken from the live notebook that prompted this panel: a second
 // session on one subprocess, one frame at the handshake and then silence,
-// while the bridge stayed perfectly healthy.
+// while the bridge stayed perfectly healthy and kept pushing. Its latest push
+// is two seconds old; the page remembers the first push it saw go undrawn,
+// 140 s ago, which is what `FREEZE_CARRIED` stands for.
+const FREEZE_CARRIED = 140;
 const OBSERVED_FREEZE = sync({
-	slots: [slot({ step_count: 67319, last_sync_age_s: 0.0735 })],
+	slots: [slot({ step_count: 67319, last_sync_age_s: 0.0735, last_push_age_s: 2 })],
 	transport: transport({
 		ws_sessions: 1,
 		ws_opened_total: 2,
@@ -89,24 +98,49 @@ describe('the three facts', () => {
 	});
 
 	it('reports a live render channel with its frame count', () => {
-		expect(frameFact(sync())).toMatchObject({ ok: true, note: '900 updates received' });
+		expect(frameFact(sync(), T)).toMatchObject({ ok: true, note: '900 updates received' });
 	});
 
 	it('distinguishes never connecting from having disconnected', () => {
-		expect(frameFact(sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 0 }) })).note)
+		expect(frameFact(sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 0 }) }), T).note)
 			.toContain('never opened');
-		expect(frameFact(sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 3 }) })).note)
+		expect(frameFact(sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 3 }) }), T).note)
 			.toContain('has closed');
 	});
 
+	it('does not call a quiet page stalled when nothing new was pushed', () => {
+		// A five-minute net: the last frame followed the last push minutes ago.
+		const quiet = sync({
+			slots: [slot({ last_push_age_s: 200 })],
+			transport: transport({ last_frame_age_s: 199 }),
+		});
+		expect(frameFact(quiet, T).ok).toBe(true);
+	});
+
+	it('agrees with the badge on a push left undrawn past frame_stall_s', () => {
+		const stuck = sync({
+			slots: [slot({ last_push_age_s: 45 })],
+			transport: transport({ last_frame_age_s: 100 }),
+		});
+		expect(frameFact(stuck, T).ok).toBe(false);
+		expect(diagnose(stuck, T, { sinceBurstSettledS: 200 }).state).toBe('frames_stalled');
+	});
+
+	it('reads checking before the thresholds have loaded', () => {
+		expect(frameFact(sync(), null)).toMatchObject({ value: 'checking', ok: null });
+		expect(healthSummary(diagnose(sync(), null, { sinceBurstSettledS: 200 }))).toMatch(
+			/thresholds/,
+		);
+	});
+
 	it('admits it cannot tell when the worker reports no transport', () => {
-		expect(frameFact(sync({ transport: null })).ok).toBeNull();
+		expect(frameFact(sync({ transport: null }), T).ok).toBeNull();
 	});
 });
 
 describe('the observed freeze', () => {
 	it('says the net and its data are fine and only the page is stuck', () => {
-		const [net, data, frames] = healthFacts(OBSERVED_FREEZE);
+		const [net, data, frames] = healthFacts(OBSERVED_FREEZE, T, FREEZE_CARRIED);
 
 		expect(net.ok).toBe(true);
 		expect(data.ok).toBe(true);
@@ -117,11 +151,11 @@ describe('the observed freeze', () => {
 		// A fresh session is the recovery, so whether this is session one or
 		// session two is the difference between "try again" and "this is the
 		// known freeze".
-		expect(frameFact(OBSERVED_FREEZE).note).toContain('session 2');
+		expect(frameFact(OBSERVED_FREEZE, T, FREEZE_CARRIED).note).toContain('session 2');
 	});
 
 	it('leads with what still works', () => {
-		const diagnosis = diagnose(OBSERVED_FREEZE, { sinceBurstSettledS: 200 });
+		const diagnosis = diagnose(OBSERVED_FREEZE, T, { sinceBurstSettledS: 200, carriedPushAgeS: FREEZE_CARRIED });
 		expect(diagnosis.state).toBe('frames_stalled');
 		expect(healthSummary(diagnosis)).toMatch(/net and its data are fine/i);
 	});
@@ -131,6 +165,7 @@ describe('summaries for the new states', () => {
 	it('says a busy worker has not been found dead', () => {
 		const diagnosis = diagnose(
 			sync({ reachable: false, reason: 'worker_busy', transport: null }),
+			T,
 			{ sinceBurstSettledS: 60 },
 		);
 		expect(diagnosis.state).toBe('worker_busy');
@@ -142,7 +177,7 @@ describe('summaries for the new states', () => {
 			sync({ reachable: false, reason: 'subprocess_gone', transport: null }),
 			sync({ transport: transport({ alive: false }) }),
 		]) {
-			const diagnosis = diagnose(s, { sinceBurstSettledS: 60 });
+			const diagnosis = diagnose(s, T, { sinceBurstSettledS: 60 });
 			expect(diagnosis.state).toBe('subprocess_gone');
 			expect(healthSummary(diagnosis)).toMatch(/subprocess has died/);
 			expect(healthSummary(diagnosis)).toMatch(/nets are unaffected/);
@@ -152,8 +187,8 @@ describe('summaries for the new states', () => {
 
 describe('copyable diagnostics', () => {
 	it('carries the evidence rather than just the conclusion', () => {
-		const diagnosis = diagnose(OBSERVED_FREEZE, { sinceBurstSettledS: 200 });
-		const text = diagnosticsText(OBSERVED_FREEZE, diagnosis, 'nb-1');
+		const diagnosis = diagnose(OBSERVED_FREEZE, T, { sinceBurstSettledS: 200, carriedPushAgeS: FREEZE_CARRIED });
+		const text = diagnosticsText(OBSERVED_FREEZE, diagnosis, 'nb-1', T, FREEZE_CARRIED);
 
 		expect(text).toContain('nb-1');
 		expect(text).toContain('frames_stalled');

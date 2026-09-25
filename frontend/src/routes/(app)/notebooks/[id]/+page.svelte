@@ -23,7 +23,11 @@
 	} from '$lib/api';
 	import NotebookOccupancyBanner from '$lib/components/NotebookOccupancyBanner.svelte';
 	import NotebookLoadConfirm from '$lib/components/NotebookLoadConfirm.svelte';
-	import { diagnose, planRemount, type Diagnosis } from '$lib/notebookSync';
+	import { diagnose, planRemount, undrawnPushAgeS, type Diagnosis } from '$lib/notebookSync';
+	import {
+		loadNotebookThresholds,
+		type NotebookViewerThresholds,
+	} from '$lib/notebookThresholds';
 	import { serverEventsStore } from '$lib/stores/serverEvents';
 	import NotebookLoadPanel from '$lib/components/NotebookLoadPanel.svelte';
 	import NotebookHealthPanel from '$lib/components/NotebookHealthPanel.svelte';
@@ -133,7 +137,19 @@
 	// freshness indicator being the one thing worse than none.
 	let syncState = $state<NotebookSync | null>(null);
 	let syncPoll: ReturnType<typeof setTimeout> | null = null;
-	const SYNC_POLL_MS = 5000;
+
+	// Served by the control plane. Until they arrive the badge reads
+	// "checking" and no remount is planned. The poll interval is one of them,
+	// so while they are missing the page retries on this delay instead.
+	let thresholds = $state<NotebookViewerThresholds | null>(null);
+	const THRESHOLDS_RETRY_MS = 5000;
+
+	// The oldest push the kernel has not drawn yet, on this page's monotonic
+	// clock. A report names only the latest push, and a net stepping every few
+	// seconds keeps that young while the page stays frozen, so the page keeps
+	// the earlier one until a frame newer than it arrives.
+	let undrawnPushAt: number | null = null;
+	let carriedPushAgeS = $state<number | null>(null);
 
 	// Self-heal state. `remountHistory` holds the epoch seconds of automatic
 	// remounts; planRemount prunes it to its sliding window, so a recovery
@@ -150,23 +166,40 @@
 	let diagnosis = $state<Diagnosis | null>(null);
 
 	async function pollSync() {
+		if (thresholds === null) {
+			thresholds = await loadNotebookThresholds().catch(() => null);
+		}
 		if (notebook?.load_state !== 'loaded') {
 			syncState = null;
 			diagnosis = null;
+			// A new subprocess starts with no frames, so a push remembered
+			// from the old one would read as undrawn.
+			undrawnPushAt = null;
+			carriedPushAgeS = null;
 		} else {
 			try {
-				syncState = await getNotebookSync(notebookId);
-				diagnosis = diagnose(syncState, {
+				const reading = await getNotebookSync(notebookId);
+				const nowS = performance.now() / 1000;
+				const carried = undrawnPushAt === null ? null : nowS - undrawnPushAt;
+				const undrawn = undrawnPushAgeS(reading, carried);
+				undrawnPushAt = undrawn === null ? null : nowS - undrawn;
+				carriedPushAgeS = carried;
+				syncState = reading;
+				diagnosis = diagnose(reading, thresholds, {
 					sinceBurstSettledS: sinceBurstSettledS(),
+					carriedPushAgeS: carried,
 				});
 				considerRemount();
 			} catch {
 				// A failed poll says nothing about the notebook, only about
-				// this request — so leave the last reading in place and let its
+				// this request, so leave the last reading in place and let its
 				// age speak for itself on the next render.
 			}
 		}
-		syncPoll = setTimeout(pollSync, SYNC_POLL_MS);
+		syncPoll = setTimeout(
+			pollSync,
+			thresholds ? thresholds.sync_poll_s * 1000 : THRESHOLDS_RETRY_MS,
+		);
 	}
 
 	// The render channel is the half of this system nothing used to watch. It
@@ -177,7 +210,8 @@
 	// so its socket is invisible from here. The worker counts it and we act on
 	// what it reports.
 	function considerRemount() {
-		if (!diagnosis) return;
+		// No thresholds, no budget: a remount planned without one is a guess.
+		if (!diagnosis || !thresholds) return;
 
 		if (remountPending) {
 			// One is already queued. Do not consult the plan again — polls
@@ -192,7 +226,7 @@
 			return;
 		}
 
-		const plan = planRemount(diagnosis, remountHistory, Date.now() / 1000);
+		const plan = planRemount(diagnosis, remountHistory, Date.now() / 1000, thresholds);
 		remountHistory = plan.history;
 		remountExhausted = plan.exhausted;
 		if (!plan.remount) return;
@@ -509,6 +543,8 @@
 		remountHistory = [];
 		remountExhausted = false;
 		burstSettledAt = null;
+		undrawnPushAt = null;
+		carriedPushAgeS = null;
 		try {
 			if (notebook.load_state === 'loaded') {
 				await unloadNotebook(notebookId);
@@ -636,6 +672,8 @@
 				<NotebookHealthPanel
 					sync={syncState}
 					{diagnosis}
+					{thresholds}
+					{carriedPushAgeS}
 					{notebookId}
 					onact={diagnosis.action === 'remount' ? remountNow : handleReload}
 				/>

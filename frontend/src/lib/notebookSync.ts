@@ -1,4 +1,5 @@
 import type { NotebookSync, NotebookSyncSlot } from './api';
+import { slotInterval, type NotebookViewerThresholds } from './notebookThresholds';
 
 /**
  * Deciding what is actually wrong with a notebook, and what to do about it.
@@ -20,16 +21,10 @@ import type { NotebookSync, NotebookSyncSlot } from './api';
  * with every slot reporting a sub-second sync age, because its browser had not
  * opened a socket yet. `diagnose` reads both, so the states below name a
  * specific broken hop instead of a general unease.
+ *
+ * Every threshold arrives as an argument (`NotebookViewerThresholds`, served
+ * by the control plane), so these functions hold no numbers of their own.
  */
-
-/** A slot syncs roughly every reconcile interval (5s server-side). Three
- *  missed intervals is past explaining away as jitter or a slow round trip. */
-export const STALE_AFTER_S = 15;
-
-/** The subprocess reports on every pass, so silence for six intervals means
- *  the subprocess itself is gone — a different failure from "it is running and
- *  telling us it cannot reach the net". */
-export const SILENT_AFTER_S = 30;
 
 export type SyncState = 'live' | 'syncing' | 'stale' | 'disconnected';
 
@@ -47,17 +42,32 @@ const COLOURS: Record<SyncState, string> = {
 	disconnected: '#ef4444',
 };
 
-export function slotSyncState(slot: NotebookSyncSlot): SyncState {
+/**
+ * One slot's freshness, judged against its own cadence.
+ *
+ * The bridge widens its check interval when fetches are slow, up to a minute,
+ * so a fixed age would call a deliberately backed-off notebook stale. Stale is
+ * `stale_intervals` missed intervals, silent is `silent_intervals`, where the
+ * interval is the one the slot reports (or the default when it reports none).
+ */
+export function slotSyncState(
+	slot: NotebookSyncSlot,
+	thresholds: NotebookViewerThresholds,
+): SyncState {
+	const interval = slotInterval(slot, thresholds);
 	// Checked first: if the subprocess has gone quiet, everything else it told
-	// us is only getting older, however healthy it looked at the time.
-	if (slot.report_age_s > SILENT_AFTER_S) return 'disconnected';
+	// us is only getting older, however healthy it looked at the time. Silence
+	// for several intervals means the subprocess itself is gone, a different
+	// failure from "it is running and telling us it cannot reach the net".
+	if (slot.report_age_s > thresholds.silent_intervals * interval) return 'disconnected';
 	// Reporting, but unable to reach its net — the data on screen is frozen at
 	// whatever it last managed to read.
 	if (slot.last_error) return 'stale';
 	// Null age means no successful sync has ever happened, which is the normal
 	// state for a second or two after opening. Distinct from an age of 0.
 	if (slot.last_sync_age_s === null) return 'syncing';
-	if (slot.last_sync_age_s > STALE_AFTER_S) return 'stale';
+	// A few missed intervals is past explaining away as jitter or a slow round trip.
+	if (slot.last_sync_age_s > thresholds.stale_intervals * interval) return 'stale';
 	return 'live';
 }
 
@@ -65,14 +75,15 @@ export function syncColour(state: SyncState): string {
 	return COLOURS[state];
 }
 
-function describeSlot(slot: NotebookSyncSlot): string {
-	const state = slotSyncState(slot);
+function describeSlot(slot: NotebookSyncSlot, thresholds: NotebookViewerThresholds): string {
+	const state = slotSyncState(slot, thresholds);
 	const parts = [`${slot.slot_name}: ${state}`];
 	if (slot.last_sync_age_s !== null) {
 		parts.push(`synced ${slot.last_sync_age_s.toFixed(0)}s ago`);
 	} else {
 		parts.push('never synced');
 	}
+	if (slot.reconcile_interval_s) parts.push(`checking every ${slot.reconcile_interval_s.toFixed(0)}s`);
 	if (slot.step_count !== null) parts.push(`step ${slot.step_count}`);
 	if (slot.last_error) parts.push(slot.last_error);
 	return parts.join(' · ');
@@ -90,13 +101,17 @@ export interface SyncBadge {
  * a notebook with no bindings has no freshness to report, and inventing a
  * reassuring badge for it would be worse than showing none.
  */
-export function syncBadge(slots: NotebookSyncSlot[] | null | undefined): SyncBadge | null {
+export function syncBadge(
+	slots: NotebookSyncSlot[] | null | undefined,
+	thresholds: NotebookViewerThresholds,
+): SyncBadge | null {
 	if (!slots || slots.length === 0) return null;
 
+	const stateOf = (slot: NotebookSyncSlot) => slotSyncState(slot, thresholds);
 	const worst = slots.reduce((acc, slot) =>
-		SEVERITY[slotSyncState(slot)] > SEVERITY[slotSyncState(acc)] ? slot : acc,
+		SEVERITY[stateOf(slot)] > SEVERITY[stateOf(acc)] ? slot : acc,
 	);
-	const state = slotSyncState(worst);
+	const state = stateOf(worst);
 
 	let label: string = state;
 	if (state === 'stale' && worst.last_sync_age_s !== null) {
@@ -106,7 +121,7 @@ export function syncBadge(slots: NotebookSyncSlot[] | null | undefined): SyncBad
 	return {
 		state,
 		label,
-		title: slots.map(describeSlot).join('\n'),
+		title: slots.map((slot) => describeSlot(slot, thresholds)).join('\n'),
 		colour: syncColour(state),
 	};
 }
@@ -114,29 +129,56 @@ export function syncBadge(slots: NotebookSyncSlot[] | null | undefined): SyncBad
 // -- the render channel ---------------------------------------------------
 
 /**
- * Mirrored from petritype-server's `petritype_server/timeouts.py`, which
- * documents the reasoning and holds the ordering tests. Duplicated rather than
- * fetched because a page that has lost contact with the control plane still
- * has to decide what to do, and asking it for its own deadlines at that moment
- * is the worst possible time.
+ * How long the oldest push into marimo that no frame has followed has been
+ * waiting, in seconds before this reading, or null when every push has been
+ * drawn or there was never one.
+ *
+ * A frame is only owed after a push: a notebook watching a five-minute net
+ * draws nothing between steps, and judging frame age against the wall clock
+ * called that "not drawing" for most of every cycle. The slot's
+ * `last_push_age_s` is aged at the report's stamp, which is itself
+ * `report_age_s` old, so the push happened `report_age_s + last_push_age_s`
+ * before this reading; `last_frame_age_s` is on the same worker clock. A
+ * frame younger than a push has drawn it.
+ *
+ * A report names only the latest push, and a net that steps every few seconds
+ * pushes every few seconds, so its latest push is always young even when the
+ * page froze minutes ago. `carriedAgeS` is the page's memory of the oldest
+ * undrawn push from earlier readings, rebased to this one: it counts until a
+ * frame newer than it arrives. Feeding this function's result back in, rebased
+ * by the time between polls, is what keeps that memory.
  */
+export function undrawnPushAgeS(
+	sync: NotebookSync,
+	carriedAgeS: number | null = null,
+): number | null {
+	const frameAge = sync.transport?.last_frame_age_s ?? null;
+	const pushAges = (sync.slots ?? [])
+		.filter((slot) => slot.last_push_age_s !== null && slot.last_push_age_s !== undefined)
+		.map((slot) => slot.report_age_s + (slot.last_push_age_s as number));
+	if (carriedAgeS !== null) pushAges.push(carriedAgeS);
+	const undrawn = pushAges.filter((pushAge) => frameAge === null || frameAge > pushAge);
+	return undrawn.length === 0 ? null : Math.max(...undrawn);
+}
 
-/** From the asset burst settling to a socket the worker can see. Measured from
- *  burst settle, not from the iframe's load event: a cold spawn's burst has
- *  been observed at 61s, and a remount restarts it from nothing. */
-export const WS_OPEN_DEADLINE_S = 45;
-
-/** Session open, no frame from the kernel. Well under the relay's own 120s
- *  pong deadline, so this verdict lands while the socket is still nominally
- *  alive — otherwise "no frames" and "no socket" collapse into one. */
-export const FRAME_STALL_S = 30;
-
-/** Socket open and slots bound, but the bridge has never reported. Covers the
- *  cell run that starts it, not just the reconciler's 5s cadence. */
-export const BRIDGE_START_DEADLINE_S = 30;
+/**
+ * Whether the page has stopped drawing: a push more than `frame_stall_s` ago
+ * with no frame relayed since. The threshold sits well under the relay's own
+ * 120s pong deadline, so this verdict lands while the socket is still
+ * nominally alive; otherwise "no frames" and "no socket" collapse into one.
+ */
+export function framesStalled(
+	sync: NotebookSync,
+	thresholds: NotebookViewerThresholds,
+	carriedAgeS: number | null = null,
+): boolean {
+	const waited = undrawnPushAgeS(sync, carriedAgeS);
+	return waited !== null && waited > thresholds.frame_stall_s;
+}
 
 export type NotebookState =
 	| SyncState
+	| 'checking'
 	| 'connecting'
 	| 'no_transport'
 	| 'frames_stalled'
@@ -167,6 +209,7 @@ export interface Diagnosis {
 }
 
 const TRANSPORT_COLOURS: Record<string, string> = {
+	checking: '#9ca3af',
 	connecting: '#eab308',
 	no_transport: '#ef4444',
 	frames_stalled: '#ef4444',
@@ -192,6 +235,12 @@ export function stateColour(state: NotebookState): string {
  */
 export interface DiagnoseContext {
 	sinceBurstSettledS: number | null;
+	/**
+	 * The oldest undrawn push the page remembers from earlier polls, rebased
+	 * to this reading (see `undrawnPushAgeS`). Null or absent when it
+	 * remembers none, and then only this reading's pushes count.
+	 */
+	carriedPushAgeS?: number | null;
 }
 
 const SUBPROCESS_GONE: Diagnosis = {
@@ -202,13 +251,30 @@ const SUBPROCESS_GONE: Diagnosis = {
 };
 
 /**
+ * What the page shows before the thresholds have loaded. Takes no action:
+ * a remount decided without its budget is a guess.
+ */
+export const CHECKING: Diagnosis = {
+	state: 'checking',
+	action: 'none',
+	label: 'checking',
+	detail: 'Loading the thresholds this page judges by.',
+};
+
+/**
  * Name the broken hop and say what to do, from server-side evidence only.
  *
  * Ordered most-authoritative first. A notebook whose worker is unreachable has
  * nothing useful to say about its own websocket, so later checks must not get
  * the chance to contradict an earlier one with staler evidence.
  */
-export function diagnose(sync: NotebookSync, ctx: DiagnoseContext): Diagnosis {
+export function diagnose(
+	sync: NotebookSync,
+	thresholds: NotebookViewerThresholds | null,
+	ctx: DiagnoseContext,
+): Diagnosis {
+	if (thresholds === null) return { ...CHECKING };
+
 	if (sync.reachable === false) {
 		if (sync.reason === 'no_worker' || sync.reason === 'not_loaded') {
 			return {
@@ -247,7 +313,7 @@ export function diagnose(sync: NotebookSync, ctx: DiagnoseContext): Diagnosis {
 		// An older worker or control plane. Fall back to what we can see and
 		// take no action: inventing a transport failure here would remount a
 		// page over a channel we simply have no reporting for.
-		const badge = syncBadge(sync.slots);
+		const badge = syncBadge(sync.slots, thresholds);
 		return {
 			state: badge?.state ?? 'syncing',
 			action: 'none',
@@ -267,7 +333,7 @@ export function diagnose(sync: NotebookSync, ctx: DiagnoseContext): Diagnosis {
 		// chance yet — remounting mid-burst restarts the fetch and makes a slow
 		// open into an unbounded one.
 		const waited = ctx.sinceBurstSettledS;
-		if (waited === null || waited < WS_OPEN_DEADLINE_S) {
+		if (waited === null || waited < thresholds.ws_open_deadline_s) {
 			return {
 				state: 'connecting',
 				action: 'none',
@@ -291,7 +357,8 @@ export function diagnose(sync: NotebookSync, ctx: DiagnoseContext): Diagnosis {
 	const expectsBridge = (sync.bindings ?? sync.slots.length) > 0;
 	if (expectsBridge && transport.first_report_age_s === null) {
 		const sinceOpen = transport.last_ws_open_age_s ?? 0;
-		if (sinceOpen < BRIDGE_START_DEADLINE_S) {
+		// Covers the cell run that starts the bridge, not just its cadence.
+		if (sinceOpen < thresholds.bridge_start_deadline_s) {
 			return {
 				state: 'connecting',
 				action: 'none',
@@ -307,22 +374,24 @@ export function diagnose(sync: NotebookSync, ctx: DiagnoseContext): Diagnosis {
 		};
 	}
 
-	const frameAge = transport.last_frame_age_s;
-	if (frameAge === null || frameAge > FRAME_STALL_S) {
+	const carried = ctx.carriedPushAgeS ?? null;
+	if (framesStalled(sync, thresholds, carried)) {
+		const waited = undrawnPushAgeS(sync, carried) ?? 0;
 		return {
 			state: 'frames_stalled',
 			action: 'reload',
 			label: 'not drawing',
 			detail:
-				frameAge === null
-					? 'Connected, but the notebook has never drawn anything.'
-					: `Connected, but nothing has been drawn for ${frameAge.toFixed(0)}s.`,
+				transport.last_frame_age_s === null
+					? `Connected, but the notebook has never drawn anything; its data changed ${waited.toFixed(0)}s ago.`
+					: `Connected, but the notebook's data changed ${waited.toFixed(0)}s ago and nothing has been drawn since.`,
 		};
 	}
 
-	// The channel is carrying. Whatever is left is the bridge falling behind,
-	// which the slot ages already describe better than anything here could.
-	const badge = syncBadge(sync.slots);
+	// The channel is carrying, or has had nothing new to carry. Whatever is
+	// left is the bridge falling behind, which the slot ages already describe
+	// better than anything here could.
+	const badge = syncBadge(sync.slots, thresholds);
 	if (!badge) {
 		return {
 			state: 'live',
@@ -345,21 +414,10 @@ export function diagnose(sync: NotebookSync, ctx: DiagnoseContext): Diagnosis {
 // -- self-heal policy -----------------------------------------------------
 
 /**
- * The automatic remount budget: at most `REMOUNT_BUDGET` remounts in any
- * `REMOUNT_WINDOW_S` window (three in fifteen minutes). Once spent, the page
- * stops guessing and says so (exhausted) until the oldest remount ages out of
- * the window.
- *
- * Mirrored for documentation in petritype-server's timeouts.py, which still
- * names the older per-outage cap NOTEBOOK_REMOUNT_MAX_ATTEMPTS; whoever
- * updates that mirror should replace it with REMOUNT_BUDGET and
- * REMOUNT_WINDOW_S, and keep NOTEBOOK_REMOUNT_BACKOFF_S matching
- * REMOUNT_BACKOFF_S.
+ * The automatic remount budget: at most `remount_budget` remounts in any
+ * `remount_window_s` window. Once spent, the page stops guessing and says so
+ * (exhausted) until the oldest remount ages out of the window.
  */
-export const REMOUNT_BUDGET = 3;
-export const REMOUNT_WINDOW_S = 900;
-/** Delay before a remount, indexed by how many remounts are already in the window. */
-export const REMOUNT_BACKOFF_S = [5, 20];
 
 export interface RemountPlan {
 	/** Remount the iframe after `delayS`. */
@@ -398,18 +456,20 @@ export function planRemount(
 	diagnosis: Diagnosis,
 	history: readonly number[],
 	nowS: number,
+	thresholds: NotebookViewerThresholds,
 ): RemountPlan {
-	const recent = history.filter((t) => t > nowS - REMOUNT_WINDOW_S);
+	const { remount_budget: budget, remount_window_s: window, remount_backoff_s: backoff } =
+		thresholds;
+	const recent = history.filter((t) => t > nowS - window);
 	if (diagnosis.action !== 'remount') {
 		return { remount: false, delayS: 0, exhausted: false, history: recent };
 	}
-	if (recent.length >= REMOUNT_BUDGET) {
+	if (recent.length >= budget) {
 		return { remount: false, delayS: 0, exhausted: true, history: recent };
 	}
 	// Backing off between tries, because the common cause of a slow connect is
 	// a busy worker, and remounting immediately adds a fresh asset burst to
 	// whatever is already saturating it.
-	const delayS =
-		REMOUNT_BACKOFF_S[recent.length] ?? REMOUNT_BACKOFF_S[REMOUNT_BACKOFF_S.length - 1];
+	const delayS = backoff[recent.length] ?? backoff[backoff.length - 1];
 	return { remount: true, delayS, exhausted: false, history: [...recent, nowS + delayS] };
 }

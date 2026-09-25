@@ -11,6 +11,7 @@
 	import type { NotebookSync } from '$lib/api';
 	import type { Diagnosis } from '$lib/notebookSync';
 	import { stateColour } from '$lib/notebookSync';
+	import type { NotebookViewerThresholds } from '$lib/notebookThresholds';
 	import {
 		actionLabel,
 		diagnosticsText,
@@ -21,17 +22,22 @@
 	interface Props {
 		sync: NotebookSync;
 		diagnosis: Diagnosis;
+		/** Null until served; the frame row then reads "checking". */
+		thresholds: NotebookViewerThresholds | null;
+		/** The oldest undrawn push the page remembers, as passed to `diagnose`. */
+		carriedPushAgeS?: number | null;
 		notebookId: string;
 		/** Runs the diagnosis's own suggested recovery. */
 		onact?: () => void;
 	}
 
-	let { sync, diagnosis, notebookId, onact }: Props = $props();
+	let { sync, diagnosis, thresholds, carriedPushAgeS = null, notebookId, onact }: Props =
+		$props();
 
 	let open = $state(false);
 	let copied = $state(false);
 
-	let facts = $derived(healthFacts(sync));
+	let facts = $derived(healthFacts(sync, thresholds, carriedPushAgeS));
 	let summary = $derived(healthSummary(diagnosis));
 	let action = $derived(actionLabel(diagnosis));
 	// A healthy notebook has nothing to explain, so the badge stays a badge.
@@ -40,7 +46,7 @@
 	async function copyDiagnostics() {
 		try {
 			await navigator.clipboard.writeText(
-				diagnosticsText(sync, diagnosis, notebookId),
+				diagnosticsText(sync, diagnosis, notebookId, thresholds, carriedPushAgeS),
 			);
 			copied = true;
 			setTimeout(() => (copied = false), 2000);

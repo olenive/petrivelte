@@ -23,6 +23,7 @@ import type { NotebookSync, WiringNotebook, WiringResponse, WiringWorker } from 
 import { dataFact, netFact } from '$lib/notebookHealth';
 import { describeLoadError } from '$lib/notebookLoadReason';
 import { slotSyncState } from '$lib/notebookSync';
+import type { NotebookViewerThresholds } from '$lib/notebookThresholds';
 
 // -- sections -------------------------------------------------------------
 
@@ -248,6 +249,9 @@ function errorsLine(errorCount: number): string[] {
  * there are no slots, and a notebook bound to nothing would otherwise render
  * as healthily tracking something it has never been given.
  *
+ * `thresholds` is null until the control plane has served them; a loaded row
+ * reads `checking` until then.
+ *
  * `errorCount` never changes the verdict — a notebook can be tracking
  * perfectly and still have raised exceptions, and collapsing the two would
  * lose whichever the reader was looking for. It is named in the tooltip only;
@@ -256,6 +260,7 @@ function errorsLine(errorCount: number): string[] {
 export function notebookBadge(
 	notebook: BadgeSource,
 	sync: NotebookSync | null,
+	thresholds: NotebookViewerThresholds | null,
 	errorCount = 0,
 	ctx: BadgeContext = {},
 ): NotebookIndexBadge {
@@ -322,6 +327,11 @@ export function notebookBadge(
 	if (!sync) {
 		return badge('checking', 'checking…', ['Waiting for this notebook’s sync report.']);
 	}
+	// A loaded row's freshness is judged against served thresholds, and
+	// judging it before they arrive would be a guess.
+	if (!thresholds) {
+		return badge('checking', 'checking…', ['Loading the thresholds this page judges by.']);
+	}
 
 	if (sync.reachable === false) {
 		if (sync.reason === 'worker_busy') {
@@ -360,11 +370,12 @@ export function notebookBadge(
 	const facts = [factLine(net), factLine(data)];
 
 	const unsynced = slots.filter((s) => !s.synced).map((s) => s.slot_name);
-	// The report's own age carries the thresholds (`notebookSync.ts` owns them):
-	// a slot whose subprocess went quiet keeps reporting whatever it last
-	// managed to read, so `synced` alone would stay true while the data rots.
+	// The report's own age, judged against the slot's cadence by
+	// `slotSyncState`: a slot whose subprocess went quiet keeps reporting
+	// whatever it last managed to read, so `synced` alone would stay true
+	// while the data rots.
 	const behind = slots.filter((s) => {
-		const state = slotSyncState(s);
+		const state = slotSyncState(s, thresholds);
 		return state === 'stale' || state === 'disconnected';
 	});
 
@@ -372,7 +383,7 @@ export function notebookBadge(
 		const lines = [...facts];
 		if (unsynced.length > 0) lines.push(`not synced: ${unsynced.join(', ')}`);
 		if (behind.length > 0) {
-			lines.push(`behind: ${behind.map((s) => `${s.slot_name} (${slotSyncState(s)})`).join(', ')}`);
+			lines.push(`behind: ${behind.map((s) => `${s.slot_name} (${slotSyncState(s, thresholds)})`).join(', ')}`);
 		}
 		return badge('stale', 'stale', lines, data.value);
 	}

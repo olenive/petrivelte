@@ -1,17 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import type { NotebookSync, NotebookSyncSlot, NotebookTransport } from './api';
-import {
-	BRIDGE_START_DEADLINE_S,
-	FRAME_STALL_S,
-	REMOUNT_BACKOFF_S,
-	REMOUNT_BUDGET,
-	REMOUNT_WINDOW_S,
-	WS_OPEN_DEADLINE_S,
-	diagnose,
-	planRemount,
-	stateColour,
-} from './notebookSync';
+import { diagnose, planRemount, stateColour, undrawnPushAgeS } from './notebookSync';
+import { testThresholds } from './notebookThresholds.testing';
 
 /**
  * Telling apart the ways a notebook stops showing you the truth.
@@ -37,6 +28,9 @@ const slot = (over: Partial<NotebookSyncSlot> = {}): NotebookSyncSlot => ({
 	last_error: null,
 	last_sync_age_s: 1,
 	report_age_s: 1,
+	marking_version: 3,
+	reconcile_interval_s: null,
+	last_push_age_s: 0.5,
 	...over,
 });
 
@@ -60,12 +54,22 @@ const sync = (over: Partial<NotebookSync> = {}): NotebookSync => ({
 	...over,
 });
 
+const T = testThresholds();
+const {
+	bridge_start_deadline_s: BRIDGE_START_DEADLINE_S,
+	frame_stall_s: FRAME_STALL_S,
+	remount_backoff_s: REMOUNT_BACKOFF_S,
+	remount_budget: REMOUNT_BUDGET,
+	remount_window_s: REMOUNT_WINDOW_S,
+	ws_open_deadline_s: WS_OPEN_DEADLINE_S,
+} = T;
+
 /** Long past every deadline, so nothing is excused as still starting up. */
 const settled = { sinceBurstSettledS: 300 };
 
 describe('diagnose', () => {
 	it('is live when the bridge is fresh and frames are flowing', () => {
-		const d = diagnose(sync(), settled);
+		const d = diagnose(sync(), T, settled);
 
 		expect(d.state).toBe('live');
 		expect(d.action).toBe('none');
@@ -76,6 +80,7 @@ describe('diagnose', () => {
 		// healthy; nobody is looking at any of it.
 		const d = diagnose(
 			sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 0 }) }),
+			T,
 			settled,
 		);
 
@@ -89,6 +94,7 @@ describe('diagnose', () => {
 		// inside that window restarts the fetch and makes a slow open endless.
 		const loading = diagnose(
 			sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 0 }) }),
+			T,
 			{ sinceBurstSettledS: WS_OPEN_DEADLINE_S - 1 },
 		);
 
@@ -101,6 +107,7 @@ describe('diagnose', () => {
 		// is measured from burst settle for the reason above.
 		const d = diagnose(
 			sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 0 }) }),
+			T,
 			{ sinceBurstSettledS: null },
 		);
 
@@ -111,10 +118,12 @@ describe('diagnose', () => {
 		// Different causes, and a remount walks back into the second one.
 		const never = diagnose(
 			sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 0 }) }),
+			T,
 			settled,
 		);
 		const dropped = diagnose(
 			sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 4 }) }),
+			T,
 			settled,
 		);
 
@@ -125,6 +134,7 @@ describe('diagnose', () => {
 	it('catches a notebook that connected but never started tracking', () => {
 		const d = diagnose(
 			sync({ transport: transport({ first_report_age_s: null }) }),
+			T,
 			settled,
 		);
 
@@ -142,6 +152,7 @@ describe('diagnose', () => {
 					last_ws_open_age_s: BRIDGE_START_DEADLINE_S - 1,
 				}),
 			}),
+			T,
 			settled,
 		);
 
@@ -155,6 +166,7 @@ describe('diagnose', () => {
 				bindings: 0,
 				transport: transport({ first_report_age_s: null }),
 			}),
+			T,
 			settled,
 		);
 
@@ -164,18 +176,23 @@ describe('diagnose', () => {
 
 	it('catches a wedged kernel holding its socket open', () => {
 		// The failure the relay's own pings can never see: the socket is fine,
-		// the kernel just stopped sending.
+		// the kernel was handed new state and drew nothing.
 		const d = diagnose(
-			sync({ transport: transport({ last_frame_age_s: FRAME_STALL_S + 1 }) }),
+			sync({
+				slots: [slot({ report_age_s: 1, last_push_age_s: FRAME_STALL_S })],
+				transport: transport({ last_frame_age_s: FRAME_STALL_S + 10 }),
+			}),
+			T,
 			settled,
 		);
 
 		expect(d.state).toBe('frames_stalled');
 		expect(d.action).toBe('reload');
+		expect(d.detail).toContain('31s ago');
 	});
 
 	it('reports a stalled bridge behind a working channel', () => {
-		const d = diagnose(sync({ slots: [slot({ last_sync_age_s: 120 })] }), settled);
+		const d = diagnose(sync({ slots: [slot({ last_sync_age_s: 120 })] }), T, settled);
 
 		expect(d.state).toBe('bridge_stalled');
 		expect(d.action).toBe('reload');
@@ -184,10 +201,12 @@ describe('diagnose', () => {
 	it('names each way of being unreachable', () => {
 		const noWorker = diagnose(
 			sync({ reachable: false, reason: 'no_worker', transport: null }),
+			T,
 			settled,
 		);
 		const unreachable = diagnose(
 			sync({ reachable: false, reason: 'worker_unreachable', transport: null }),
+			T,
 			settled,
 		);
 
@@ -200,7 +219,7 @@ describe('diagnose', () => {
 
 	it('reports a dead subprocess as such rather than as a transport fault', () => {
 		// An older worker keeps the dead entry and answers with a dead transport.
-		const d = diagnose(sync({ transport: transport({ alive: false }) }), settled);
+		const d = diagnose(sync({ transport: transport({ alive: false }) }), T, settled);
 
 		expect(d.state).toBe('subprocess_gone');
 		expect(d.label).toBe('subprocess gone');
@@ -210,6 +229,7 @@ describe('diagnose', () => {
 	it('reads a worker that no longer knows the notebook as subprocess gone', () => {
 		const d = diagnose(
 			sync({ reachable: false, reason: 'subprocess_gone', transport: null }),
+			T,
 			settled,
 		);
 
@@ -225,6 +245,7 @@ describe('diagnose', () => {
 		// A saturated worker is not a dead one; reloading would only add load.
 		const d = diagnose(
 			sync({ reachable: false, reason: 'worker_busy', transport: null }),
+			T,
 			settled,
 		);
 
@@ -239,6 +260,7 @@ describe('diagnose', () => {
 	it('keeps a refused connection as unreachable', () => {
 		const d = diagnose(
 			sync({ reachable: false, reason: 'worker_unreachable', transport: null }),
+			T,
 			settled,
 		);
 
@@ -250,7 +272,7 @@ describe('diagnose', () => {
 		// An older worker. Absent evidence must degrade to the freshness-only
 		// badge — inventing a transport failure would remount a page over a
 		// channel we simply have no reporting for.
-		const d = diagnose(sync({ transport: null }), settled);
+		const d = diagnose(sync({ transport: null }), T, settled);
 
 		expect(d.state).toBe('live');
 		expect(d.action).toBe('none');
@@ -259,6 +281,7 @@ describe('diagnose', () => {
 	it('still surfaces slot staleness without a transport block', () => {
 		const d = diagnose(
 			sync({ transport: undefined, slots: [slot({ last_sync_age_s: 120 })] }),
+			T,
 			settled,
 		);
 
@@ -271,9 +294,10 @@ describe('diagnose', () => {
 		// the nets page indicator lacks.
 		const broken = diagnose(
 			sync({ transport: transport({ ws_sessions: 0 }) }),
+			T,
 			settled,
 		);
-		const fixed = diagnose(sync(), settled);
+		const fixed = diagnose(sync(), T, settled);
 
 		expect(broken.state).toBe('no_transport');
 		expect(fixed.state).toBe('live');
@@ -290,13 +314,201 @@ describe('diagnose', () => {
 	});
 });
 
+describe('diagnose before the thresholds have loaded', () => {
+	it('reads checking and takes no action, whatever the report says', () => {
+		const reports = [
+			sync(),
+			sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 0 }) }),
+			sync({ slots: [slot({ last_sync_age_s: 999, report_age_s: 999 })] }),
+			sync({ reachable: false, reason: 'worker_unreachable', transport: null }),
+		];
+		for (const report of reports) {
+			const d = diagnose(report, null, settled);
+			expect(d.state).toBe('checking');
+			expect(d.label).toBe('checking');
+			expect(d.action).toBe('none');
+		}
+	});
+
+	it('plans no remount for a checking diagnosis', () => {
+		const d = diagnose(
+			sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 0 }) }),
+			null,
+			settled,
+		);
+		const plan = planRemount(d, [], 1_000_000, T);
+
+		expect(plan.remount).toBe(false);
+		expect(plan.exhausted).toBe(false);
+	});
+
+	it('has a colour of its own', () => {
+		expect(stateColour('checking')).not.toBe(stateColour('live'));
+	});
+});
+
+describe('frame stall is relative to the last push', () => {
+	// A notebook watching a five-minute net draws nothing between steps. Frame
+	// age against the wall clock wore "not drawing" for most of every cycle
+	// while the kernel was synced. A frame is owed only after a push.
+
+	it('is not drawing when a push older than frame_stall_s has no frame after it', () => {
+		const d = diagnose(
+			sync({
+				slots: [slot({ report_age_s: 2, last_push_age_s: 40 })],
+				transport: transport({ last_frame_age_s: 300 }),
+			}),
+			T,
+			settled,
+		);
+
+		expect(d.state).toBe('frames_stalled');
+	});
+
+	it('is live when the last frame followed the last push, however old both are', () => {
+		const d = diagnose(
+			sync({
+				slots: [slot({ report_age_s: 2, last_push_age_s: 240 })],
+				transport: transport({ last_frame_age_s: 230 }),
+			}),
+			T,
+			settled,
+		);
+
+		expect(d.state).toBe('live');
+	});
+
+	it('gives a fresh push frame_stall_s to be drawn', () => {
+		const d = diagnose(
+			sync({
+				slots: [slot({ report_age_s: 2, last_push_age_s: FRAME_STALL_S - 5 })],
+				transport: transport({ last_frame_age_s: 300 }),
+			}),
+			T,
+			settled,
+		);
+
+		expect(d.state).toBe('live');
+	});
+
+	it('ages the push from the report stamp, not from the reading', () => {
+		// The push age is measured when the subprocess reports; the report is
+		// itself report_age_s old by the time the worker answers. 25 + 10 is
+		// past the 30 s threshold although neither number is on its own.
+		const d = diagnose(
+			sync({
+				slots: [slot({ report_age_s: 10, last_push_age_s: 25, last_sync_age_s: 1 })],
+				transport: transport({ last_frame_age_s: 40 }),
+			}),
+			T,
+			settled,
+		);
+
+		expect(d.state).toBe('frames_stalled');
+		expect(d.detail).toContain('35s ago');
+	});
+
+	it('is not a fault when nothing has ever been pushed', () => {
+		const d = diagnose(
+			sync({
+				slots: [slot({ last_push_age_s: null })],
+				transport: transport({ last_frame_age_s: null, frames_relayed: 0 }),
+			}),
+			T,
+			settled,
+		);
+
+		expect(d.state).toBe('live');
+		expect(d.action).toBe('none');
+	});
+
+	it('is not drawing when a push was never followed by any frame', () => {
+		const d = diagnose(
+			sync({
+				slots: [slot({ report_age_s: 1, last_push_age_s: 45 })],
+				transport: transport({ last_frame_age_s: null, frames_relayed: 0 }),
+			}),
+			T,
+			settled,
+		);
+
+		expect(d.state).toBe('frames_stalled');
+		expect(d.detail).toContain('never drawn');
+	});
+
+	it('judges each slot: one undrawn push is enough', () => {
+		const d = diagnose(
+			sync({
+				slots: [
+					slot({ slot_name: 'drawn', report_age_s: 1, last_push_age_s: 100 }),
+					slot({ slot_name: 'undrawn', report_age_s: 1, last_push_age_s: 40 }),
+				],
+				bindings: 2,
+				transport: transport({ last_frame_age_s: 60 }),
+			}),
+			T,
+			settled,
+		);
+
+		expect(d.state).toBe('frames_stalled');
+	});
+
+	it('remembers an undrawn push across polls while the net keeps pushing', () => {
+		// A net stepping every few seconds keeps its latest push young, so one
+		// reading alone never sees a frozen page. The page carries the oldest
+		// undrawn push forward, rebased by the time between polls.
+		const reading = (frameAge: number) =>
+			sync({
+				slots: [slot({ report_age_s: 1, last_push_age_s: 2 })],
+				transport: transport({ last_frame_age_s: frameAge }),
+			});
+		let carried: number | null = null;
+		let frameAge = 10;
+		const states: string[] = [];
+		for (let poll = 0; poll < 12; poll++) {
+			const r = reading(frameAge);
+			states.push(diagnose(r, T, { ...settled, carriedPushAgeS: carried }).state);
+			const undrawn = undrawnPushAgeS(r, carried);
+			carried = undrawn === null ? null : undrawn + 5;
+			frameAge += 5;
+		}
+
+		// The first undrawn push was seen 3 s old at poll 0, so it passes 30 s
+		// between polls 5 and 6.
+		expect(states.slice(0, 6).every((st) => st === 'live')).toBe(true);
+		expect(states.slice(6).every((st) => st === 'frames_stalled')).toBe(true);
+	});
+
+	it('drops a remembered push once a newer frame has drawn it', () => {
+		const r = sync({
+			slots: [slot({ report_age_s: 1, last_push_age_s: 2 })],
+			transport: transport({ last_frame_age_s: 1 }),
+		});
+
+		expect(undrawnPushAgeS(r, 60)).toBeNull();
+		expect(diagnose(r, T, { ...settled, carriedPushAgeS: 60 }).state).toBe('live');
+	});
+
+	it('reads frame_stall_s from the thresholds', () => {
+		const report = sync({
+			slots: [slot({ report_age_s: 1, last_push_age_s: 14 })],
+			transport: transport({ last_frame_age_s: 100 }),
+		});
+
+		expect(diagnose(report, T, settled).state).toBe('live');
+		expect(diagnose(report, testThresholds({ frame_stall_s: 10 }), settled).state).toBe(
+			'frames_stalled',
+		);
+	});
+});
+
 describe('planRemount', () => {
 	const broken = { state: 'no_transport', action: 'remount', label: '', detail: '' } as const;
 	const healthy = { state: 'live', action: 'none', label: '', detail: '' } as const;
 	const T0 = 1_000_000;
 
 	/** Drive the policy the way the page does: one plan per poll, carrying history. */
-	const remountAt = (history: readonly number[], nowS: number) => planRemount(broken, history, nowS);
+	const remountAt = (history: readonly number[], nowS: number) => planRemount(broken, history, nowS, T);
 
 	it('remounts on the first transport failure', () => {
 		const plan = remountAt([], T0);
@@ -342,7 +554,7 @@ describe('planRemount', () => {
 		for (let i = 0; i < REMOUNT_BUDGET; i++) {
 			history = remountAt(history, now).history;
 			now += 60;
-			const recovered = planRemount(healthy, history, now);
+			const recovered = planRemount(healthy, history, now, T);
 			expect(recovered.history).toEqual(history);
 			history = recovered.history;
 			now += 60;
@@ -364,8 +576,18 @@ describe('planRemount', () => {
 	it('never remounts for a failure a remount cannot fix', () => {
 		const wedged = { state: 'frames_stalled', action: 'reload', label: '', detail: '' } as const;
 
-		expect(planRemount(wedged, [], T0).remount).toBe(false);
-		expect(planRemount(wedged, [], T0).exhausted).toBe(false);
+		expect(planRemount(wedged, [], T0, T).remount).toBe(false);
+		expect(planRemount(wedged, [], T0, T).exhausted).toBe(false);
+	});
+
+	it('reads budget, window and backoff from the thresholds', () => {
+		const tight = testThresholds({ remount_budget: 1, remount_window_s: 60, remount_backoff_s: [7] });
+
+		const first = planRemount(broken, [], T0, tight);
+		expect(first.delayS).toBe(7);
+		expect(planRemount(broken, first.history, T0 + 10, tight).exhausted).toBe(true);
+		// The window is 60 s here, so the remount stamped at T0 + 7 ages out by T0 + 68.
+		expect(planRemount(broken, first.history, T0 + 68, tight).remount).toBe(true);
 	});
 
 	it('returns the pruned history unchanged for a diagnosis that needs no remount', () => {
@@ -373,7 +595,7 @@ describe('planRemount', () => {
 		const history = [T0 - REMOUNT_WINDOW_S - 10, T0 - 300, T0 - 30];
 
 		for (const diagnosis of [connecting, healthy]) {
-			const plan = planRemount(diagnosis, history, T0);
+			const plan = planRemount(diagnosis, history, T0, T);
 			expect(plan.remount).toBe(false);
 			expect(plan.exhausted).toBe(false);
 			expect(plan.history).toEqual([T0 - 300, T0 - 30]);

@@ -16,6 +16,9 @@ import {
 	viewersHint,
 	workerHeader,
 } from './notebookIndex';
+import { testThresholds } from './notebookThresholds.testing';
+
+const T = testThresholds();
 
 /**
  * The index's badge is a different measurement from the notebook page's, and
@@ -37,6 +40,9 @@ function slot(over: Partial<NotebookSyncSlot> = {}): NotebookSyncSlot {
 		last_error: null,
 		last_sync_age_s: 0.4,
 		report_age_s: 0.4,
+		marking_version: 7,
+		reconcile_interval_s: 5,
+		last_push_age_s: 0.2,
 		...over,
 	};
 }
@@ -109,13 +115,13 @@ function wiring(over: Partial<WiringResponse> = {}): WiringResponse {
 
 describe('the badge table', () => {
 	it('reads an unloaded notebook as unloaded', () => {
-		const badge = notebookBadge(notebook({ load_state: 'unloaded' }), null);
+		const badge = notebookBadge(notebook({ load_state: 'unloaded' }), null, T);
 		expect(badge.name).toBe('unloaded');
 		expect(badge.label).toBe('unloaded');
 	});
 
 	it('reads a loading notebook as loading', () => {
-		const badge = notebookBadge(notebook({ load_state: 'loading', load_error: null }), null);
+		const badge = notebookBadge(notebook({ load_state: 'loading', load_error: null }), null, T);
 		expect(badge.name).toBe('loading');
 		expect(badge.label).toBe('loading…');
 	});
@@ -124,6 +130,7 @@ describe('the badge table', () => {
 		const badge = notebookBadge(
 			notebook({ load_state: 'loading', load_error: 'spawning subprocess' }),
 			null,
+			T,
 		);
 		expect(badge.label).toBe('loading… spawning subprocess');
 	});
@@ -132,20 +139,21 @@ describe('the badge table', () => {
 		const badge = notebookBadge(
 			notebook({ load_state: 'error', load_error: 'subprocess_gone' }),
 			null,
+			T,
 		);
 		expect(badge.name).toBe('error');
 		expect(badge.title).toContain('subprocess_gone');
 	});
 
 	it('reads a loaded, reachable, fully synced notebook as tracking', () => {
-		const badge = notebookBadge(notebook(), sync());
+		const badge = notebookBadge(notebook(), sync(), T);
 		expect(badge.name).toBe('tracking');
 		// The words come from netFact, not from a second opinion invented here.
 		expect(badge.detail).toBe('step 4,213');
 	});
 
 	it('reads a slot that is not synced as stale', () => {
-		const badge = notebookBadge(notebook(), sync({ slots: [slot({ synced: false })] }));
+		const badge = notebookBadge(notebook(), sync({ slots: [slot({ synced: false })] }), T);
 		expect(badge.name).toBe('stale');
 		expect(badge.title).toContain('not synced: traffic');
 	});
@@ -156,6 +164,7 @@ describe('the badge table', () => {
 		const badge = notebookBadge(
 			notebook(),
 			sync({ slots: [slot({ synced: true, report_age_s: 120, last_sync_age_s: 120 })] }),
+			T,
 		);
 		expect(badge.name).toBe('stale');
 		expect(badge.detail).toContain('updated');
@@ -165,6 +174,7 @@ describe('the badge table', () => {
 		const badge = notebookBadge(
 			notebook({ load_state: 'unloaded', load_error: 'idle_eviction' }),
 			null,
+			T,
 		);
 		expect(badge.name).toBe('unloaded');
 		expect(badge.label).toBe('unloaded');
@@ -182,7 +192,7 @@ describe('the badge table', () => {
 			'subprocess_exited',
 			'subprocess_gone',
 		]) {
-			const badge = notebookBadge(notebook({ load_state: 'unloaded', load_error: code }), null);
+			const badge = notebookBadge(notebook({ load_state: 'unloaded', load_error: code }), null, T);
 			expect(badge.name, code).toBe('unloaded');
 			expect(badge.label, code).toBe('unloaded');
 			expect(badge.colour, code).toBe('#ef4444');
@@ -195,6 +205,7 @@ describe('the badge table', () => {
 		const badge = notebookBadge(
 			notebook({ load_state: 'unloaded', load_error: 'oom_killed' }),
 			null,
+			T,
 			0,
 			{ workerMemoryMb: 2048 },
 		);
@@ -203,7 +214,7 @@ describe('the badge table', () => {
 	});
 
 	it('keeps the plain unloaded badge when no reason is recorded', () => {
-		const badge = notebookBadge(notebook({ load_state: 'unloaded', load_error: null }), null);
+		const badge = notebookBadge(notebook({ load_state: 'unloaded', load_error: null }), null, T);
 		expect(badge.colour).toBe('#9ca3af');
 		expect(badge.detail).toBeNull();
 		expect(badge.title).toBe('The notebook subprocess is not running. Load starts it.');
@@ -213,6 +224,7 @@ describe('the badge table', () => {
 		const badge = notebookBadge(
 			notebook(),
 			sync({ reachable: false, reason: 'worker_busy', slots: [] }),
+			T,
 		);
 		expect(badge.name).toBe('busy');
 		expect(badge.label).toBe('worker busy');
@@ -223,6 +235,7 @@ describe('the badge table', () => {
 		const badge = notebookBadge(
 			notebook(),
 			sync({ reachable: false, reason: 'subprocess_gone', slots: [] }),
+			T,
 		);
 		expect(badge.name).toBe('gone');
 		expect(badge.label).toBe('subprocess gone');
@@ -239,6 +252,7 @@ describe('the badge table', () => {
 				transport: transport({ alive: false }),
 				slots: [slot({ synced: true, report_age_s: 600, last_sync_age_s: 600 })],
 			}),
+			T,
 		);
 		expect(badge.name).toBe('gone');
 		expect(badge.label).toBe('subprocess gone');
@@ -248,6 +262,7 @@ describe('the badge table', () => {
 		const badge = notebookBadge(
 			notebook(),
 			sync({ transport: transport({ alive: false }), slots: [], bindings: 0 }),
+			T,
 		);
 		expect(badge.name).toBe('gone');
 	});
@@ -256,24 +271,53 @@ describe('the badge table', () => {
 		const badge = notebookBadge(
 			notebook(),
 			sync({ reachable: false, reason: 'worker_unreachable', slots: [] }),
+			T,
 		);
 		expect(badge.name).toBe('unreachable');
 	});
 
 	it('reads a loaded notebook with no bindings as idle, not tracking', () => {
-		const badge = notebookBadge(notebook(), sync({ slots: [], bindings: 0 }));
+		const badge = notebookBadge(notebook(), sync({ slots: [], bindings: 0 }), T);
 		expect(badge.name).toBe('idle');
 	});
 
+	it('reads checking for a loaded row until the thresholds have loaded', () => {
+		const stale = sync({ slots: [slot({ last_sync_age_s: 999, report_age_s: 999 })] });
+		for (const report of [sync(), stale]) {
+			const badge = notebookBadge(notebook(), report, null);
+			expect(badge.name).toBe('checking');
+			expect(badge.label).toBe('checking…');
+			expect(badge.title).toContain('thresholds');
+		}
+	});
+
+	it('still says why an unloaded row is unloaded before the thresholds load', () => {
+		// Load state needs no thresholds, so it is not held back by them.
+		expect(notebookBadge(notebook({ load_state: 'unloaded' }), null, null).name).toBe('unloaded');
+		expect(notebookBadge(notebook({ load_state: 'error' }), null, null).name).toBe('error');
+	});
+
+	it('judges a backed-off slot against its own interval', () => {
+		// Sixty seconds between checks: fifty seconds old is on time, not stale.
+		const backedOff = sync({
+			slots: [slot({ reconcile_interval_s: 60, last_sync_age_s: 50, report_age_s: 50 })],
+		});
+		expect(notebookBadge(notebook(), backedOff, T).name).toBe('tracking');
+		const onDefault = sync({
+			slots: [slot({ reconcile_interval_s: null, last_sync_age_s: 50, report_age_s: 50 })],
+		});
+		expect(notebookBadge(notebook(), onDefault, T).name).toBe('stale');
+	});
+
 	it('says it is still checking when the sync has not arrived yet', () => {
-		expect(notebookBadge(notebook(), null).name).toBe('checking');
+		expect(notebookBadge(notebook(), null, T).name).toBe('checking');
 	});
 
 	it('does not let error groups change the verdict', () => {
 		// A notebook can track its net perfectly and still have raised
 		// exceptions; collapsing the two loses whichever one was being looked for.
-		const clean = notebookBadge(notebook(), sync(), 0);
-		const noisy = notebookBadge(notebook(), sync(), 3);
+		const clean = notebookBadge(notebook(), sync(), T, 0);
+		const noisy = notebookBadge(notebook(), sync(), T, 3);
 		expect(noisy.name).toBe(clean.name);
 		expect(noisy.label).toBe(clean.label);
 		expect(noisy.title).toContain('3 error groups');
@@ -281,7 +325,7 @@ describe('the badge table', () => {
 
 	it('does not treat an empty tab count as a fault', () => {
 		// The index has no iframe open, so this is the ordinary healthy case.
-		const badge = notebookBadge(notebook(), sync({ transport: transport({ ws_sessions: 0 }) }));
+		const badge = notebookBadge(notebook(), sync({ transport: transport({ ws_sessions: 0 }) }), T);
 		expect(badge.name).toBe('tracking');
 		expect(viewersHint(sync({ transport: transport({ ws_sessions: 0 }) }))).toBeNull();
 	});
