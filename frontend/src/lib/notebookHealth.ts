@@ -38,9 +38,17 @@ function ageLabel(seconds: number | null): string {
 	if (seconds === null) return 'never';
 	if (seconds < 1) return 'just now';
 	if (seconds < 60) return `${seconds.toFixed(0)}s ago`;
-	const minutes = Math.floor(seconds / 60);
-	const rest = Math.round(seconds % 60);
-	return `${minutes}m ${rest}s ago`;
+	if (seconds < 3600) {
+		const minutes = Math.floor(seconds / 60);
+		const rest = Math.round(seconds % 60);
+		return `${minutes}m ${rest}s ago`;
+	}
+	// Past an hour the seconds are noise, and minutes alone grow into
+	// four-digit counts nobody reads at a glance.
+	const totalMinutes = Math.floor(seconds / 60);
+	const hours = Math.floor(totalMinutes / 60);
+	if (hours < 24) return `${hours}h ${totalMinutes % 60}m ago`;
+	return `${Math.floor(hours / 24)}d ${hours % 24}h ago`;
 }
 
 function countLabel(n: number): string {

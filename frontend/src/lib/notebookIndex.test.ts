@@ -173,10 +173,90 @@ describe('the badge table', () => {
 		expect(badge.detail).toBe('step 4,213');
 	});
 
-	it('reads a slot that is not synced as stale', () => {
-		const badge = notebookBadge(notebook(), sync({ slots: [slot({ synced: false })] }), T);
+	it('reads a slot waiting for its first sync as syncing, not stale', () => {
+		const badge = notebookBadge(
+			notebook(),
+			sync({ slots: [slot({ synced: false, last_sync_age_s: null })] }),
+			T,
+		);
+		expect(badge.name).toBe('syncing');
+		expect(badge.label).toBe('syncing…');
+		expect(badge.colour).toBe('#eab308');
+		expect(badge.title).toContain('waiting for the first sync: traffic');
+	});
+
+	it('reads a slot that reports an error as stale', () => {
+		const badge = notebookBadge(
+			notebook(),
+			sync({ slots: [slot({ synced: false, last_error: 'net unreachable' })] }),
+			T,
+		);
 		expect(badge.name).toBe('stale');
-		expect(badge.title).toContain('not synced: traffic');
+		expect(badge.label).toBe('stale');
+		expect(badge.title).toContain('behind: traffic (stale)');
+		expect(badge.title).toContain('error: traffic: net unreachable');
+	});
+
+	it('reads a loaded notebook nobody has opened as loaded, never stale', () => {
+		// The bridge starts from a notebook cell, so before the first open there
+		// is no report. The slot is a leftover from the previous subprocess.
+		const badge = notebookBadge(
+			notebook(),
+			sync({
+				transport: transport({ first_report_age_s: null, ws_opened_total: 0 }),
+				slots: [slot({ synced: true, last_sync_age_s: 71992, report_age_s: 71992 })],
+			}),
+			T,
+		);
+		expect(badge.name).toBe('loaded');
+		expect(badge.label).toBe('loaded');
+		expect(badge.detail).toBe('not opened yet');
+	});
+
+	it('gives a just-opened notebook time for its bridge to start', () => {
+		const badge = notebookBadge(
+			notebook(),
+			sync({
+				transport: transport({
+					first_report_age_s: null,
+					ws_opened_total: 1,
+					last_ws_open_age_s: 5,
+				}),
+				slots: [],
+			}),
+			T,
+		);
+		expect(badge.name).toBe('syncing');
+		expect(badge.label).toBe('starting…');
+	});
+
+	it('reads a bridge that never started after an open as not tracking', () => {
+		const badge = notebookBadge(
+			notebook(),
+			sync({
+				transport: transport({
+					first_report_age_s: null,
+					ws_opened_total: 1,
+					last_ws_open_age_s: T.bridge_start_deadline_s + 1,
+				}),
+				slots: [],
+			}),
+			T,
+		);
+		expect(badge.name).toBe('stale');
+		expect(badge.label).toBe('not tracking');
+	});
+
+	it('reads a reporting bridge with no slots for its bindings as not tracking', () => {
+		const badge = notebookBadge(notebook(), sync({ slots: [], bindings: 1 }), T);
+		expect(badge.name).toBe('stale');
+		expect(badge.label).toBe('not tracking');
+		expect(badge.title).toContain('1 binding');
+	});
+
+	it('still reads a healthy slot as tracking from a worker without a transport block', () => {
+		const badge = notebookBadge(notebook(), sync({ transport: null }), T);
+		expect(badge.name).toBe('tracking');
 	});
 
 	it('reads a bridge report that has gone quiet as stale', () => {

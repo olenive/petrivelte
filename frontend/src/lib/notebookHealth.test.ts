@@ -97,6 +97,16 @@ describe('the three facts', () => {
 			.toBe('updated 5m 0s ago');
 	});
 
+	it('reads ages past an hour in hours and past a day in days', () => {
+		const age = (s: number) =>
+			dataFact(sync({ slots: [slot({ last_sync_age_s: s, report_age_s: 0.4 })] })).value;
+		expect(age(3599)).toBe('updated 59m 59s ago');
+		expect(age(3600)).toBe('updated 1h 0m ago');
+		expect(age(71439)).toBe('updated 19h 50m ago');
+		expect(age(86400)).toBe('updated 1d 0h ago');
+		expect(age(2 * 86400 + 3 * 3600 + 59)).toBe('updated 2d 3h ago');
+	});
+
 	it('reports a live render channel with its frame count', () => {
 		expect(frameFact(sync(), T)).toMatchObject({ ok: true, note: '900 updates received' });
 	});

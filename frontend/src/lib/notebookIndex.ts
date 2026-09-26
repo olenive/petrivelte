@@ -14,6 +14,16 @@
  * only as a muted "viewed in N tabs" hint, which is information rather than a
  * verdict.
  *
+ * The bridge (the code in the notebook subprocess that follows its nets and
+ * posts the sync report) starts from a notebook cell, and cells run only once
+ * a browser opens the notebook. Once started it keeps reporting after the tab
+ * closes. So "no report yet" on a notebook nobody has opened since it loaded
+ * is the normal state, shown as `loaded` / "not opened yet", and never as
+ * stale. After an open the bridge is allowed `bridge_start_deadline_s` to
+ * report (`syncing` / "starting…"); past that it reads `stale` / "not
+ * tracking". Once it has reported, a slot still waiting for its first sync
+ * reads `syncing`, and only a slot that is behind or erroring reads `stale`.
+ *
  * Pure and fetch-free, like `notebookHealth.ts` and `notebookOccupancy.ts`:
  * the interesting part is a table of cases, and a table is worth asserting
  * without a browser.
@@ -194,7 +204,9 @@ export type NotebookBadgeName =
 	| 'busy'
 	| 'gone'
 	| 'idle'
-	| 'checking';
+	| 'checking'
+	| 'loaded'
+	| 'syncing';
 
 export interface NotebookIndexBadge {
 	name: NotebookBadgeName;
@@ -218,6 +230,9 @@ const COLOURS: Record<NotebookBadgeName, string> = {
 	gone: '#ef4444',
 	idle: '#6b7280',
 	checking: '#9ca3af',
+	// Calm blue-grey: fine, and waiting for someone to open it.
+	loaded: '#64748b',
+	syncing: '#eab308',
 };
 
 /** The fields of a notebook row the badge is allowed to read. The idle
@@ -375,27 +390,70 @@ export function notebookBadge(
 		]);
 	}
 
+	// The bridge starts from a notebook cell, and cells run only once a browser
+	// opens the notebook. So a notebook nobody has opened since it loaded has no
+	// bridge and no report, and that is the normal waiting state rather than a
+	// fault. Any slots in the payload here are leftovers from an earlier run of
+	// the subprocess and say nothing about this one.
+	const transport = sync.transport;
+	if (transport && transport.first_report_age_s === null) {
+		if (transport.ws_opened_total === 0) {
+			return badge(
+				'loaded',
+				'loaded',
+				[
+					'The notebook process is running. It starts following its nets the first time someone opens it.',
+				],
+				'not opened yet',
+			);
+		}
+		const openAge = transport.last_ws_open_age_s;
+		if (openAge === null || openAge < thresholds.bridge_start_deadline_s) {
+			return badge('syncing', 'starting…', [
+				'Opened; waiting for the notebook to start tracking its nets.',
+			]);
+		}
+		return badge('stale', 'not tracking', [
+			'Opened, but the notebook never started tracking its nets.',
+		]);
+	}
+
+	// The bridge has reported, or the worker predates the transport block.
+	if (slots.length === 0) {
+		return badge('stale', 'not tracking', [
+			`The notebook is running but reports no slots for its ${bindings} binding${bindings === 1 ? '' : 's'}.`,
+		]);
+	}
+
 	const net = netFact(sync);
 	const data = dataFact(sync);
 	const facts = [factLine(net), factLine(data)];
 
-	const unsynced = slots.filter((s) => !s.synced).map((s) => s.slot_name);
-	// The report's own age, judged against the slot's cadence by
-	// `slotSyncState`: a slot whose subprocess went quiet keeps reporting
-	// whatever it last managed to read, so `synced` alone would stay true
-	// while the data rots.
-	const behind = slots.filter((s) => {
-		const state = slotSyncState(s, thresholds);
-		return state === 'stale' || state === 'disconnected';
-	});
-
-	if (unsynced.length > 0 || behind.length > 0 || data.ok === false) {
-		const lines = [...facts];
-		if (unsynced.length > 0) lines.push(`not synced: ${unsynced.join(', ')}`);
-		if (behind.length > 0) {
-			lines.push(`behind: ${behind.map((s) => `${s.slot_name} (${slotSyncState(s, thresholds)})`).join(', ')}`);
-		}
+	// Each slot judged by `slotSyncState`, which reads the report's own age
+	// against the slot's cadence: a slot whose subprocess went quiet keeps
+	// reporting whatever it last managed to read, so `synced` alone would stay
+	// true while the data rots.
+	const judged = slots.map((s) => ({ slot: s, state: slotSyncState(s, thresholds) }));
+	const behind = judged.filter((j) => j.state === 'stale' || j.state === 'disconnected');
+	if (behind.length > 0) {
+		const lines = [
+			...facts,
+			`behind: ${behind.map((j) => `${j.slot.slot_name} (${j.state})`).join(', ')}`,
+			...slots
+				.filter((s) => s.last_error)
+				.map((s) => `error: ${s.slot_name}: ${s.last_error}`),
+		];
 		return badge('stale', 'stale', lines, data.value);
+	}
+
+	const waiting = judged.filter((j) => j.state === 'syncing').map((j) => j.slot.slot_name);
+	if (waiting.length > 0) {
+		return badge(
+			'syncing',
+			'syncing…',
+			[...facts, `waiting for the first sync: ${waiting.join(', ')}`],
+			data.value,
+		);
 	}
 
 	return badge('tracking', 'tracking', facts, net.value);

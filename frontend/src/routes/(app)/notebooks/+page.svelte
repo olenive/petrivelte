@@ -111,6 +111,13 @@
 
 	const sections = $derived(wiring ? groupByWorker(wiring) : []);
 	const notebookCount = $derived(wiring?.notebooks.length ?? 0);
+	/** The name of the notebook a pending load confirmation is about. */
+	const pendingName = $derived.by(() => {
+		if (!pendingRefusal) return null;
+		const id = pendingRefusal.id;
+		const row = wiring?.notebooks.find((n) => n.id === id);
+		return row ? row.instance_name || row.definition_name : null;
+	});
 
 	function message(e: unknown): string {
 		return e instanceof Error ? e.message : String(e);
@@ -534,6 +541,7 @@
 
 	{#if pendingRefusal}
 		<NotebookLoadConfirm
+			notebookName={pendingName ?? 'this notebook'}
 			refusal={pendingRefusal.refusal}
 			busy={busyId === pendingRefusal.id}
 			onconfirm={confirmPending}

@@ -14,13 +14,16 @@
 	import type { AdditionalNotebookRefusal } from '$lib/api';
 
 	interface Props {
+		/** The notebook being loaded. Named in the heading so the dialog cannot
+		 *  be mistaken for one about a notebook it lists as already running. */
+		notebookName: string;
 		refusal: AdditionalNotebookRefusal;
 		busy?: boolean;
 		onconfirm: () => void;
 		oncancel: () => void;
 	}
 
-	let { refusal, busy = false, onconfirm, oncancel }: Props = $props();
+	let { notebookName, refusal, busy = false, onconfirm, oncancel }: Props = $props();
 
 	let capacity = $derived(refusal.occupancy?.memory?.container_total_mb ?? null);
 	let available = $derived(refusal.occupancy?.memory?.container_available_mb ?? null);
@@ -38,7 +41,8 @@
 </script>
 
 <div class="max-w-2xl mx-auto mt-12 px-6">
-	<h2 class="text-lg font-medium">This worker is already running another notebook</h2>
+	<h2 class="text-lg font-medium">Load {notebookName}?</h2>
+	<p class="mt-1 text-sm">This worker is already running another notebook.</p>
 	<p class="mt-2 text-sm text-foreground-muted">
 		Notebooks are the largest processes on a worker. Starting another is fine
 		if there is room for it — here is what is running now.

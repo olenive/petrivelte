@@ -51,15 +51,30 @@ The notebook page's badge (`live`, `not drawing`, `connecting`, …) measures th
 `ws_sessions === 0` is normal there and must not read as a fault. Index badges
 derive from `load_state` plus `/sync`, never from `frameFact`:
 
+The bridge (the code in the notebook subprocess that follows its nets and
+posts the `/sync` report) starts from a notebook cell, and cells run only once
+a browser opens the notebook. Once started it keeps reporting after the tab
+closes, until the subprocess dies. So a notebook nobody has opened since it
+loaded has no report at all, and that is normal: it reads `loaded`, never
+`stale`. `transport.first_report_age_s === null` is how the index knows the
+bridge has not reported in this subprocess; any slots in the payload then are
+leftovers from an earlier run and are ignored.
+
 | badge          | when                                                                 |
 |----------------|----------------------------------------------------------------------|
 | `unloaded`     | `load_state === 'unloaded'`                                          |
 | `loading …`    | `load_state === 'loading'`, phase from the notebook row when present |
 | `error`        | `load_state === 'error'`; `load_error` as the title attribute        |
-| `tracking`     | loaded, `/sync` reachable, every slot `synced`                       |
-| `stale`        | loaded, reachable, a slot not `synced` or bridge report too old      |
-| `unreachable`  | loaded, `/sync` `reachable: false`                                   |
+| `unreachable`  | loaded, `/sync` `reachable: false` (`busy`/`gone` for those reasons) |
+| `gone`         | loaded, `transport.alive === false`                                  |
 | `idle`         | loaded, no bindings                                                  |
+| `loaded`       | bridge never reported, never opened: "not opened yet", blue-grey     |
+| `syncing`      | "starting…": bridge never reported, opened under `bridge_start_deadline_s` ago |
+| `stale`        | "not tracking": bridge never reported, opened longer ago than that   |
+| `stale`        | "not tracking": bridge reported, but no slots for its bindings       |
+| `stale`        | bridge reported, a slot `stale` or `disconnected` by `slotSyncState` |
+| `syncing`      | "syncing…": bridge reported, a slot waiting for its first sync       |
+| `tracking`     | bridge reported (or no transport block), every slot `live`           |
 
 Reuse `netFact` and `dataFact` from `lib/notebookHealth.ts` for the words and
 thresholds; do not duplicate their logic. Show "viewed in N tabs" from

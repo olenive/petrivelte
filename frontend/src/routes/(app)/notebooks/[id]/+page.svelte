@@ -868,6 +868,7 @@
 	<!-- Ahead of `initialising`: the load stopped to ask a question, so the
 	     load panel would be counting up a wait that is not happening. -->
 	<NotebookLoadConfirm
+		notebookName={notebook?.instance_name ?? 'this notebook'}
 		refusal={pendingRefusal}
 		{busy}
 		onconfirm={() => ensureLoaded(true)}
