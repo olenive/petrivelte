@@ -1,14 +1,14 @@
 <script lang="ts">
 	import { onMount, onDestroy, tick } from 'svelte';
 	import {
-		listWorkers, createWorker, deleteWorker, provisionWorker, destroyWorkerResource,
+		listWorkers, getWiring, createWorker, deleteWorker, provisionWorker, destroyWorkerResource,
 		startWorker, stopWorker, healthCheckWorker, getWorker,
 		listNets, createNet, patchNet, loadNet, unloadNet,
 		listNetSecrets, setNetSecrets,
 		listDeployments,
 		listNotebooks,
 		type Worker, type WorkerDetail, type Net, type NetParam, type SecretMetadata,
-		type Deployment, type Notebook,
+		type Deployment, type Notebook, type ControlPlaneBuild,
 	} from '$lib/api';
 	import AppNav from '$lib/components/AppNav.svelte';
 	import DataLoadState from '$lib/components/DataLoadState.svelte';
@@ -17,6 +17,7 @@
 	import { isOperationEvent, isRunEvent, serverEventsStore } from '$lib/stores/serverEvents';
 	import OperationStatus from '$lib/components/OperationStatus.svelte';
 	import ProvenanceChip from '$lib/components/ProvenanceChip.svelte';
+	import { buildChip, controlPlaneShort } from '$lib/workerBuild';
 	import { notebooksOnWorker, workerDeleteWarning, workerDeletedMessage } from '$lib/workerDelete';
 	import {
 		applyOperationEvent,
@@ -271,6 +272,20 @@
 			notebooks = await listNotebooks();
 		} catch {
 			// non-fatal: the list only feeds the delete warning's count
+		}
+	}
+
+	// The control plane's own build, read once from the wiring payload: it
+	// changes only on a deploy, so polling it would buy nothing.
+	let controlPlaneBuild = $state<ControlPlaneBuild | null>(null);
+	let cpShort = $derived(controlPlaneShort(controlPlaneBuild));
+
+	async function refreshControlPlaneBuild() {
+		try {
+			controlPlaneBuild = (await getWiring()).control_plane_build ?? null;
+		} catch {
+			// non-fatal: without it the header omits the build and roll
+			// markers omit the command
 		}
 	}
 
@@ -866,6 +881,7 @@
 	});
 
 	onMount(async () => {
+		void refreshControlPlaneBuild();
 		await refreshAll();
 		seedFromNetErrors(nets);
 		startPolling();
@@ -892,6 +908,12 @@
 <AppNav title="Workers" />
 
 <div class="max-w-[900px] mx-auto p-8">
+
+	{#if cpShort}
+		<p class="text-xs text-foreground-muted font-mono mb-3" title={controlPlaneBuild?.commit ?? ''}>
+			control plane {cpShort}
+		</p>
+	{/if}
 
 	{#if errorMessage}
 		<div class="flex items-center justify-between px-4 py-3 bg-error-bg text-error rounded-md mb-4">
@@ -990,6 +1012,7 @@
 		{/snippet}
 		<div class="flex flex-col gap-2">
 			{#each workers as worker (worker.id)}
+				{@const build = buildChip(worker, controlPlaneBuild)}
 				<div class="border border-border rounded-md bg-card overflow-hidden">
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
 					<div
@@ -1017,6 +1040,20 @@
 									title="Loads, unloads and other slow operations running on this worker"
 								>
 									{worker.active_operations} operation{worker.active_operations === 1 ? '' : 's'} running
+								</span>
+							{/if}
+							<span
+								class="text-[11px] px-1.5 py-0.5 rounded border border-border text-foreground-muted whitespace-nowrap {worker.build_commit ? 'font-mono' : ''}"
+								title={build.chip.tooltip}
+							>
+								{build.chip.label}
+							</span>
+							{#if build.marker}
+								<span
+									class="text-[11px] px-1.5 py-0.5 rounded border border-status-warning text-status-warning whitespace-nowrap"
+									title={build.marker.tooltip}
+								>
+									{build.marker.label}
 								</span>
 							{/if}
 						</div>

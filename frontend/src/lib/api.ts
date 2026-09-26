@@ -798,6 +798,12 @@ export interface Worker {
 	active_operations?: number;
 	created_at: string;
 	updated_at: string;
+	/** The worker's build: its git commit, when the control plane first saw
+	 *  it, and whether it matches the control plane's own build (null when
+	 *  either side is unknown). Absent on an older control plane. */
+	build_commit?: string | null;
+	build_seen_at?: string | null;
+	build_matches_control_plane?: boolean | null;
 }
 
 export interface WorkerDetail extends Worker {
@@ -1613,6 +1619,12 @@ export interface WiringWorker {
 	cpus: number;
 	memory_used_mb: number | null;
 	memory_peak_mb: number | null;
+	/** The worker's build: its git commit, when the control plane first saw
+	 *  it, and whether it matches the control plane's own build (null when
+	 *  either side is unknown). Absent on an older control plane. */
+	build_commit?: string | null;
+	build_seen_at?: string | null;
+	build_matches_control_plane?: boolean | null;
 }
 
 export interface WiringNet {
@@ -1652,11 +1664,20 @@ export interface WiringBinding {
 	net_id: string;
 }
 
+/** The control plane's own build. Each field is null when unknown. */
+export interface ControlPlaneBuild {
+	commit: string | null;
+	short: string | null;
+	built_at: string | null;
+}
+
 export interface WiringResponse {
 	workers: WiringWorker[];
 	nets: WiringNet[];
 	notebooks: WiringNotebook[];
 	bindings: WiringBinding[];
+	/** Absent on an older control plane. */
+	control_plane_build?: ControlPlaneBuild | null;
 }
 
 export async function getWiring(): Promise<WiringResponse> {
