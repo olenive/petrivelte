@@ -3,8 +3,8 @@
  *
  * Populated from the worker's unified event stream (the same one
  * `connectRuntimeLogs` already opens), filtered for scope='worker'
- * kind='memory_stats'. Phase 1 of memory visibility — no soft
- * pre-emption yet, just letting the UI surface where RAM is going.
+ * kind='memory_stats'. Visibility only: the UI surfaces where RAM is
+ * going, and nothing here pre-empts a net or notebook for it.
  */
 
 import { writable } from 'svelte/store';

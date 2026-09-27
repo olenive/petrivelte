@@ -430,7 +430,8 @@ export function pendingLabel(
 // start and stop — but they mean a different thing, and "Activate" said about
 // a net that will do nothing for another nine hours is how a person concludes
 // the button did not work. Stop pauses the schedule and Start arms it (the
-// backend's `dev-docs/RUNS_AND_SCHEDULING.md`, decision 7), so on a cron net
+// scheduling policies decision in the backend's `dev-docs/RUNS_AND_SCHEDULING.md`),
+// so on a cron net
 // that is what the words say, and what they describe is the net's desired
 // execution state, the *intent* (`desired_execution_state`), rather than
 // whether something happens to be firing right now — an armed daily net is
