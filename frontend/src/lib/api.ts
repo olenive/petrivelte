@@ -587,6 +587,25 @@ export async function unloadNet(netId: string): Promise<void> {
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to unload net'));
 }
 
+/**
+ * The control plane's one-line verdict on a net: what state it is in, why,
+ * and what to do about it. ``state`` is a closed set on the server that may
+ * grow, so it is typed as a string and coloured through ``$lib/netDiagnose``.
+ */
+export interface NetDiagnosis {
+	state: string;
+	reason: string;
+	action: string;
+	facts: Record<string, unknown>;
+	checked_at: string;
+}
+
+export async function diagnoseNet(netId: string): Promise<NetDiagnosis> {
+	const res = await get(`/api/nets/${netId}/diagnose`);
+	if (!res.ok) throw new Error(extractErrorMessage(await res.json().catch(() => null), 'Failed to diagnose net'));
+	return res.json();
+}
+
 // -- net runs --
 //
 // The control plane's durable record of net executions: one row per run, a

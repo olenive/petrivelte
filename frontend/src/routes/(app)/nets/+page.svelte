@@ -20,6 +20,7 @@
 		listNets, listWorkers, patchNet, loadNet, unloadNet,
 		getExecutionState, executionStep, executionStart, executionStop, executionReset, executionInject,
 		listNetSecrets, setNetSecrets, getNetLogHistory, getExecutionHistory, runNetNow,
+		diagnoseNet, type NetDiagnosis,
 		type Net, type Worker, type NetParam, type SecretMetadata,
 	} from '$lib/api';
 	import GraphPanel from '$lib/components/GraphPanel.svelte';
@@ -30,10 +31,11 @@
 	import AppNav from '$lib/components/AppNav.svelte';
 	import DataLoadState from '$lib/components/DataLoadState.svelte';
 	import RunsPanel from '$lib/components/RunsPanel.svelte';
-	import { applyRunEvent, executionVerbs, pendingLabel, scheduleFacts } from '$lib/runs';
+	import { applyRunEvent, executionVerbs, formatStamp, pendingLabel, scheduleFacts } from '$lib/runs';
 	import { portal } from '$lib/actions/portal';
 	import { anomalyLabels, anomalySuffix } from '$lib/netAnomalies';
 	import { groupByDefinition } from '$lib/netInstances';
+	import { diagnoseClasses, diagnoseStateLabel } from '$lib/netDiagnose';
 	import type { GraphState, Token, LogEntry, Transition } from '$lib/types';
 	import {
 		TOKEN_DOT_MAX,
@@ -875,6 +877,29 @@
 	let definitionGroups = $derived(groupByDefinition(availableNets, workers));
 	let multiInstanceCount = $derived(definitionGroups.filter(g => g.instances.length > 1).length);
 
+	// Diagnose: fetched on click only, and kept with the net it was asked
+	// about so switching nets never shows another net's verdict.
+	let diagnosis = $state<{ netId: string; result: NetDiagnosis } | null>(null);
+	let diagnoseError = $state<{ netId: string; message: string } | null>(null);
+	let diagnosing = $state(false);
+
+	async function handleDiagnose() {
+		const netId = selectedNetId;
+		if (!netId) return;
+		diagnosing = true;
+		diagnoseError = null;
+		try {
+			diagnosis = { netId, result: await diagnoseNet(netId) };
+		} catch (e: any) {
+			diagnoseError = { netId, message: e.message ?? 'Failed to diagnose net' };
+		} finally {
+			diagnosing = false;
+		}
+	}
+
+	let shownDiagnosis = $derived(diagnosis && diagnosis.netId === selectedNetId ? diagnosis.result : null);
+	let shownDiagnoseError = $derived(diagnoseError && diagnoseError.netId === selectedNetId ? diagnoseError.message : null);
+
 	// The expression and the slot it points at, for a cron net.
 	let scheduleNote = $derived.by(() => scheduleFacts(selectedNet() ?? null));
 
@@ -1602,8 +1627,13 @@
 	<!-- What the selected net wants and cannot have, and where each
 	     definition runs. Outside the graph gate for the same reason as the
 	     schedule: these matter most when there is no graph to look at. -->
-	{#if selectedAnomalies.length > 0 || definitionGroups.length > 0}
+	{#if selectedNetId || definitionGroups.length > 0}
 		<div class="flex items-start gap-3 px-6 py-2 bg-card border-b border-border text-xs flex-wrap">
+			{#if selectedNetId}
+				<button class={btnSmall + ' text-xs'} onclick={handleDiagnose} disabled={diagnosing}
+					title="Ask the control plane what state this net is in, why, and what to do about it."
+				>{diagnosing ? 'Diagnosing…' : 'Diagnose'}</button>
+			{/if}
 			{#if selectedAnomalies.length > 0}
 				<div class="flex items-center gap-2 flex-wrap">
 					<span class="text-foreground-faint">Needs attention</span>
@@ -1636,6 +1666,28 @@
 						{/each}
 					</div>
 				</details>
+			{/if}
+			{#if shownDiagnoseError}
+				<span class="basis-full text-error">{shownDiagnoseError}</span>
+			{/if}
+			{#if shownDiagnosis}
+				{@const checked = formatStamp(shownDiagnosis.checked_at)}
+				<div class="basis-full flex flex-col gap-1">
+					<div class="flex items-center gap-2 flex-wrap">
+						<span class="px-2 py-0.5 rounded-sm font-medium {diagnoseClasses(shownDiagnosis.state)}">{diagnoseStateLabel(shownDiagnosis.state)}</span>
+						<span class="text-foreground">{shownDiagnosis.reason}</span>
+						{#if checked}
+							<span class="text-foreground-faint" title={checked.title}>checked {checked.text}</span>
+						{/if}
+					</div>
+					{#if shownDiagnosis.action}
+						<p class="text-foreground-muted">Next: {shownDiagnosis.action}</p>
+					{/if}
+					<details>
+						<summary class="cursor-pointer text-foreground-faint">Facts</summary>
+						<pre class="mt-1 p-2 rounded bg-muted text-foreground font-mono whitespace-pre-wrap break-all max-h-64 overflow-auto">{JSON.stringify(shownDiagnosis.facts, null, 2)}</pre>
+					</details>
+				</div>
 			{/if}
 		</div>
 	{/if}
