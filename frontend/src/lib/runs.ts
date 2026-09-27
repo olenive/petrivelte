@@ -516,7 +516,7 @@ export function executionVerbs(
  *   will not parse, or a control plane that predates the field. Saying so is
  *   the only honest answer; inventing one from the expression here would put
  *   a second cron implementation in the browser.
- * * `invalid` — the server says the schedule cannot be used, and `error`
+ * * `invalid`: the server says the schedule cannot be used, and `error`
  *   says why.
  */
 export type ScheduleKind = 'next' | 'due' | 'paused' | 'unknown' | 'invalid';
@@ -574,7 +574,7 @@ export function scheduleFacts(
 			expression: server.expression,
 			kind,
 			when: server.message,
-			title: `${server.expression} — ${server.message}`,
+			title: `${server.expression}: ${server.message}`,
 			pending: kind === 'due' ? pendingLabel(server, now) : null,
 			error,
 		};
