@@ -351,6 +351,10 @@ export interface NetParam {
 	/** The default as written in the factory's source, for display only.
 	 *  Optional: control planes predating this field omit it. */
 	default_display?: string | null;
+	/** How the text in the input box becomes the value sent to the factory,
+	 *  declared by the server. Optional: older control planes omit it, and the
+	 *  client then predicts the coercion from ``type``. */
+	coerce?: 'int' | 'float' | 'bool' | 'string' | null;
 }
 
 /**

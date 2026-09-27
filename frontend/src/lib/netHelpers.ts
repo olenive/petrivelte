@@ -135,3 +135,27 @@ export function applyTokenCounts<P extends { id: string; name: string; token_cou
 export function totalTokenCount(places: { token_count?: number; tokens?: unknown[] }[]): number {
 	return places.reduce((sum, place) => sum + placeTokenCount(place), 0);
 }
+
+function coerceAs(value: string, kind: string | null | undefined): unknown {
+	if (kind === 'int') return parseInt(value, 10);
+	if (kind === 'float') return parseFloat(value);
+	if (kind === 'bool') return value.toLowerCase() === 'true';
+	return value;
+}
+
+/**
+ * Turn the text a user typed for a factory parameter into the value sent to
+ * the factory.
+ *
+ * The server declares the coercion per parameter in ``coerce``, and that is
+ * applied when present. Older control planes omit it; the fallback then reads
+ * ``type`` exactly as the server's own prediction (``_UI_COERCION`` in
+ * discovery.py) does, so only the bare annotations int, float and bool are
+ * converted and anything else, ``int | None`` included, stays a string.
+ */
+export function coerceParamValue(
+	value: string,
+	param: { coerce?: string | null; type?: string | null },
+): unknown {
+	return coerceAs(value, param.coerce ?? param.type);
+}

@@ -30,7 +30,7 @@
 		workerLogsStore, setNets, seedFromNetErrors, loadHistory as loadLogHistory,
 		clearLogs, connectRuntimeLogs,
 	} from '$lib/stores/workerLogs';
-	import { netDisplayName, suggestInstanceName } from '$lib/netHelpers';
+	import { coerceParamValue, netDisplayName, suggestInstanceName } from '$lib/netHelpers';
 	import { applyRunEvent, pendingLabel, progressLabel, runHeadline } from '$lib/runs';
 	import { workerMemoryStore, type WorkerMemorySnapshot } from '$lib/stores/workerMemory';
 
@@ -157,20 +157,6 @@
 		return netParamValues.get(netId) ?? {};
 	}
 
-	// Mirrors _UI_COERCION in the control plane's discovery.py, which decides
-	// whether a factory default is safe to prefill by predicting what this
-	// function does to it. The two must agree: teaching this one a new
-	// annotation (int | None, say) without updating the server silently
-	// reintroduces the bug where a default round-trips into user code as a
-	// string. The durable fix is for the schema to declare the coercion per
-	// param — see dev-docs/DIAGNOSABILITY.md.
-	function coerceParamValue(value: string, type: string | null): unknown {
-		if (type === 'int') return parseInt(value, 10);
-		if (type === 'float') return parseFloat(value);
-		if (type === 'bool') return value.toLowerCase() === 'true';
-		return value;
-	}
-
 	function buildFactoryParams(netId: string, params: NetParam[]): Record<string, unknown> | undefined {
 		// No schema means nothing to say about params: leave whatever the net
 		// row already holds alone. With a schema, the boxes are authoritative
@@ -182,7 +168,7 @@
 		const result: Record<string, unknown> = {};
 		for (const p of params) {
 			const raw = values[p.name] ?? '';
-			if (raw !== '') result[p.name] = coerceParamValue(raw, p.type);
+			if (raw !== '') result[p.name] = coerceParamValue(raw, p);
 		}
 		return result;
 	}
