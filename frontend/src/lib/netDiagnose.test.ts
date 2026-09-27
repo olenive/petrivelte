@@ -5,9 +5,9 @@ describe('diagnoseTone', () => {
 	const cases: Record<string, string[]> = {
 		good: ['healthy', 'finished'],
 		neutral: ['idle', 'stopped', 'scheduled'],
-		active: ['loading', 'running'],
-		attention: ['overdue', 'unloaded', 'no_worker', 'worker_not_ready', 'subprocess_gone'],
-		bad: ['stalled', 'crashed', 'load_failed', 'worker_unreachable'],
+		active: ['loading', 'dispatching', 'running'],
+		attention: ['overdue', 'unloaded', 'no_worker', 'worker_not_ready', 'subprocess_gone', 'not_running'],
+		bad: ['stalled', 'crashed', 'load_failed', 'worker_unreachable', 'schedule_invalid'],
 	};
 	for (const [tone, states] of Object.entries(cases)) {
 		it(`is ${tone} for ${states.join(', ')}`, () => {
