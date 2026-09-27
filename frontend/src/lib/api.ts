@@ -367,9 +367,9 @@ export interface LastRun {
  * The net's currently open run, or null when nothing is executing or armed.
  *
  * This is the liveness signal, and it replaces inferring one from
- * ``load_state`` and ``desired_state``: a drained one-shot net is loaded and
- * desired-running while sitting idle, which is what the daily pipeline is for
- * twenty-three hours of the day. ``state`` is one of the open states —
+ * ``load_state`` and ``desired_execution_state``: a drained one-shot net has
+ * load state loaded and desired execution state running while sitting idle,
+ * which is what the daily pipeline is for twenty-three hours of the day. ``state`` is one of the open states —
  * ``claimed`` and ``dispatched`` are a scheduled run that has not begun
  * executing, so ``started_at`` is null until it does.
  */
@@ -434,9 +434,10 @@ export interface Net extends Provenance {
 	schedule?: string | null;
 	factory_params_schema: NetParam[] | null;
 	step_wall_clock_timeout_seconds: number | null;
-	/** The execution intent the resume sweep restores after a worker reboot.
-	 *  Distinct from ``load_state``, which is what is actually true. */
-	desired_state?: 'stopped' | 'running';
+	/** The net's desired execution state: the intent the net resume sweep
+	 *  restores after a worker reboot. Running implies loaded. Distinct from
+	 *  ``load_state``, which is what is actually true. */
+	desired_execution_state?: 'stopped' | 'running';
 	// Surfaced from net_run_state. All null for a net that has never run: the
 	// state row is created by its first run, so "no run state" is an answer
 	// and not a missing join. Optional so a control plane predating the run
@@ -1056,6 +1057,12 @@ export interface Notebook extends Provenance {
 	worker_id: string | null;
 	load_state: string;
 	load_error: string | null;
+	/** The notebook's desired load state: whether the user wants it loaded.
+	 *  A load, reload or upgrade sets `loaded`; an unload, a worker delete,
+	 *  idle eviction and an OOM or crash death set `unloaded`. A worker
+	 *  restart leaves it as it was, so a `loaded` notebook the restart unloaded
+	 *  is loaded again by the control plane. */
+	desired_load_state: 'loaded' | 'unloaded';
 	path_in_tarball: string | null;
 	slots: NotebookSlot[];
 	bindings: NotebookBinding[];
@@ -1651,6 +1658,8 @@ export interface WiringNotebook {
 	deployment_id: string | null;
 	load_state: string;
 	load_error: string | null;
+	/** See `Notebook`. */
+	desired_load_state: 'loaded' | 'unloaded';
 	/** See `Notebook`: the stored setting, and the control plane's resolution
 	 *  of it. Read-only here — the picker lives on the notebook page. */
 	idle_timeout_seconds: number | null;

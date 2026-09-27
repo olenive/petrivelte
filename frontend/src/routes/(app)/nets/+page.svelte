@@ -532,9 +532,9 @@
 			// net, arming does not claim anything is firing.
 			if (!scheduled) isRunning = !on;
 			await refreshRunningState(netId);
-			// The schedule verbs read `desired_state`, which changes on the
-			// control plane rather than on the worker, so it comes from a net
-			// refetch and not from the execution state above.
+			// The schedule verbs read `desired_execution_state`, which changes
+			// on the control plane rather than on the worker, so it comes from
+			// a net refetch and not from the worker's execution state above.
 			if (scheduled) availableNets = await listNets({ assigned: true });
 		} catch (error) {
 			console.error('Activate/Deactivate failed:', error);
@@ -870,8 +870,8 @@
 	let verbs = $derived(executionVerbs(selectedNet() ?? null));
 
 	// Whether execution is on. For a cron net that is the intent
-	// (`desired_state`); for every other net it stays what it has always been,
-	// whether the worker is firing.
+	// (`desired_execution_state`); for every other net it stays what it has
+	// always been, whether the worker is firing.
 	let executionOn = $derived(verbs.scheduled ? verbs.armed : isRunning);
 
 	// The expression and the slot it points at, for a cron net.

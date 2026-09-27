@@ -13,6 +13,7 @@ import {
 	UNASSIGNED_KEY,
 	groupByWorker,
 	notebookBadge,
+	resumeHint,
 	viewersHint,
 	workerHeader,
 } from './notebookIndex';
@@ -73,6 +74,7 @@ function notebook(over: Partial<WiringNotebook> = {}): WiringNotebook {
 		deployment_id: 'dep-1',
 		load_state: 'loaded',
 		load_error: null,
+		desired_load_state: 'loaded',
 		idle_timeout_seconds: null,
 		effective_idle_timeout_seconds: 900,
 		slots: [],
@@ -285,6 +287,20 @@ describe('the badge table', () => {
 		expect(badge.title).toContain('reason code: idle_eviction');
 	});
 
+	it('shows a worker restart muted, as expected rather than as a failure', () => {
+		const badge = notebookBadge(
+			notebook({ load_state: 'unloaded', load_error: 'worker_restarted' }),
+			null,
+			T,
+		);
+		expect(badge.name).toBe('unloaded');
+		expect(badge.colour).toBe('#9ca3af');
+		expect(badge.detail).toBe(
+			'the worker restarted; it will be loaded again if it was wanted',
+		);
+		expect(badge.title).toContain('reason code: worker_restarted');
+	});
+
 	it('shows a worker delete muted in the Unassigned section, not as a failure', () => {
 		const badge = notebookBadge(
 			notebook({ worker_id: null, load_state: 'unloaded', load_error: 'worker_deleted' }),
@@ -447,6 +463,34 @@ describe('the badge table', () => {
 		expect(viewersHint(sync({ transport: transport({ ws_sessions: 1 }) }))).toBe('viewed in 1 tab');
 		expect(viewersHint(sync({ transport: transport({ ws_sessions: 2 }) }))).toBe('viewed in 2 tabs');
 		expect(viewersHint(null)).toBeNull();
+	});
+});
+
+/**
+ * Only a worker restart unloads a notebook while leaving its desired load
+ * state at loaded, and the control plane loads such a notebook again. The
+ * row says so; every other combination has nothing to add.
+ */
+describe('resumeHint', () => {
+	it('promises a resume on an unloaded row that is still wanted loaded', () => {
+		expect(
+			resumeHint(notebook({ load_state: 'unloaded', desired_load_state: 'loaded' })),
+		).toBe('will resume after a worker restart');
+	});
+
+	it('says nothing for an unloaded row nobody wants loaded', () => {
+		expect(
+			resumeHint(notebook({ load_state: 'unloaded', desired_load_state: 'unloaded' })),
+		).toBeNull();
+	});
+
+	it('says nothing on a row that is not unloaded', () => {
+		for (const load_state of ['loaded', 'loading', 'error']) {
+			expect(
+				resumeHint(notebook({ load_state, desired_load_state: 'loaded' })),
+				load_state,
+			).toBeNull();
+		}
 	});
 });
 

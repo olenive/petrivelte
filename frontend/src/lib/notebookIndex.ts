@@ -472,6 +472,23 @@ export function viewersHint(sync: NotebookSync | null): string | null {
 	return `viewed in ${sessions} tab${sessions === 1 ? '' : 's'}`;
 }
 
+/**
+ * The one line an unloaded row adds when the notebook is wanted loaded.
+ *
+ * Only a worker restart unloads a notebook without changing its desired load
+ * state, and the control plane loads such a notebook again on its own. So a
+ * row that is unloaded while still desired loaded is waiting to come back,
+ * and says so. Any other load state has nothing to add: a loaded row is
+ * already there, and a row in error has been given up on until someone acts.
+ */
+export function resumeHint(
+	notebook: Pick<WiringNotebook, 'load_state' | 'desired_load_state'>,
+): string | null {
+	if (notebook.load_state !== 'unloaded') return null;
+	if (notebook.desired_load_state !== 'loaded') return null;
+	return 'will resume after a worker restart';
+}
+
 /** Whether a row's `/sync` and `/errors` are worth fetching at all. */
 export function isLoaded(notebook: BadgeSource): boolean {
 	return notebook.load_state === 'loaded';

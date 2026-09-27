@@ -42,6 +42,13 @@ const KNOWN_CODES: Record<string, { label: string; tone: LoadReasonTone }> = {
 	worker_destroyed: { label: 'worker resource was destroyed', tone: 'expected' },
 	worker_deleted: { label: 'worker was deleted', tone: 'expected' },
 	worker_torn_down: { label: 'worker was torn down', tone: 'expected' },
+	// The control plane found the worker no longer running the notebook after
+	// a restart (a roll, a reboot). Not a decision, so the notebook's desired
+	// load state is untouched and a wanted notebook is loaded again.
+	worker_restarted: {
+		label: 'the worker restarted; it will be loaded again if it was wanted',
+		tone: 'expected',
+	},
 	// The worker lost the kernel without being asked to.
 	subprocess_dead: { label: 'subprocess unreachable — likely crashed', tone: 'failure' },
 	subprocess_gone: {

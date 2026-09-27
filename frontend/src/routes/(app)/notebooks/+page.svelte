@@ -48,6 +48,7 @@
 		groupByWorker,
 		isLoaded,
 		notebookBadge,
+		resumeHint,
 		viewersHint,
 		type NotebookRow,
 	} from '$lib/notebookIndex';
@@ -195,6 +196,7 @@
 			patchNotebookRow(id, {
 				load_state: fresh.load_state,
 				load_error: fresh.load_error,
+				desired_load_state: fresh.desired_load_state,
 				worker_id: fresh.worker_id,
 			});
 			updatedById = new Map(updatedById).set(id, fresh.updated_at);
@@ -279,6 +281,12 @@
 			nb.load_state = evt.load_state;
 			nb.load_error = evt.load_error ?? null;
 			if (evt.worker_id !== undefined) nb.worker_id = evt.worker_id;
+			if (evt.load_state === 'unloaded' && nb.desired_load_state === 'loaded') {
+				// Most unloads also set the notebook's desired load state to
+				// unloaded, and the event does not carry it. Without a re-read
+				// the row would keep promising a resume that will not come.
+				void refreshNotebook(nb.id);
+			}
 			if (evt.load_state === 'loaded') void refreshDetailFor(nb.id);
 			else dropDetail(nb.id);
 		} else if (evt.type === 'notebook_error') {
@@ -608,6 +616,7 @@
 								{@const nb = row.notebook}
 								{@const badge = badgeFor(row)}
 								{@const viewers = viewersHint(syncById.get(nb.id) ?? null)}
+								{@const resume = resumeHint(nb)}
 								{@const errors = errorsById.get(nb.id) ?? 0}
 								{@const changed = lastChange(nb.id)}
 								{@const operation = nb.load_state === 'loading' ? operationOf(nb.id) : null}
@@ -648,6 +657,9 @@
 										<span class="text-xs text-foreground-muted whitespace-nowrap" title={badge.title}
 											>{badge.detail}</span
 										>
+									{/if}
+									{#if resume}
+										<span class="text-xs text-foreground-muted whitespace-nowrap">{resume}</span>
 									{/if}
 									{#if viewers}
 										<span class="text-xs text-foreground-faint whitespace-nowrap">{viewers}</span>

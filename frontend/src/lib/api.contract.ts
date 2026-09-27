@@ -136,9 +136,10 @@ const _last_run_shape: LastRun = {
 // -- Liveness contract --
 //
 // ``open_run`` is the only thing that says a net is executing. The UI used to
-// infer it from ``load_state`` + ``desired_state``, which is wrong for a
-// drained one-shot net — loaded, desired-running, doing nothing, all day. If
-// this field goes away the inference comes back, so lock it here.
+// infer it from ``load_state`` + ``desired_execution_state``, which is wrong
+// for a drained one-shot net — loaded, desired execution state running, doing
+// nothing, all day. If this field goes away the inference comes back, so lock
+// it here.
 //
 // ``started_at`` is null while the run is ``claimed`` or ``dispatched``: armed
 // is not the same as running, and the type has to allow saying so.
@@ -192,20 +193,20 @@ const _net_run_fields: Pick<
 // promised a future time would push the UI into showing tomorrow while
 // nothing had run.
 const _net_schedule_fields: Pick<
-	Net, 'execution_mode' | 'schedule' | 'desired_state' | 'next_run_at'
+	Net, 'execution_mode' | 'schedule' | 'desired_execution_state' | 'next_run_at'
 > = {
 	execution_mode: 'cron',
 	schedule: '0 2 * * *',
-	desired_state: 'running',
+	desired_execution_state: 'running',
 	next_run_at: '2026-09-06T02:00:00Z',
 };
 
 const _paused_net_schedule_fields: Pick<
-	Net, 'execution_mode' | 'schedule' | 'desired_state' | 'next_run_at'
+	Net, 'execution_mode' | 'schedule' | 'desired_execution_state' | 'next_run_at'
 > = {
 	execution_mode: 'cron',
 	schedule: '0 2 * * *',
-	desired_state: 'stopped',
+	desired_execution_state: 'stopped',
 	next_run_at: null,
 };
 

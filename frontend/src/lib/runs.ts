@@ -431,10 +431,10 @@ export function pendingLabel(
 // a net that will do nothing for another nine hours is how a person concludes
 // the button did not work. Stop pauses the schedule and Start arms it (the
 // backend's `dev-docs/RUNS_AND_SCHEDULING.md`, decision 7), so on a cron net
-// that is what the words say, and the state they describe is the *intent*
-// (`desired_state`) rather than whether something happens to be firing right
-// now — an armed daily net is idle for twenty-three hours a day and is not
-// thereby paused.
+// that is what the words say, and what they describe is the net's desired
+// execution state, the *intent* (`desired_execution_state`), rather than
+// whether something happens to be firing right now — an armed daily net is
+// idle for twenty-three hours a day and is not thereby paused.
 
 /** The `execution_mode` a scheduled net carries; the platform's `MODES`. */
 export const CRON_MODE = 'cron';
@@ -442,7 +442,7 @@ export const CRON_MODE = 'cron';
 export interface ExecutionVerbs {
 	/** True when this net runs on a schedule rather than by hand. */
 	scheduled: boolean;
-	/** The intent, from `desired_state`. For a cron net: armed. */
+	/** The intent, from `desired_execution_state`. For a cron net: armed. */
 	armed: boolean;
 	/** The button that turns execution on, and its label while in flight. */
 	activate: string;
@@ -491,12 +491,12 @@ const SCHEDULE_VERBS = {
  * Armed is two claims about the same thing.
  */
 export function executionVerbs(
-	net: Pick<Net, 'execution_mode' | 'desired_state'> | null | undefined,
+	net: Pick<Net, 'execution_mode' | 'desired_execution_state'> | null | undefined,
 ): ExecutionVerbs {
 	const scheduled = net?.execution_mode === CRON_MODE;
 	return {
 		scheduled,
-		armed: net?.desired_state === 'running',
+		armed: net?.desired_execution_state === 'running',
 		...(scheduled ? SCHEDULE_VERBS : MANUAL_VERBS),
 	};
 }
@@ -535,7 +535,7 @@ export interface ScheduleFacts {
 }
 
 type ScheduleFields = Pick<
-	Net, 'execution_mode' | 'schedule' | 'desired_state' | 'next_run_at'
+	Net, 'execution_mode' | 'schedule' | 'desired_execution_state' | 'next_run_at'
 	| 'pending_reason' | 'pending_since'
 >;
 
@@ -546,7 +546,7 @@ export function scheduleFacts(
 	if (!net || net.execution_mode !== CRON_MODE || !net.schedule) return null;
 	const expression = net.schedule;
 
-	if (net.desired_state !== 'running') {
+	if (net.desired_execution_state !== 'running') {
 		return {
 			expression,
 			kind: 'paused',

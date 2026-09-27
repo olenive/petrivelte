@@ -109,14 +109,14 @@ const netFields = (over: Partial<NetRunFields> = {}): NetRunFields => ({
 /** Just the schedule fields; the wording and the facts read nothing else. */
 type NetScheduleFields = Pick<
 	Net,
-	'execution_mode' | 'schedule' | 'desired_state' | 'next_run_at'
+	'execution_mode' | 'schedule' | 'desired_execution_state' | 'next_run_at'
 	| 'pending_reason' | 'pending_since'
 >;
 
 const netSchedule = (over: Partial<NetScheduleFields> = {}): NetScheduleFields => ({
 	execution_mode: 'cron',
 	schedule: '0 2 * * *',
-	desired_state: 'running',
+	desired_execution_state: 'running',
 	next_run_at: '2026-09-06T02:00:00Z',
 	pending_reason: null,
 	pending_since: null,
@@ -658,8 +658,9 @@ describe('pendingLabel', () => {
 describe('executionVerbs', () => {
 	// Two questions the words have to keep apart: what kind of net this is
 	// (`execution_mode`), and whether it is meant to be running
-	// (`desired_state`). A cron net that is armed but idle — which the daily
-	// pipeline is for twenty-three hours a day — is armed, not paused.
+	// (`desired_execution_state`). A cron net that is armed but idle — which
+	// the daily pipeline is for twenty-three hours a day — is armed, not
+	// paused.
 	const cron = (over: Partial<NetScheduleFields> = {}) => netSchedule(over);
 
 	it('names the schedule for a cron net', () => {
@@ -683,8 +684,8 @@ describe('executionVerbs', () => {
 	});
 
 	it('reads armed from the intent, not from whether anything is firing', () => {
-		expect(executionVerbs(cron({ desired_state: 'running' })).armed).toBe(true);
-		expect(executionVerbs(cron({ desired_state: 'stopped' })).armed).toBe(false);
+		expect(executionVerbs(cron({ desired_execution_state: 'running' })).armed).toBe(true);
+		expect(executionVerbs(cron({ desired_execution_state: 'stopped' })).armed).toBe(false);
 	});
 
 	it('falls back to the manual wording when there is no net', () => {
@@ -736,7 +737,7 @@ describe('scheduleFacts', () => {
 
 	it('says a paused schedule is paused, and promises no time', () => {
 		const facts = scheduleFacts(netSchedule({
-			desired_state: 'stopped',
+			desired_execution_state: 'stopped',
 			next_run_at: null,
 		}), NOW);
 

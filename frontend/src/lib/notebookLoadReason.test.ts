@@ -28,6 +28,15 @@ describe('describeLoadError', () => {
 		}
 	});
 
+	it('reads a worker restart as expected and says what happens next', () => {
+		expect(describeLoadError('unloaded', 'worker_restarted')).toEqual({
+			heading: 'Reason',
+			label: 'the worker restarted; it will be loaded again if it was wanted',
+			tone: 'expected',
+			code: 'worker_restarted',
+		});
+	});
+
 	it('keeps a lost kernel red under an Error heading', () => {
 		for (const code of ['subprocess_dead', 'subprocess_gone']) {
 			const reason = describeLoadError('unloaded', code);
