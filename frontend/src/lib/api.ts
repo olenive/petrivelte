@@ -425,6 +425,27 @@ export interface Provenance {
 	newer_deployment?: DeploymentSummary | null;
 }
 
+/** Tags naming a contradiction between what a net wants and what is true.
+ *  Open-ended on the client: a newer server may send a tag this build does
+ *  not know, and it is shown as the tag itself. */
+export type NetAnomaly =
+	| 'wants_running_without_worker'
+	| 'wants_running_but_unloaded'
+	| 'wants_running_but_load_failed'
+	| 'duplicate_definition_on_deployment';
+
+/** The schedule as the control plane reads it, composed server-side. */
+export interface ScheduleFactsWire {
+	expression: string;
+	state: 'armed' | 'overdue' | 'paused' | 'invalid';
+	next_run_at: string | null;
+	pending_reason: string | null;
+	pending_since: string | null;
+	error: string | null;
+	/** The one line to show beside the schedule expression. */
+	message: string;
+}
+
 export interface Net extends Provenance {
 	id: string;
 	definition_name: string;
@@ -447,6 +468,19 @@ export interface Net extends Provenance {
 	schedule?: string | null;
 	factory_params_schema: NetParam[] | null;
 	step_wall_clock_timeout_seconds: number | null;
+	/** Seconds without progress while running before Diagnose calls the net
+	 *  stalled; null means no verdict. Optional so an older control plane
+	 *  reads as unset. */
+	stall_after_seconds?: number | null;
+	/** Contradictions between intent and reality; empty when there are none.
+	 *  Optional so an older control plane reads as none. */
+	anomalies?: string[];
+	/** The schedule line composed by the server; null for a net that is not
+	 *  on a schedule, absent from older control planes. */
+	schedule_facts?: ScheduleFactsWire | null;
+	/** Why the schedule cannot be used, such as an expression that will not
+	 *  parse; null when it can. */
+	schedule_error?: string | null;
 	/** The net's desired execution state: the intent the net resume sweep
 	 *  restores after a worker reboot. Running implies loaded. Distinct from
 	 *  ``load_state``, which is what is actually true. */
@@ -517,6 +551,7 @@ export async function patchNet(
 	netId: string,
 	body: Partial<Pick<Net,
 		'instance_name' | 'factory_params' | 'image_tag' | 'worker_id' | 'step_wall_clock_timeout_seconds'
+		| 'stall_after_seconds'
 	>>,
 ): Promise<Net> {
 	const res = await patch(`/api/nets/${netId}`, body);

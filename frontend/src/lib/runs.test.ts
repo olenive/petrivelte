@@ -756,6 +756,78 @@ describe('scheduleFacts', () => {
 		expect(facts?.when).toContain('unknown');
 	});
 
+	it('carries no error when the schedule is usable', () => {
+		expect(scheduleFacts(netSchedule(), NOW)?.error).toBeNull();
+	});
+
+	it('prefers the message the control plane composed', () => {
+		const facts = scheduleFacts({
+			...netSchedule({ next_run_at: '2026-09-06T02:00:00Z' }),
+			schedule_facts: {
+				expression: '0 2 * * *',
+				state: 'armed',
+				next_run_at: '2026-09-06T02:00:00Z',
+				pending_reason: null,
+				pending_since: null,
+				error: null,
+				message: 'next run tomorrow 02:00 UTC',
+			},
+		}, NOW);
+
+		expect(facts?.kind).toBe('next');
+		expect(facts?.when).toBe('next run tomorrow 02:00 UTC');
+		expect(facts?.expression).toBe('0 2 * * *');
+		expect(facts?.pending).toBeNull();
+	});
+
+	it('maps the server states onto the kinds the page colours', () => {
+		const withState = (state: 'armed' | 'overdue' | 'paused' | 'invalid') => scheduleFacts({
+			...netSchedule(),
+			schedule_facts: {
+				expression: '0 2 * * *', state, next_run_at: null, pending_reason: null,
+				pending_since: null, error: null, message: state,
+			},
+		}, NOW)?.kind;
+		expect(withState('armed')).toBe('next');
+		expect(withState('overdue')).toBe('due');
+		expect(withState('paused')).toBe('paused');
+		expect(withState('invalid')).toBe('invalid');
+	});
+
+	it('carries the server pending refusal on an overdue slot', () => {
+		const facts = scheduleFacts({
+			...netSchedule(),
+			schedule_facts: {
+				expression: '0 2 * * *', state: 'overdue', next_run_at: '2026-09-05T02:00:00Z',
+				pending_reason: 'worker_not_ready', pending_since: '2026-09-05T02:00:10Z',
+				error: null, message: 'overdue since 02:00 UTC',
+			},
+		}, NOW);
+		expect(facts?.kind).toBe('due');
+		expect(facts?.pending?.text).toContain('waiting for worker');
+	});
+
+	it('falls back to the client composition when the server sends no facts', () => {
+		const facts = scheduleFacts({ ...netSchedule(), schedule_facts: null }, NOW);
+		expect(facts?.when).toContain('next run');
+	});
+
+	it('shows schedule_error, and the facts error when that is all there is', () => {
+		const invalid = {
+			expression: '61 * * * *', state: 'invalid' as const, next_run_at: null,
+			pending_reason: null, pending_since: null,
+			error: 'minute out of range', message: 'schedule invalid',
+		};
+		expect(scheduleFacts({ ...netSchedule(), schedule_facts: invalid }, NOW)?.error)
+			.toBe('minute out of range');
+		expect(scheduleFacts({
+			...netSchedule(), schedule_facts: invalid, schedule_error: 'bad expression',
+		}, NOW)?.error).toBe('bad expression');
+		expect(scheduleFacts({
+			...netSchedule({ next_run_at: null }), schedule_error: 'bad expression',
+		}, NOW)?.error).toBe('bad expression');
+	});
+
 	it('has nothing to say about a net that is not on a schedule', () => {
 		expect(scheduleFacts(netSchedule({ execution_mode: '24/7', schedule: null }), NOW)).toBeNull();
 		// Mode without an expression is the same absence of a schedule.

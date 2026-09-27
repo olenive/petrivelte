@@ -159,3 +159,22 @@ export function coerceParamValue(
 ): unknown {
 	return coerceAs(value, param.coerce ?? param.type);
 }
+
+/**
+ * Read an optional whole number of seconds from a settings input.
+ *
+ * Empty means null (no bound, no verdict). A number input bound in Svelte
+ * hands back a number once edited and whatever it was seeded with before, so
+ * both numbers and strings are accepted. Anything else than a whole number
+ * of at least one is refused.
+ */
+export function parseOptionalSeconds(
+	input: unknown,
+): { ok: true; value: number | null } | { ok: false } {
+	if (input === null || input === undefined) return { ok: true, value: null };
+	const text = String(input).trim();
+	if (text === '') return { ok: true, value: null };
+	const parsed = Number(text);
+	if (!Number.isInteger(parsed) || parsed < 1) return { ok: false };
+	return { ok: true, value: parsed };
+}

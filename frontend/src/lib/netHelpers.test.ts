@@ -5,6 +5,7 @@ import {
 	TOKEN_DOT_MAX,
 	applyTokenCounts,
 	coerceParamValue,
+	parseOptionalSeconds,
 	placeShowsCounter,
 	placeTokenCount,
 	tokenSlotOffset,
@@ -216,5 +217,25 @@ describe('coerceParamValue', () => {
 			expect(coerceParamValue('3', { type: null })).toBe('3');
 			expect(coerceParamValue('3', {})).toBe('3');
 		});
+	});
+});
+
+describe('parseOptionalSeconds', () => {
+	it('reads empty as null', () => {
+		expect(parseOptionalSeconds('')).toEqual({ ok: true, value: null });
+		expect(parseOptionalSeconds('  ')).toEqual({ ok: true, value: null });
+		expect(parseOptionalSeconds(null)).toEqual({ ok: true, value: null });
+		expect(parseOptionalSeconds(undefined)).toEqual({ ok: true, value: null });
+	});
+
+	it('reads a whole number of at least one, as text or number', () => {
+		expect(parseOptionalSeconds('600')).toEqual({ ok: true, value: 600 });
+		expect(parseOptionalSeconds(1)).toEqual({ ok: true, value: 1 });
+	});
+
+	it('refuses zero, negatives, fractions and words', () => {
+		for (const bad of ['0', '-5', '1.5', 'ten', 0]) {
+			expect(parseOptionalSeconds(bad)).toEqual({ ok: false });
+		}
 	});
 });

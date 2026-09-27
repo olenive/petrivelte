@@ -32,12 +32,15 @@
 	import RunsPanel from '$lib/components/RunsPanel.svelte';
 	import { applyRunEvent, executionVerbs, pendingLabel, scheduleFacts } from '$lib/runs';
 	import { portal } from '$lib/actions/portal';
+	import { anomalyLabels, anomalySuffix } from '$lib/netAnomalies';
+	import { groupByDefinition } from '$lib/netInstances';
 	import type { GraphState, Token, LogEntry, Transition } from '$lib/types';
 	import {
 		TOKEN_DOT_MAX,
 		applyTokenCounts,
 		coerceParamValue,
 		netFullLabel,
+		parseOptionalSeconds,
 		tokenSlotOffset,
 		totalTokenCount as sumTokenCounts,
 	} from '$lib/netHelpers';
@@ -162,7 +165,8 @@
 
 	// Settings dialog state
 	let showSettingsDialog = $state(false);
-	let settingsTimeoutInput = $state('');  // empty string = unbounded
+	let settingsTimeoutInput = $state<string | number | null>('');  // empty = unbounded
+	let settingsStallInput = $state<string | number | null>('');  // empty = no verdict
 	let settingsSaving = $state(false);
 	let settingsError = $state<string | null>(null);
 
@@ -861,6 +865,16 @@
 	// always been, whether the worker is firing.
 	let executionOn = $derived(verbs.scheduled ? verbs.armed : isRunning);
 
+	// Contradictions between what the selected net wants and what is true.
+	let selectedAnomalies = $derived.by(() => {
+		const net = selectedNet();
+		return net ? anomalyLabels(net) : [];
+	});
+
+	// Where each definition runs, for the "which workers" view.
+	let definitionGroups = $derived(groupByDefinition(availableNets, workers));
+	let multiInstanceCount = $derived(definitionGroups.filter(g => g.instances.length > 1).length);
+
 	// The expression and the slot it points at, for a cron net.
 	let scheduleNote = $derived.by(() => scheduleFacts(selectedNet() ?? null));
 
@@ -1057,28 +1071,30 @@
 		settingsTimeoutInput = net?.step_wall_clock_timeout_seconds == null
 			? ''
 			: String(net.step_wall_clock_timeout_seconds);
+		settingsStallInput = net?.stall_after_seconds == null ? '' : String(net.stall_after_seconds);
 		settingsError = null;
 		showSettingsDialog = true;
 	}
 
 	async function handleSettingsSave() {
 		if (!selectedNetId) return;
-		const trimmed = settingsTimeoutInput.trim();
-		let value: number | null;
-		if (trimmed === '') {
-			value = null;
-		} else {
-			const parsed = Number(trimmed);
-			if (!Number.isFinite(parsed) || parsed < 1 || !Number.isInteger(parsed)) {
-				settingsError = 'Timeout must be a positive whole number of seconds, or empty for unbounded.';
-				return;
-			}
-			value = parsed;
+		const timeout = parseOptionalSeconds(settingsTimeoutInput);
+		if (!timeout.ok) {
+			settingsError = 'Timeout must be a positive whole number of seconds, or empty for unbounded.';
+			return;
+		}
+		const stall = parseOptionalSeconds(settingsStallInput);
+		if (!stall.ok) {
+			settingsError = 'Stall threshold must be a positive whole number of seconds, or empty for no verdict.';
+			return;
 		}
 		settingsSaving = true;
 		settingsError = null;
 		try {
-			const updated = await patchNet(selectedNetId, { step_wall_clock_timeout_seconds: value });
+			const updated = await patchNet(selectedNetId, {
+				step_wall_clock_timeout_seconds: timeout.value,
+				stall_after_seconds: stall.value,
+			});
 			availableNets = availableNets.map(n => n.id === updated.id ? updated : n);
 			showSettingsDialog = false;
 		} catch (e: any) {
@@ -1456,7 +1472,7 @@
 					<select id="net-select" bind:value={selectedNetId} onchange={handleNetSelect}
 						class="px-4 py-2 border border-border rounded bg-card text-foreground text-sm cursor-pointer hover:border-accent">
 						{#each availableNets as net}
-							<option value={net.id}>{netFullLabel(net, availableNets)}{provenanceSuffix(net)}</option>
+							<option value={net.id}>{netFullLabel(net, availableNets)}{provenanceSuffix(net)}{anomalySuffix(net)}</option>
 						{/each}
 					</select>
 				</div>
@@ -1566,7 +1582,9 @@
 	{#if scheduleNote}
 		<div class="flex items-center gap-2 px-6 py-2 bg-card border-b border-border text-xs flex-wrap">
 			<span class="text-foreground-faint">Schedule</span>
-			<code class="px-1.5 py-0.5 rounded bg-muted text-foreground font-mono">{scheduleNote.expression}</code>
+			{#if scheduleNote.expression}
+				<code class="px-1.5 py-0.5 rounded bg-muted text-foreground font-mono">{scheduleNote.expression}</code>
+			{/if}
 			<span
 				class={scheduleNote.kind === 'due' ? 'text-status-warning' : 'text-foreground-muted'}
 				title={scheduleNote.title}
@@ -1574,6 +1592,50 @@
 			{#if scheduleNote.pending}
 				<!-- Why the owed slot has not gone yet, beside the slot itself. -->
 				<span class="text-status-warning" title={scheduleNote.pending.title}>· {scheduleNote.pending.text}</span>
+			{/if}
+			{#if scheduleNote.error}
+				<span class="text-error">· {scheduleNote.error}</span>
+			{/if}
+		</div>
+	{/if}
+
+	<!-- What the selected net wants and cannot have, and where each
+	     definition runs. Outside the graph gate for the same reason as the
+	     schedule: these matter most when there is no graph to look at. -->
+	{#if selectedAnomalies.length > 0 || definitionGroups.length > 0}
+		<div class="flex items-start gap-3 px-6 py-2 bg-card border-b border-border text-xs flex-wrap">
+			{#if selectedAnomalies.length > 0}
+				<div class="flex items-center gap-2 flex-wrap">
+					<span class="text-foreground-faint">Needs attention</span>
+					{#each selectedAnomalies as label (label)}
+						<span class="px-2 py-0.5 rounded-sm bg-status-warning-bg text-status-warning">{label}</span>
+					{/each}
+				</div>
+			{/if}
+			{#if definitionGroups.length > 0}
+				<details class="min-w-0">
+					<summary class="cursor-pointer text-foreground-muted">
+						Where definitions run: {definitionGroups.length} definition{definitionGroups.length === 1 ? '' : 's'}{multiInstanceCount > 0 ? `, ${multiInstanceCount} with several instances` : ''}
+					</summary>
+					<div class="mt-2 flex flex-col gap-1">
+						{#each definitionGroups as group (group.definition_name)}
+							<details open={group.instances.length > 1}>
+								<summary class="cursor-pointer text-foreground">
+									<code class="font-mono">{group.definition_name}</code>
+									<span class="text-foreground-faint">· {group.instances.length} instance{group.instances.length === 1 ? '' : 's'}</span>
+								</summary>
+								<ul class="ml-4 mt-1 flex flex-col gap-0.5">
+									{#each group.instances as inst (inst.id)}
+										<li class="text-foreground-muted">
+											<span class="text-foreground">{inst.instance_name}</span>
+											· {inst.worker} · {inst.load_state}
+										</li>
+									{/each}
+								</ul>
+							</details>
+						{/each}
+					</div>
+				</details>
 			{/if}
 		</div>
 	{/if}
@@ -1801,7 +1863,7 @@
 						<select bind:value={selectedNetId} onchange={handleNetSelect}
 							class="px-4 py-2 border border-border rounded bg-card text-foreground text-sm cursor-pointer hover:border-accent">
 							{#each availableNets as net}
-								<option value={net.id}>{netFullLabel(net, availableNets)}{provenanceSuffix(net)}</option>
+								<option value={net.id}>{netFullLabel(net, availableNets)}{provenanceSuffix(net)}{anomalySuffix(net)}</option>
 							{/each}
 						</select>
 					</div>
@@ -1944,6 +2006,22 @@
 					Leave empty for unbounded — recommended for monitoring nets and long CPU-heavy work.
 					The worker emits internal heartbeats so silent CPU work won't be killed by the inactivity check;
 					this knob is only for capping truly stuck work.
+				</p>
+			</div>
+
+			<div class="flex flex-col gap-2 mt-4">
+				<label class="text-sm text-foreground" for="stall-after-input">Stall after (seconds)</label>
+				<input
+					id="stall-after-input"
+					type="number"
+					min="1"
+					step="1"
+					bind:value={settingsStallInput}
+					placeholder="empty = no verdict"
+					class="px-3 py-2 border border-border rounded bg-surface text-foreground text-sm focus:outline-none focus:border-accent"
+				/>
+				<p class="text-xs text-foreground-muted">
+					Seconds without progress while running before Diagnose calls the net stalled; empty means no verdict.
 				</p>
 			</div>
 

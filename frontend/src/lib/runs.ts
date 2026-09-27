@@ -516,8 +516,10 @@ export function executionVerbs(
  *   will not parse, or a control plane that predates the field. Saying so is
  *   the only honest answer; inventing one from the expression here would put
  *   a second cron implementation in the browser.
+ * * `invalid` — the server says the schedule cannot be used, and `error`
+ *   says why.
  */
-export type ScheduleKind = 'next' | 'due' | 'paused' | 'unknown';
+export type ScheduleKind = 'next' | 'due' | 'paused' | 'unknown' | 'invalid';
 
 export interface ScheduleFacts {
 	/** The expression as the net's code declares it, shown as code. */
@@ -533,18 +535,68 @@ export interface ScheduleFacts {
 	 * unrelated notes that happen to sit near each other.
 	 */
 	pending: Stamp | null;
+	/** Why the schedule cannot be used, shown in the error colour; null when
+	 *  it can. */
+	error: string | null;
 }
 
 type ScheduleFields = Pick<
 	Net, 'execution_mode' | 'schedule' | 'desired_execution_state' | 'next_run_at'
 	| 'pending_reason' | 'pending_since'
->;
+> & Partial<Pick<Net, 'schedule_facts' | 'schedule_error'>>;
 
+const SERVER_SCHEDULE_KIND: Record<string, ScheduleKind> = {
+	armed: 'next',
+	overdue: 'due',
+	paused: 'paused',
+	invalid: 'invalid',
+};
+
+/**
+ * The schedule line, preferring the one the control plane composed.
+ *
+ * The server's `schedule_facts.message` is the answer when it is sent: it is
+ * computed beside the scheduler, so the words cannot drift from what the
+ * sweep will do. The client composition in `clientScheduleFacts` is the
+ * fallback for a control plane that does not send it. Either way the
+ * schedule's error, from `schedule_error` or the facts, rides along.
+ */
 export function scheduleFacts(
 	net: ScheduleFields | null | undefined,
 	now = Date.now(),
 ): ScheduleFacts | null {
-	if (!net || net.execution_mode !== CRON_MODE || !net.schedule) return null;
+	if (!net) return null;
+	const server = net.schedule_facts;
+	const error = net.schedule_error ?? server?.error ?? null;
+	if (server) {
+		const kind = SERVER_SCHEDULE_KIND[server.state] ?? 'unknown';
+		return {
+			expression: server.expression,
+			kind,
+			when: server.message,
+			title: `${server.expression} — ${server.message}`,
+			pending: kind === 'due' ? pendingLabel(server, now) : null,
+			error,
+		};
+	}
+	const client = clientScheduleFacts(net, now);
+	if (client) return { ...client, error };
+	if (!error) return null;
+	return {
+		expression: net.schedule ?? '',
+		kind: 'invalid',
+		when: 'schedule not usable',
+		title: error,
+		pending: null,
+		error,
+	};
+}
+
+function clientScheduleFacts(
+	net: ScheduleFields,
+	now: number,
+): Omit<ScheduleFacts, 'error'> | null {
+	if (net.execution_mode !== CRON_MODE || !net.schedule) return null;
 	const expression = net.schedule;
 
 	if (net.desired_execution_state !== 'running') {
