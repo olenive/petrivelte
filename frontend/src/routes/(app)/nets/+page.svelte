@@ -20,7 +20,7 @@
 		listNets, listWorkers, patchNet, loadNet, unloadNet,
 		getExecutionState, executionStep, executionStart, executionStop, executionReset, executionInject,
 		listNetSecrets, setNetSecrets, getNetLogHistory, getExecutionHistory, runNetNow,
-		diagnoseNet, type NetDiagnosis,
+		diagnoseNet, isNotLoaded, type NetDiagnosis,
 		type Net, type Worker, type NetParam, type SecretMetadata,
 	} from '$lib/api';
 	import GraphPanel from '$lib/components/GraphPanel.svelte';
@@ -122,6 +122,16 @@
 	let isRunningNow = $state(false);
 	let runNowError = $state<string | null>(null);
 	let stepError = $state<string | null>(null);
+	// Why the worker's view of the selected net could not be read: the
+	// server's detail for any refusal other than "not loaded", which is a
+	// state and not a fault. Kept with its net so a switch never shows
+	// another net's refusal.
+	let liveReadError = $state<{ netId: string; message: string } | null>(null);
+
+	function noteLiveReadFailure(netId: string, error: unknown) {
+		if (selectedNetId !== netId || isNotLoaded(error)) return;
+		liveReadError = { netId, message: error instanceof Error ? error.message : String(error) };
+	}
 	// Human-in-the-loop token injection: drop a typed token into a place to
 	// drive an end-to-end test (e.g. synthetic traffic into the anomaly monitor).
 	let showInject = $state(false);
@@ -402,6 +412,7 @@
 	// Three reads, each guarded against a slow answer landing after the
 	// user switched nets.
 	async function resyncNet(netId: string) {
+		if (liveReadError?.netId === netId) liveReadError = null;
 		await Promise.all([
 			refreshGraphState(netId),
 			getExecutionHistory(netId)
@@ -411,7 +422,7 @@
 					// newest first.
 					logEntries = capHead([...history].reverse(), EXECUTION_LOG_CAP);
 				})
-				.catch(() => {}),
+				.catch((error) => noteLiveReadFailure(netId, error)),
 			// Seeded from the worker's rotating file so it survives
 			// subprocess and worker restarts.
 			getNetLogHistory(netId)
@@ -419,7 +430,7 @@
 					if (selectedNetId !== netId) return;
 					netLogLines = capTail(entries.map(formatNetLogEntry), NET_LOG_CAP);
 				})
-				.catch(() => {}),
+				.catch((error) => noteLiveReadFailure(netId, error)),
 		]);
 	}
 
@@ -461,7 +472,11 @@
 			}
 			tokens = calculateTokenPositions(tokensData, graphState!);
 		} catch (error) {
-			console.error('Failed to fetch execution state:', error);
+			// A net that is not loaded has no state to fetch, and says so
+			// with a 409; that is quiet. Any other refusal carries the
+			// server's detail, and the page shows it.
+			if (!isNotLoaded(error)) console.error('Failed to fetch execution state:', error);
+			noteLiveReadFailure(netId, error);
 		}
 	}
 
@@ -474,6 +489,7 @@
 			await executionStep(selectedNetId);
 		} catch (error) {
 			console.error('Step failed:', error);
+			stepError = error instanceof Error ? error.message : 'Step failed.';
 		}
 	}
 
@@ -898,6 +914,7 @@
 	}
 
 	let shownDiagnosis = $derived(diagnosis && diagnosis.netId === selectedNetId ? diagnosis.result : null);
+	let shownLiveReadError = $derived(liveReadError && liveReadError.netId === selectedNetId ? liveReadError.message : null);
 	let shownDiagnoseError = $derived(diagnoseError && diagnoseError.netId === selectedNetId ? diagnoseError.message : null);
 
 	// The expression and the slot it points at, for a cron net.
@@ -1666,6 +1683,9 @@
 						{/each}
 					</div>
 				</details>
+			{/if}
+			{#if shownLiveReadError}
+				<span class="basis-full text-error" title="The worker's view of this net could not be read">{shownLiveReadError}</span>
 			{/if}
 			{#if shownDiagnoseError}
 				<span class="basis-full text-error">{shownDiagnoseError}</span>

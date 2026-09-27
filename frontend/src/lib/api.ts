@@ -740,14 +740,53 @@ export async function deleteNetSecrets(netId: string): Promise<void> {
 
 // -- execution (proxied through control plane to worker) --
 
+/**
+ * A refusal from the net execution proxy (execution, log history, tokens,
+ * inject). ``message`` is the server's ``detail``, written for a person;
+ * ``reason`` is the tag a caller branches on: net_not_found,
+ * not_assigned, worker_not_ready, not_loaded or worker_unreachable. Null
+ * when the body carried no reason, as from an older control plane.
+ */
+export class NetProxyError extends Error {
+	readonly status: number;
+	readonly reason: string | null;
+	constructor(message: string, status: number, reason: string | null) {
+		super(message);
+		this.name = 'NetProxyError';
+		this.status = status;
+		this.reason = reason;
+	}
+}
+
+/** Build the typed error from a failed proxy response. */
+export async function netProxyError(res: Response, fallback: string): Promise<NetProxyError> {
+	const body = await res.json().catch(() => null);
+	const reason = body && typeof body === 'object' && typeof (body as Record<string, unknown>).reason === 'string'
+		? (body as Record<string, string>).reason
+		: null;
+	return new NetProxyError(extractErrorMessage(body, fallback), res.status, reason);
+}
+
+/**
+ * True when the failure only says the net is not loaded, which is a state
+ * rather than a fault and is shown quietly. The proxy says so with a 409
+ * ``not_loaded``; an older control plane passed the worker's bare 404 on.
+ */
+export function isNotLoaded(error: unknown): boolean {
+	if (!(error instanceof NetProxyError)) return false;
+	return error.reason === 'not_loaded' || (error.reason === null && error.status === 404);
+}
+
 export async function getExecutionState(netId: string): Promise<any> {
 	const res = await get(`/api/nets/${netId}/execution/state`);
-	if (!res.ok) throw new Error('Failed to get execution state');
+	if (!res.ok) throw await netProxyError(res, 'Failed to get execution state');
 	return res.json();
 }
 
 /** The worker's per-net transition history, oldest first. Capped on the
- *  worker (500), so it is the whole story only for a young subprocess. */
+ *  worker (500), so it is the whole story only for a young subprocess.
+ *  Empty for a net that is not loaded; other refusals throw
+ *  ``NetProxyError``. */
 export async function getExecutionHistory(netId: string): Promise<Array<{
 	timestamp: number;
 	transition: string;
@@ -756,7 +795,12 @@ export async function getExecutionHistory(netId: string): Promise<Array<{
 	outputs: string[];
 }>> {
 	const res = await get(`/api/nets/${netId}/execution/history`);
-	if (!res.ok) return [];
+	if (!res.ok) {
+		// Not loaded means no history to show; any other refusal is news.
+		const error = await netProxyError(res, 'Failed to get execution history');
+		if (isNotLoaded(error)) return [];
+		throw error;
+	}
 	const body = await res.json();
 	return Array.isArray(body) ? body : [];
 }
@@ -776,7 +820,7 @@ export async function executionStep(
 		undefined,
 		withIdempotency(key),
 	);
-	if (!res.ok) throw new Error('Failed to step');
+	if (!res.ok) throw await netProxyError(res, 'Failed to step');
 	return res.json();
 }
 
@@ -818,7 +862,7 @@ export async function executionInject(
 		{ place_name: placeName, token },
 		withIdempotency(newIdempotencyKey()),
 	);
-	if (!res.ok) throw new Error(extractErrorMessage(await res.json(), 'Failed to inject token'));
+	if (!res.ok) throw await netProxyError(res, 'Failed to inject token');
 	return res.json();
 }
 
@@ -842,7 +886,7 @@ export type TokenView = TokenJsonView | TokenTextView;
 
 export async function getToken(netId: string, tokenId: string): Promise<TokenView> {
 	const res = await get(`/api/nets/${netId}/tokens/${tokenId}`);
-	if (!res.ok) throw new Error('Failed to get token');
+	if (!res.ok) throw await netProxyError(res, 'Failed to get token');
 	return res.json();
 }
 
@@ -974,17 +1018,39 @@ export async function getWorkerLogHistory(workerId: string): Promise<Array<Recor
 	return res.json();
 }
 
+/** Narrowing for the net log history read; all optional. */
+export interface NetLogHistoryQuery {
+	limit?: number;
+	/** ISO 8601; only lines at or after this instant. */
+	since?: string;
+	/** Only lines containing this substring. */
+	contains?: string;
+	newest_first?: boolean;
+}
+
 /**
  * Durable per-net subprocess log tail from the worker's local rotating file.
  * Used to seed the net-page log panel with history that survives subprocess
- * and worker restarts (the live SSE ring does not). Returns [] if the worker
- * is unreachable — the file lives on its disk.
+ * and worker restarts (the live SSE ring does not). Empty for a net that is
+ * not loaded; any other refusal, an unreachable worker included, throws
+ * ``NetProxyError`` so the page can say why the history is missing.
  */
 export async function getNetLogHistory(
 	netId: string,
+	query: NetLogHistoryQuery = {},
 ): Promise<Array<{ ts: string | null; text: string }>> {
-	const res = await get(`/api/nets/${netId}/logs/history`);
-	if (!res.ok) return [];
+	const params = new URLSearchParams();
+	if (query.limit !== undefined) params.set('limit', String(query.limit));
+	if (query.since !== undefined) params.set('since', query.since);
+	if (query.contains !== undefined) params.set('contains', query.contains);
+	if (query.newest_first !== undefined) params.set('newest_first', String(query.newest_first));
+	const qs = params.toString();
+	const res = await get(`/api/nets/${netId}/logs/history${qs ? `?${qs}` : ''}`);
+	if (!res.ok) {
+		const error = await netProxyError(res, 'Failed to get the net log history');
+		if (isNotLoaded(error)) return [];
+		throw error;
+	}
 	return res.json();
 }
 
