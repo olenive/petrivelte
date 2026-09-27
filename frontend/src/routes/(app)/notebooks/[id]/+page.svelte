@@ -36,7 +36,14 @@
 	} from '$lib/operations';
 	import NotebookOccupancyBanner from '$lib/components/NotebookOccupancyBanner.svelte';
 	import NotebookLoadConfirm from '$lib/components/NotebookLoadConfirm.svelte';
-	import { diagnose, planRemount, undrawnPushAgeS, type Diagnosis } from '$lib/notebookSync';
+	import {
+		diagnose,
+		isDisconnected,
+		mayRemountNow,
+		planRemount,
+		undrawnPushAgeS,
+		type Diagnosis,
+	} from '$lib/notebookSync';
 	import {
 		loadNotebookThresholds,
 		type NotebookViewerThresholds,
@@ -193,7 +200,30 @@
 	// otherwise" failure this page is being fixed for.
 	let diagnosis = $state<Diagnosis | null>(null);
 
+	// Read at each decision rather than tracked: the pure functions take it as
+	// an argument, and this is the one place the page asks the browser.
+	function pageVisible(): boolean {
+		return document.visibilityState === 'visible';
+	}
+
+	// Guards the visibility handler below from starting a second poll chain
+	// while one reading is still in flight.
+	let syncInFlight = false;
+
 	async function pollSync() {
+		syncInFlight = true;
+		try {
+			await readSync();
+		} finally {
+			syncInFlight = false;
+		}
+		syncPoll = setTimeout(
+			pollSync,
+			thresholds ? thresholds.sync_poll_s * 1000 : THRESHOLDS_RETRY_MS,
+		);
+	}
+
+	async function readSync() {
 		if (thresholds === null) {
 			thresholds = await loadNotebookThresholds().catch(() => null);
 		}
@@ -225,10 +255,18 @@
 				// age speak for itself on the next render.
 			}
 		}
-		syncPoll = setTimeout(
-			pollSync,
-			thresholds ? thresholds.sync_poll_s * 1000 : THRESHOLDS_RETRY_MS,
-		);
+	}
+
+	// A disconnected page remounts only while someone is looking, so coming
+	// back to the tab is the moment to act. Take a fresh reading at once
+	// rather than waiting for the next poll: a hidden tab's timers are
+	// throttled, and the last reading may be minutes old.
+	function onVisibilityChange() {
+		if (!pageVisible() || syncInFlight) return;
+		if (!diagnosis || !syncState || !isDisconnected(diagnosis, syncState)) return;
+		if (syncPoll) clearTimeout(syncPoll);
+		syncPoll = null;
+		void pollSync();
 	}
 
 	// Judge the last reading again. Run on every poll, and whenever an
@@ -265,16 +303,23 @@
 			// arrive every 5s and the backoff is longer than that, so
 			// re-planning here would spend the whole retry budget waiting for
 			// the first retry. The only decision left is whether to call it
-			// off, which a notebook that recovered on its own has earned, and
-			// so has one whose worker has since become busy.
-			if (!diagnosis.automatic) {
+			// off, which a notebook that recovered on its own has earned, so
+			// has one whose worker has since become busy, and so has a
+			// dropped socket whose tab is no longer visible.
+			if (!mayRemountNow(diagnosis, pageVisible())) {
 				clearTimeout(remountPending);
 				remountPending = null;
 			}
 			return;
 		}
 
-		const plan = planRemount(diagnosis, remountHistory, Date.now() / 1000, thresholds);
+		const plan = planRemount(
+			diagnosis,
+			remountHistory,
+			Date.now() / 1000,
+			thresholds,
+			pageVisible(),
+		);
 		remountHistory = plan.history;
 		remountExhausted = plan.exhausted;
 		if (!plan.remount) return;
@@ -464,6 +509,7 @@
 		: null);
 
 	onMount(async () => {
+		document.addEventListener('visibilitychange', onVisibilityChange);
 		await initialise();
 		pollSync();
 	});
@@ -500,6 +546,7 @@
 	});
 
 	onDestroy(() => {
+		document.removeEventListener('visibilitychange', onVisibilityChange);
 		unsubscribeEvents();
 		stopLoadStream();
 		if (timingsPoll) clearTimeout(timingsPoll);

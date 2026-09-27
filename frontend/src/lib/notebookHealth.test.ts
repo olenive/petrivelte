@@ -6,6 +6,7 @@ import { testThresholds } from './notebookThresholds.testing';
 import {
 	dataFact,
 	diagnosticsText,
+	disconnectNotes,
 	frameFact,
 	healthFacts,
 	healthSummary,
@@ -207,3 +208,79 @@ describe('copyable diagnostics', () => {
 		expect(text).toContain('"step_count":67319');
 	});
 });
+
+describe('disconnectNotes', () => {
+	const EXPIRED_LINE =
+		'Marimo closed the session after the socket dropped; a fresh session starts on remount';
+	const dropped = (over: Partial<NotebookTransport> = {}) => {
+		const reading = sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 2, ...over }) });
+		return disconnectNotes(reading, diagnose(reading, T, { sinceBurstSettledS: 300 }), T);
+	};
+
+	it('names the code, the reason and how long ago', () => {
+		expect(
+			dropped({ ws_last_close_code: 1006, ws_last_close_reason: 'upstream closed', ws_last_close_age_s: 300 }),
+		).toEqual(['socket closed 5m 0s ago (1006, upstream closed)']);
+	});
+
+	it('leaves out whichever of code, reason and age the worker did not have', () => {
+		expect(dropped({ ws_last_close_code: 1006, ws_last_close_age_s: 12 })).toEqual([
+			'socket closed 12s ago (1006)',
+		]);
+		expect(dropped({ ws_last_close_reason: 'upstream closed', ws_last_close_age_s: 12 })).toEqual([
+			'socket closed 12s ago (upstream closed)',
+		]);
+		expect(dropped({ ws_last_close_age_s: 12 })).toEqual(['socket closed 12s ago']);
+		expect(dropped({ ws_last_close_code: 1001, ws_last_close_reason: '  ' })).toEqual([
+			'socket closed (1001)',
+		]);
+	});
+
+	it('says nothing when the worker reports nothing about the close', () => {
+		expect(dropped()).toEqual([]);
+		expect(
+			dropped({ ws_last_close_code: null, ws_last_close_reason: null, ws_last_close_age_s: null }),
+		).toEqual([]);
+	});
+
+	it('adds the session-expired line when it happened after the last close', () => {
+		expect(
+			dropped({
+				ws_last_close_code: 1006,
+				ws_last_close_age_s: 300,
+				session_expired_total: 1,
+				last_session_expired_age_s: 90,
+			}),
+		).toEqual(['socket closed 5m 0s ago (1006)', EXPIRED_LINE]);
+	});
+
+	it('leaves the session-expired line out when it predates the last close', () => {
+		expect(
+			dropped({ ws_last_close_age_s: 30, session_expired_total: 3, last_session_expired_age_s: 4000 }),
+		).toEqual(['socket closed 30s ago']);
+	});
+
+	it('leaves the session-expired line out when none has happened', () => {
+		expect(
+			dropped({ ws_last_close_age_s: 30, session_expired_total: 0, last_session_expired_age_s: null }),
+		).toEqual(['socket closed 30s ago']);
+	});
+
+	it('without a close age, judges the expiry against the remount window', () => {
+		expect(dropped({ session_expired_total: 1, last_session_expired_age_s: 60 })).toEqual([EXPIRED_LINE]);
+		expect(
+			dropped({ session_expired_total: 1, last_session_expired_age_s: T.remount_window_s + 1 }),
+		).toEqual([]);
+	});
+
+	it('is empty for every verdict other than a dropped socket', () => {
+		const closed = { ws_last_close_code: 1006, ws_last_close_age_s: 60 };
+		for (const reading of [
+			sync({ transport: transport(closed) }),
+			sync({ transport: transport({ ...closed, ws_sessions: 0, ws_opened_total: 0 }) }),
+		]) {
+			expect(disconnectNotes(reading, diagnose(reading, T, { sinceBurstSettledS: 300 }), T)).toEqual([]);
+		}
+	});
+});
+

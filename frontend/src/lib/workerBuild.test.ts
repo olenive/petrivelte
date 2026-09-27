@@ -124,4 +124,56 @@ describe('buildChip', () => {
 		expect(view.chip.label).toBe('build unknown');
 		expect(view.marker).toBeNull();
 	});
+
+	describe('commit versus worker image hash', () => {
+		const HASH = '9f2c1e7b';
+
+		it('same commit: no marker and no older-commit note', () => {
+			const view = buildChip(
+				{
+					fly_machine_id: 'm1',
+					build_commit: CP.commit,
+					build_worker_hash: HASH,
+					build_matches_control_plane: true,
+				},
+				CP,
+			);
+			expect(view.chip.tooltip).toBe(`Build ${CP.commit}\nworker image hash ${HASH}`);
+			expect(view.marker).toBeNull();
+		});
+
+		it('different commit that matches: says no roll is owed, no marker', () => {
+			const view = buildChip(
+				{
+					fly_machine_id: 'm1',
+					build_commit: WORKER_COMMIT,
+					build_seen_at: '2026-09-20T08:00:00Z',
+					build_worker_hash: HASH,
+					build_matches_control_plane: true,
+				},
+				CP,
+			);
+			expect(view.chip.tooltip).toBe(
+				`Build ${WORKER_COMMIT}\nfirst seen 2026-09-20 08:00 UTC\nworker image hash ${HASH}\n` +
+					"Built from an older commit than the control plane (fe958d0), but its worker image contents are the same as the control plane's worker build, so no roll is owed.",
+			);
+			expect(view.marker).toBeNull();
+		});
+
+		it('different commit that does not match: roll marker as before, hash in the tooltip', () => {
+			const view = buildChip(
+				{
+					fly_machine_id: 'm1',
+					build_commit: WORKER_COMMIT,
+					build_worker_hash: HASH,
+					build_matches_control_plane: false,
+				},
+				CP,
+			);
+			expect(view.chip.tooltip).toBe(`Build ${WORKER_COMMIT}\nworker image hash ${HASH}`);
+			expect(view.chip.tooltip).not.toContain('no roll is owed');
+			expect(view.marker?.label).toBe('roll owed');
+			expect(view.marker?.tooltip).toContain('fly machine update m1');
+		});
+	});
 });

@@ -130,11 +130,14 @@ describe('diagnose', () => {
 
 		expect(never.detail).not.toBe(dropped.detail);
 		expect(dropped.detail).toContain('dropped');
-		// Only the socket that never opened is remounted unasked; a dropped
-		// one may be the worker shedding load, so it is a button.
+		expect(dropped.label).toBe('disconnected');
+		// Both are remounted unasked, but only the dropped one waits for the
+		// page to be visible.
 		expect(never.automatic).toBe(true);
+		expect(never.onlyWhenVisible).toBeFalsy();
 		expect(dropped.action).toBe('remount');
-		expect(dropped.automatic).toBe(false);
+		expect(dropped.automatic).toBe(true);
+		expect(dropped.onlyWhenVisible).toBe(true);
 	});
 
 	it('catches a notebook that connected but never started tracking', () => {
@@ -344,7 +347,7 @@ describe('diagnose before the thresholds have loaded', () => {
 			null,
 			settled,
 		);
-		const plan = planRemount(d, [], 1_000_000, T);
+		const plan = planRemount(d, [], 1_000_000, T, true);
 
 		expect(plan.remount).toBe(false);
 		expect(plan.exhausted).toBe(false);
@@ -516,7 +519,7 @@ describe('planRemount', () => {
 	const T0 = 1_000_000;
 
 	/** Drive the policy the way the page does: one plan per poll, carrying history. */
-	const remountAt = (history: readonly number[], nowS: number) => planRemount(broken, history, nowS, T);
+	const remountAt = (history: readonly number[], nowS: number) => planRemount(broken, history, nowS, T, true);
 
 	it('remounts on the first transport failure', () => {
 		const plan = remountAt([], T0);
@@ -562,7 +565,7 @@ describe('planRemount', () => {
 		for (let i = 0; i < REMOUNT_BUDGET; i++) {
 			history = remountAt(history, now).history;
 			now += 60;
-			const recovered = planRemount(healthy, history, now, T);
+			const recovered = planRemount(healthy, history, now, T, true);
 			expect(recovered.history).toEqual(history);
 			history = recovered.history;
 			now += 60;
@@ -584,18 +587,18 @@ describe('planRemount', () => {
 	it('never remounts for a failure a remount cannot fix', () => {
 		const wedged = { state: 'frames_stalled', action: 'reload', automatic: false, label: '', detail: '' } as const;
 
-		expect(planRemount(wedged, [], T0, T).remount).toBe(false);
-		expect(planRemount(wedged, [], T0, T).exhausted).toBe(false);
+		expect(planRemount(wedged, [], T0, T, true).remount).toBe(false);
+		expect(planRemount(wedged, [], T0, T, true).exhausted).toBe(false);
 	});
 
 	it('reads budget, window and backoff from the thresholds', () => {
 		const tight = testThresholds({ remount_budget: 1, remount_window_s: 60, remount_backoff_s: [7] });
 
-		const first = planRemount(broken, [], T0, tight);
+		const first = planRemount(broken, [], T0, tight, true);
 		expect(first.delayS).toBe(7);
-		expect(planRemount(broken, first.history, T0 + 10, tight).exhausted).toBe(true);
+		expect(planRemount(broken, first.history, T0 + 10, tight, true).exhausted).toBe(true);
 		// The window is 60 s here, so the remount stamped at T0 + 7 ages out by T0 + 68.
-		expect(planRemount(broken, first.history, T0 + 68, tight).remount).toBe(true);
+		expect(planRemount(broken, first.history, T0 + 68, tight, true).remount).toBe(true);
 	});
 
 	it('returns the pruned history unchanged for a diagnosis that needs no remount', () => {
@@ -603,7 +606,7 @@ describe('planRemount', () => {
 		const history = [T0 - REMOUNT_WINDOW_S - 10, T0 - 300, T0 - 30];
 
 		for (const diagnosis of [connecting, healthy]) {
-			const plan = planRemount(diagnosis, history, T0, T);
+			const plan = planRemount(diagnosis, history, T0, T, true);
 			expect(plan.remount).toBe(false);
 			expect(plan.exhausted).toBe(false);
 			expect(plan.history).toEqual([T0 - 300, T0 - 30]);
@@ -640,7 +643,7 @@ describe('an operation in flight', () => {
 		expect(d.action).toBe('none');
 		expect(d.automatic).toBe(false);
 		expect(d.operation?.id).toBe('op-1');
-		expect(planRemount(d, [], 1_000_000, T).remount).toBe(false);
+		expect(planRemount(d, [], 1_000_000, T, true).remount).toBe(false);
 	});
 
 	it('reads busy for the notebook’s own operation, and names it ahead of the worker’s', () => {
@@ -714,13 +717,15 @@ describe('an operation in flight', () => {
 
 describe('the narrowed remount', () => {
 	/**
-	 * The page remounts on its own for one diagnosis only: a socket that never
-	 * opened after the asset burst settled, with nothing in flight. Every
-	 * other diagnosis carries its recovery as a suggestion for a button.
+	 * The page remounts on its own for one verdict only, a socket that is not
+	 * there with nothing in flight: one that never opened after the asset
+	 * burst settled, or one that opened and dropped and stayed down, the
+	 * second only while the page is visible. Every other diagnosis carries its
+	 * recovery as a suggestion for a button.
 	 */
 	const T0 = 1_000_000;
 	const plan = (reading: NotebookSync, ctx = settled as Parameters<typeof diagnose>[2]) =>
-		planRemount(diagnose(reading, T, ctx), [], T0, T);
+		planRemount(diagnose(reading, T, ctx), [], T0, T, true);
 
 	it('remounts a socket that never opened after the burst settled', () => {
 		const p = plan(sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 0 }) }));
@@ -736,15 +741,81 @@ describe('the narrowed remount', () => {
 		expect(p.remount).toBe(false);
 	});
 
-	it('suggests, and does not take, a remount for a socket that dropped', () => {
-		const reading = sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 2 }) });
-		const d = diagnose(reading, T, settled);
+	describe('a socket that opened and dropped', () => {
+		const droppedLongAgo = sync({
+			transport: transport({ ws_sessions: 0, ws_opened_total: 2, ws_last_close_age_s: 120 }),
+		});
+		const planFor = (reading: NotebookSync, visible: boolean, history: readonly number[] = []) =>
+			planRemount(diagnose(reading, T, settled), history, T0, T, visible);
 
-		expect(d.action).toBe('remount');
-		expect(d.automatic).toBe(false);
-		expect(plan(reading).remount).toBe(false);
-		// A suggestion spends no budget and so is never reported as exhausted.
-		expect(plan(reading).exhausted).toBe(false);
+		it('remounts while the page is visible', () => {
+			const p = planFor(droppedLongAgo, true);
+
+			expect(p.remount).toBe(true);
+			expect(p.delayS).toBe(T.remount_backoff_s[0]);
+		});
+
+		it('waits while the page is hidden, spending no budget', () => {
+			const p = planFor(droppedLongAgo, false);
+
+			expect(p.remount).toBe(false);
+			expect(p.exhausted).toBe(false);
+			expect(p.history).toEqual([]);
+		});
+
+		it('stops once the budget is spent', () => {
+			const spent = [T0 - 300, T0 - 200, T0 - 100];
+			const p = planFor(droppedLongAgo, true, spent);
+
+			expect(p.remount).toBe(false);
+			expect(p.exhausted).toBe(true);
+		});
+
+		it('gives Marimo’s own reconnect its window first', () => {
+			const justDropped = sync({
+				transport: transport({
+					ws_sessions: 0,
+					ws_opened_total: 2,
+					ws_last_close_age_s: WS_OPEN_DEADLINE_S - 1,
+				}),
+			});
+			const d = diagnose(justDropped, T, settled);
+
+			expect(d.label).toBe('disconnected');
+			expect(d.action).toBe('remount');
+			expect(d.automatic).toBe(false);
+			expect(planFor(justDropped, true).remount).toBe(false);
+		});
+
+		it('with no close age from an older worker, leaves the backoff as the only grace', () => {
+			const noAge = sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 2 }) });
+
+			expect(planFor(noAge, true).remount).toBe(true);
+		});
+
+		it('plans nothing while an operation runs', () => {
+			const d = diagnose(droppedLongAgo, T, {
+				...settled,
+				workerOperation: {
+					id: 'op-1',
+					kind: 'net_load',
+					trigger: 'user',
+					step: null,
+					step_message: null,
+					started_at: '2026-09-25T10:00:00Z',
+					heartbeat_at: '2026-09-25T10:00:05Z',
+				},
+			});
+
+			expect(planRemount(d, [], T0, T, true).remount).toBe(false);
+		});
+
+		it('leaves the never-opened rule as it was, visible or not', () => {
+			const never = sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 0 }) });
+
+			expect(planFor(never, true).remount).toBe(true);
+			expect(planFor(never, false).remount).toBe(true);
+		});
 	});
 
 	it('suggests, and does not take, a remount for a bridge that never started', () => {
@@ -761,11 +832,11 @@ describe('the narrowed remount', () => {
 			const d = diagnose(reading, T, settled);
 			expect(d.action).toBe('reload');
 			expect(d.automatic).toBe(false);
-			expect(planRemount(d, [], T0, T).remount).toBe(false);
+			expect(planRemount(d, [], T0, T, true).remount).toBe(false);
 		}
 	});
 
-	it('marks exactly one diagnosis automatic', () => {
+	it('marks exactly the two transport failures automatic', () => {
 		const readings = [
 			sync(),
 			sync({ transport: transport({ ws_sessions: 0, ws_opened_total: 0 }) }),
@@ -784,6 +855,6 @@ describe('the narrowed remount', () => {
 			.filter((d) => d.automatic)
 			.map((d) => d.state);
 
-		expect(automatic).toEqual(['no_transport']);
+		expect(automatic).toEqual(['no_transport', 'no_transport']);
 	});
 });

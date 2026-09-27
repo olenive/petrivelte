@@ -268,8 +268,8 @@
 			}
 		} else if (evt.type === 'net_state_changed') {
 			const n = wiring.nets.find((x) => x.id === evt.net_id);
-			// An unknown net means the count in a header is now wrong, and the
-			// count is the only thing nets contribute to this page.
+			// An unknown net means the count in a header is now wrong. A known
+			// one's load state feeds the badge of every notebook bound to it.
 			if (n) n.load_state = evt.load_state;
 			else void refreshAll();
 		} else if (evt.type === 'notebook_state_changed') {
@@ -493,7 +493,11 @@
 			syncById.get(row.notebook.id) ?? null,
 			thresholds,
 			errorsById.get(row.notebook.id) ?? 0,
-			{ workerMemoryMb: worker?.memory_mb ?? null, operation: operationOf(row.notebook.id) },
+			{
+				workerMemoryMb: worker?.memory_mb ?? null,
+				operation: operationOf(row.notebook.id),
+				bindings: row.bindings,
+			},
 		);
 	}
 

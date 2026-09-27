@@ -23,6 +23,8 @@
  * report (`syncing` / "starting…"); past that it reads `stale` / "not
  * tracking". Once it has reported, a slot still waiting for its first sync
  * reads `syncing`, and only a slot that is behind or erroring reads `stale`.
+ * A bound net that is not loaded reads `net not loaded` and names the net,
+ * because the missing piece is the net rather than the notebook.
  *
  * Pure and fetch-free, like `notebookHealth.ts` and `notebookOccupancy.ts`:
  * the interesting part is a table of cases, and a table is worth asserting
@@ -56,6 +58,9 @@ export interface RowBinding {
 	 *  a binding can outlive the net row it names, and inventing a label for
 	 *  one would hide exactly that. */
 	netName: string | null;
+	/** The net's `load_state`, or null when the net is not in the payload.
+	 *  The badge reads it to name a bound net that is not loaded. */
+	netLoadState: string | null;
 }
 
 export interface NotebookRow {
@@ -118,13 +123,14 @@ export function workerHeader(worker: WiringWorker, netCount: number): WorkerHead
  * same rule the wiring canvas uses.
  */
 export function groupByWorker(wiring: WiringResponse): NotebookSection[] {
-	const netNames = new Map(wiring.nets.map((n) => [n.id, n.instance_name]));
+	const netsById = new Map(wiring.nets.map((n) => [n.id, n]));
 	const bindingsByNotebook = new Map<string, RowBinding[]>();
 	for (const b of wiring.bindings) {
 		const row: RowBinding = {
 			slotName: b.slot_name,
 			netId: b.net_id,
-			netName: netNames.get(b.net_id) ?? null,
+			netName: netsById.get(b.net_id)?.instance_name ?? null,
+			netLoadState: netsById.get(b.net_id)?.load_state ?? null,
 		};
 		const existing = bindingsByNotebook.get(b.notebook_instance_id);
 		if (existing) existing.push(row);
@@ -206,7 +212,8 @@ export type NotebookBadgeName =
 	| 'idle'
 	| 'checking'
 	| 'loaded'
-	| 'syncing';
+	| 'syncing'
+	| 'net_not_loaded';
 
 export interface NotebookIndexBadge {
 	name: NotebookBadgeName;
@@ -233,6 +240,9 @@ const COLOURS: Record<NotebookBadgeName, string> = {
 	// Calm blue-grey: fine, and waiting for someone to open it.
 	loaded: '#64748b',
 	syncing: '#eab308',
+	// Muted: the notebook is doing its job, and the piece that is missing is
+	// a net someone unloaded or has not loaded yet.
+	net_not_loaded: '#6b7280',
 };
 
 /** The fields of a notebook row the badge is allowed to read. The idle
@@ -247,6 +257,8 @@ export interface BadgeContext {
 	workerMemoryMb?: number | null;
 	/** The notebook's running operation (its load), when one is known. */
 	operation?: Operation | OperationSummary | null;
+	/** The notebook's bindings, resolved to their nets' load states. */
+	bindings?: readonly RowBinding[];
 }
 
 /** Red, for an unloaded row whose reason is a failure. */
@@ -428,6 +440,28 @@ export function notebookBadge(
 	const net = netFact(sync);
 	const data = dataFact(sync);
 	const facts = [factLine(net), factLine(data)];
+
+	// A bound net that is not loaded leaves the bridge nothing to sync from,
+	// and its slot would read `stale · never synced`, which blames the
+	// notebook. Name the net instead. A net the payload does not carry has no
+	// load state to judge, and stays with the slot checks below; so does a
+	// loaded net the bridge cannot reach, which is what `stale` is for.
+	const unloadedNets = (ctx.bindings ?? []).filter(
+		(b) => b.netLoadState !== null && b.netLoadState !== 'loaded',
+	);
+	if (unloadedNets.length > 0) {
+		const named = unloadedNets.map((b) => `${b.netName ?? b.netId} ${b.netLoadState}`);
+		return badge(
+			'net_not_loaded',
+			'net not loaded',
+			[
+				`The notebook is running, but ${unloadedNets.length === 1 ? 'a bound net is' : 'bound nets are'} not loaded, so it has nothing to sync from until ${unloadedNets.length === 1 ? 'it is' : 'they are'} (the Nets page loads nets).`,
+				...unloadedNets.map((b) => `${b.slotName} → ${b.netName ?? b.netId}: ${b.netLoadState}`),
+				...facts,
+			],
+			named.join(', '),
+		);
+	}
 
 	// Each slot judged by `slotSyncState`, which reads the report's own age
 	// against the slot's cadence: a slot whose subprocess went quiet keeps

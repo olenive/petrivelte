@@ -12,7 +12,8 @@
  */
 import type {
 	DailyRollup, Deployment, DeploymentSummary, DiscoveredNotebook, LastRun, Net, Notebook,
-	NotebookDefect, NotebookSlot, OpenRun, WorkerDeleteResult, Operation, OperationSummary, RunPage, RunRecord,
+	NotebookDefect, NotebookSlot, NotebookTransport, OpenRun, Worker, WorkerDeleteResult, Operation,
+	OperationSummary, RunPage, RunRecord,
 } from './api';
 
 // -- Regression lock: Deployment must expose discovered_notebooks --
@@ -309,3 +310,40 @@ const _operation_summary_shape: OperationSummary = {
 	started_at: '2026-09-25T10:00:00Z',
 	heartbeat_at: '2026-09-25T10:00:05Z',
 };
+
+// -- Socket close and session expiry on the render channel --
+//
+// The notebook page explains a dropped connection from these: the last close
+// the worker's relay saw, and how often Marimo ended a session its socket had
+// left. Every one is nullable, and an older worker omits them.
+const _transport_close_shape: NotebookTransport = {
+	alive: true,
+	ws_sessions: 0,
+	ws_opened_total: 2,
+	last_ws_open_age_s: 400,
+	frames_relayed: 120,
+	last_frame_age_s: 310,
+	first_report_age_s: 395,
+	ws_last_close_code: 1006,
+	ws_last_close_reason: 'upstream closed',
+	ws_last_close_age_s: 300,
+	session_expired_total: 1,
+	last_session_expired_age_s: 90,
+};
+
+// -- Worker build identity --
+//
+// `build_matches_control_plane` compares worker image content hashes when
+// both sides have one, so the Workers page reads the hash to explain a match
+// across different commits.
+const _worker_build_shape: Pick<
+	Worker,
+	'build_commit' | 'build_seen_at' | 'build_worker_hash' | 'build_matches_control_plane'
+> = {
+	build_commit: '0123456789abcdef0123456789abcdef01234567',
+	build_seen_at: '2026-09-26T10:04:00Z',
+	build_worker_hash: '9f2c1e7b',
+	build_matches_control_plane: true,
+};
+
+export const __transport_and_build_contract_check = [_transport_close_shape, _worker_build_shape];

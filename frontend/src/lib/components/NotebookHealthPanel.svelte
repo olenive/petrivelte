@@ -15,6 +15,7 @@
 	import {
 		actionLabel,
 		diagnosticsText,
+		disconnectNotes,
 		healthFacts,
 		healthSummary,
 	} from '$lib/notebookHealth';
@@ -40,6 +41,9 @@
 	let facts = $derived(healthFacts(sync, thresholds, carriedPushAgeS));
 	let summary = $derived(healthSummary(diagnosis));
 	let action = $derived(actionLabel(diagnosis));
+	// What the worker saw of the last close, under a `disconnected` badge.
+	// Muted on purpose: it explains the red badge, it is not a second alarm.
+	let closeNotes = $derived(disconnectNotes(sync, diagnosis, thresholds));
 	// A healthy notebook has nothing to explain, so the badge stays a badge.
 	let expandable = $derived(diagnosis.state !== 'live');
 
@@ -70,6 +74,9 @@
 	>
 		{diagnosis.label}{#if expandable}<span class="ml-1 opacity-70">▾</span>{/if}
 	</button>
+	{#each closeNotes as note (note)}
+		<span class="block max-w-xs text-[11px] leading-tight text-foreground-muted">{note}</span>
+	{/each}
 
 	{#if open && expandable}
 		<!-- Click-away, behind the panel. -->

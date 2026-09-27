@@ -205,14 +205,23 @@ export interface Diagnosis {
 	state: NotebookState;
 	action: NotebookAction;
 	/**
-	 * Whether the page may take `action` on its own. True for exactly one
-	 * case: a socket that never opened after the asset burst settled, with no
-	 * operation in flight on the notebook or its worker. Every other action
-	 * is a suggestion a person takes with a button, because a guess acted on
-	 * without being asked is how a busy worker got a fresh asset burst on top
-	 * of whatever was already keeping it busy.
+	 * Whether the page may take `action` on its own. True for two cases, both
+	 * with no operation in flight on the notebook or its worker: a socket that
+	 * never opened after the asset burst settled, and a socket that opened,
+	 * dropped, and stayed down past the time Marimo's own client gets to
+	 * reconnect. Every other action is a suggestion a person takes with a
+	 * button, because a guess acted on without being asked is how a busy
+	 * worker got a fresh asset burst on top of whatever was already keeping
+	 * it busy.
 	 */
 	automatic: boolean;
+	/**
+	 * The automatic action waits for a person to be looking. Set on the
+	 * dropped socket: a remount is a fresh Marimo session, and one opened in
+	 * a hidden tab spends budget and worker capacity on a page nobody is
+	 * reading, which a remount on return does just as well.
+	 */
+	onlyWhenVisible?: boolean;
 	label: string;
 	/** One line naming the broken hop, for the badge tooltip. */
 	detail: string;
@@ -413,20 +422,40 @@ export function diagnose(
 				detail: 'Waiting for the notebook to open its connection.',
 			};
 		}
-		// Only a socket that never opened is remounted without asking: that
-		// is the one failure a fresh iframe reliably fixes, and the busy check
-		// above has already ruled out a worker with work in flight. A socket
-		// that opened and dropped may be the worker shedding load, so a
-		// person decides.
-		const neverOpened = transport.ws_opened_total === 0;
+		// A socket that never opened is remounted without asking: that is
+		// the failure a fresh iframe reliably fixes, and the busy check above
+		// has already ruled out a worker with work in flight.
+		if (transport.ws_opened_total === 0) {
+			return {
+				state: 'no_transport',
+				action: 'remount',
+				automatic: true,
+				label: 'reconnecting',
+				detail: 'The notebook never opened its connection.',
+			};
+		}
+		// A socket that opened and dropped is remounted too, on two
+		// conditions. Marimo's own client gets its chance first: the drop
+		// must have lasted `ws_open_deadline_s`, the time a socket is given
+		// to open at all, so this does not race a reconnect that would have
+		// succeeded. And only while someone is looking (`onlyWhenVisible`):
+		// left alone, a page whose socket dropped after a good session sat on
+		// `disconnected` until someone reloaded it by hand, which reads as
+		// broken. The budget and backoff in `planRemount` still bound it, so
+		// a worker shedding load is not answered with a remount loop.
+		// Without a close age (an older worker) the drop cannot be timed, and
+		// the backoff is the only grace it gets.
+		const closeAge = transport.ws_last_close_age_s ?? null;
+		const reconnectWindowOver = closeAge === null || closeAge >= thresholds.ws_open_deadline_s;
 		return {
 			state: 'no_transport',
 			action: 'remount',
-			automatic: neverOpened,
-			label: neverOpened ? 'reconnecting' : 'disconnected',
-			detail: neverOpened
-				? 'The notebook never opened its connection.'
-				: 'The notebook’s connection dropped and did not come back.',
+			automatic: reconnectWindowOver,
+			onlyWhenVisible: true,
+			label: 'disconnected',
+			detail: reconnectWindowOver
+				? 'The notebook’s connection dropped and did not come back.'
+				: 'The notebook’s connection dropped; waiting for it to reconnect on its own.',
 		};
 	}
 
@@ -523,12 +552,39 @@ export interface RemountPlan {
 }
 
 /**
+ * Whether the page is showing a socket that opened and then dropped: the
+ * `disconnected` verdict, as distinct from one that never connected.
+ */
+export function isDisconnected(diagnosis: Diagnosis, sync: NotebookSync): boolean {
+	const transport = sync.transport;
+	return (
+		diagnosis.state === 'no_transport' &&
+		!!transport &&
+		transport.ws_sessions < 1 &&
+		transport.ws_opened_total > 0
+	);
+}
+
+/**
+ * Whether the page may act on a diagnosis by itself right now: it is
+ * automatic, its action is a remount, and, when it waits for a person to be
+ * looking, the page is visible. The page also uses this to call off a
+ * queued remount whose reason has gone.
+ */
+export function mayRemountNow(diagnosis: Diagnosis, visible: boolean): boolean {
+	if (!diagnosis.automatic || diagnosis.action !== 'remount') return false;
+	return visible || !diagnosis.onlyWhenVisible;
+}
+
+/**
  * Decide whether to reload the iframe on the page's own initiative, given a
- * diagnosis and the remounts already made. Pure: the caller supplies the
- * clock as `nowS`.
+ * diagnosis, the remounts already made and whether the page is visible. Pure:
+ * the caller supplies the clock as `nowS` and reads `visible` from
+ * `document.visibilityState`.
  *
- * Only an `automatic` diagnosis is acted on, which is the socket that never
- * opened with nothing in flight; a remount the diagnosis merely suggests
+ * Only an `automatic` diagnosis is acted on: a socket that never opened, or
+ * one that dropped and stayed down, with nothing in flight. The dropped one
+ * waits while the page is hidden. A remount the diagnosis merely suggests
  * waits for its button, and a busy verdict plans nothing at all.
  *
  * Capped rather than looping. Each remount is a fresh Marimo session, which
@@ -551,6 +607,7 @@ export function planRemount(
 	history: readonly number[],
 	nowS: number,
 	thresholds: NotebookViewerThresholds,
+	visible: boolean,
 ): RemountPlan {
 	const { remount_budget: budget, remount_window_s: window, remount_backoff_s: backoff } =
 		thresholds;
@@ -558,8 +615,13 @@ export function planRemount(
 	if (!diagnosis.automatic || diagnosis.action !== 'remount') {
 		return { remount: false, delayS: 0, exhausted: false, history: recent };
 	}
+	// Ahead of visibility, so a spent budget reads as spent whether or not
+	// anyone is looking.
 	if (recent.length >= budget) {
 		return { remount: false, delayS: 0, exhausted: true, history: recent };
+	}
+	if (!mayRemountNow(diagnosis, visible)) {
+		return { remount: false, delayS: 0, exhausted: false, history: recent };
 	}
 	// Backing off between tries, because the common cause of a slow connect is
 	// a busy worker, and remounting immediately adds a fresh asset burst to

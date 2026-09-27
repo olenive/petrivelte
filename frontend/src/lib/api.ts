@@ -801,9 +801,16 @@ export interface Worker {
 	updated_at: string;
 	/** The worker's build: its git commit, when the control plane first saw
 	 *  it, and whether it matches the control plane's own build (null when
-	 *  either side is unknown). Absent on an older control plane. */
+	 *  either side is unknown). The match compares worker image content
+	 *  hashes when both sides have one and falls back to commits otherwise.
+	 *  Absent on an older control plane. */
 	build_commit?: string | null;
 	build_seen_at?: string | null;
+	/** Content hash of the worker image's inputs, or null when the worker
+	 *  predates it. When both sides report one, `build_matches_control_plane`
+	 *  compares these hashes, so a worker built from an older commit whose
+	 *  worker image is unchanged still matches. */
+	build_worker_hash?: string | null;
 	build_matches_control_plane?: boolean | null;
 }
 
@@ -1451,6 +1458,18 @@ export interface NotebookTransport {
 	frames_relayed: number;
 	last_frame_age_s: number | null;
 	first_report_age_s: number | null;
+	/** The last socket close the worker's relay saw for this notebook: its
+	 *  close code, its reason, and how long ago. Null when no socket has
+	 *  closed, and absent on a worker that predates them; read absent as null. */
+	ws_last_close_code?: number | null;
+	ws_last_close_reason?: string | null;
+	ws_last_close_age_s?: number | null;
+	/** Marimo ends a session its socket left (after its 120 s session TTL),
+	 *  and a later click on the page hits the dead session id. The worker
+	 *  counts those here rather than reporting them as an error group.
+	 *  Absent on an older worker; read absent as zero and null. */
+	session_expired_total?: number;
+	last_session_expired_age_s?: number | null;
 }
 
 export interface NotebookSync {
@@ -1628,9 +1647,16 @@ export interface WiringWorker {
 	memory_peak_mb: number | null;
 	/** The worker's build: its git commit, when the control plane first saw
 	 *  it, and whether it matches the control plane's own build (null when
-	 *  either side is unknown). Absent on an older control plane. */
+	 *  either side is unknown). The match compares worker image content
+	 *  hashes when both sides have one and falls back to commits otherwise.
+	 *  Absent on an older control plane. */
 	build_commit?: string | null;
 	build_seen_at?: string | null;
+	/** Content hash of the worker image's inputs, or null when the worker
+	 *  predates it. When both sides report one, `build_matches_control_plane`
+	 *  compares these hashes, so a worker built from an older commit whose
+	 *  worker image is unchanged still matches. */
+	build_worker_hash?: string | null;
 	build_matches_control_plane?: boolean | null;
 }
 

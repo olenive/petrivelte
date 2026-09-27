@@ -22,7 +22,7 @@
  */
 
 import type { NotebookSync } from './api';
-import { framesStalled, type Diagnosis, type NotebookState } from './notebookSync';
+import { framesStalled, isDisconnected, type Diagnosis, type NotebookState } from './notebookSync';
 import type { NotebookViewerThresholds } from './notebookThresholds';
 
 /** `ok: null` means "cannot tell from here" — never rendered as a failure. */
@@ -152,6 +152,45 @@ export function frameFact(
 		ok: !stalled,
 		note: stalled ? note : `${countLabel(transport.frames_relayed)} updates received`,
 	};
+}
+
+/**
+ * What the worker knows about why a dropped socket dropped, as one or two
+ * short lines for under the `disconnected` badge. Empty for any other
+ * verdict, and for a worker that reports nothing about the close.
+ *
+ * The first line is the last close: "socket closed 5m 0s ago (1006, upstream
+ * closed)", with whichever of age, code and reason the worker had. The second
+ * appears when Marimo ended the session after the socket dropped: that is
+ * Marimo's session TTL doing its job, not a fault, and a remount starts a
+ * fresh session. It counts as recent when it happened after the last close,
+ * or, with no close age to compare against, within the remount window.
+ */
+export function disconnectNotes(
+	sync: NotebookSync,
+	diagnosis: Diagnosis,
+	thresholds: NotebookViewerThresholds | null,
+): string[] {
+	const transport = sync.transport;
+	if (!transport || !isDisconnected(diagnosis, sync)) return [];
+	const lines: string[] = [];
+
+	const code = transport.ws_last_close_code ?? null;
+	const reason = transport.ws_last_close_reason?.trim() || null;
+	const closeAge = transport.ws_last_close_age_s ?? null;
+	const why = [code === null ? null : String(code), reason].filter((part) => part !== null);
+	if (closeAge !== null || why.length > 0) {
+		const when = closeAge === null ? 'socket closed' : `socket closed ${ageLabel(closeAge)}`;
+		lines.push(why.length > 0 ? `${when} (${why.join(', ')})` : when);
+	}
+
+	const expired = transport.session_expired_total ?? 0;
+	const expiredAge = transport.last_session_expired_age_s ?? null;
+	const horizon = closeAge ?? thresholds?.remount_window_s ?? null;
+	if (expired > 0 && expiredAge !== null && horizon !== null && expiredAge <= horizon) {
+		lines.push('Marimo closed the session after the socket dropped; a fresh session starts on remount');
+	}
+	return lines;
 }
 
 export function healthFacts(

@@ -2,8 +2,11 @@
  * Which build each worker runs, in words.
  *
  * The control plane and every worker record the git commit they were built
- * from. A worker on a different build from the control plane is owed a roll,
- * and the marker says so with the exact command. Every field may be absent
+ * from, and a content hash of the worker image's inputs. The control plane
+ * decides whether they match (hashes when both sides have one, else commits).
+ * A worker that does not match is owed a roll, and the marker says so with
+ * the exact command. A worker built from an older commit that still matches
+ * runs the same worker image contents, and its tooltip says no roll is owed. Every field may be absent
  * (an older control plane or worker), and absent reads as unknown.
  *
  * Pure, like the other `lib` helpers the pages render: the cases are a table.
@@ -17,6 +20,7 @@ export interface WorkerBuildSource {
 	fly_machine_id: string | null;
 	build_commit?: string | null;
 	build_seen_at?: string | null;
+	build_worker_hash?: string | null;
 	build_matches_control_plane?: boolean | null;
 }
 
@@ -81,12 +85,20 @@ export function buildChip(
 		};
 	}
 	const seen = formatDeploymentTime(worker.build_seen_at) ?? worker.build_seen_at;
-	const tooltip = seen
-		? `Build ${worker.build_commit?.trim()}\nfirst seen ${seen}`
-		: `Build ${worker.build_commit?.trim()}`;
+	const hash = worker.build_worker_hash?.trim();
+	const cpShort = controlPlaneShort(controlPlane);
+	const lines = [`Build ${worker.build_commit?.trim()}`];
+	if (seen) lines.push(`first seen ${seen}`);
+	if (hash) lines.push(`worker image hash ${hash}`);
+	if (worker.build_matches_control_plane === true && cpShort && cpShort !== short) {
+		lines.push(
+			`Built from an older commit than the control plane (${cpShort}), but its worker image contents are the same as the control plane's worker build, so no roll is owed.`,
+		);
+	}
+	const tooltip = lines.join('\n');
 	const marker =
 		worker.build_matches_control_plane === false
-			? rollMarker(worker, controlPlaneShort(controlPlane))
+			? rollMarker(worker, cpShort)
 			: null;
 	return { chip: { label: short, tooltip, tone: 'muted' }, marker };
 }

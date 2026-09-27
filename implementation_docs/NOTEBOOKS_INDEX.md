@@ -72,9 +72,16 @@ leftovers from an earlier run and are ignored.
 | `syncing`      | "starting…": bridge never reported, opened under `bridge_start_deadline_s` ago |
 | `stale`        | "not tracking": bridge never reported, opened longer ago than that   |
 | `stale`        | "not tracking": bridge reported, but no slots for its bindings       |
-| `stale`        | bridge reported, a slot `stale` or `disconnected` by `slotSyncState` |
+| `net not loaded` | bridge reported, a bound net's `load_state` is not `loaded`; muted grey, the detail names each such net and its state |
+| `stale`        | bridge reported, every bound net loaded (or not in the payload), a slot `stale` or `disconnected` by `slotSyncState` |
 | `syncing`      | "syncing…": bridge reported, a slot waiting for its first sync       |
 | `tracking`     | bridge reported (or no transport block), every slot `live`           |
+
+A bound net that is not loaded leaves the bridge nothing to sync from, so its
+slot never syncs. Reading that as `stale · never synced` pointed at the
+notebook when the missing piece was the net, so the badge names the net
+instead, from the load states the wiring payload already carries. `stale`
+keeps its meaning: a loaded net the bridge cannot reach.
 
 Reuse `netFact` and `dataFact` from `lib/notebookHealth.ts` for the words and
 thresholds; do not duplicate their logic. Show "viewed in N tabs" from

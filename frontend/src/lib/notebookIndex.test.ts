@@ -10,6 +10,7 @@ import type {
 	WiringWorker,
 } from './api';
 import {
+	type RowBinding,
 	UNASSIGNED_KEY,
 	groupByWorker,
 	notebookBadge,
@@ -185,6 +186,75 @@ describe('the badge table', () => {
 		expect(badge.label).toBe('syncing…');
 		expect(badge.colour).toBe('#eab308');
 		expect(badge.title).toContain('waiting for the first sync: traffic');
+	});
+
+	describe('a bound net that is not loaded', () => {
+		// The bridge is reporting, but its net is not there to sync from, so
+		// its slot never syncs. That used to read `stale · never synced`,
+		// which pointed at the notebook when the missing piece was the net.
+		const neverSynced = sync({
+			slots: [slot({ synced: false, last_sync_age_s: null, last_error: 'net not loaded' })],
+		});
+		const binding = (over: Partial<RowBinding> = {}): RowBinding => ({
+			slotName: 'traffic',
+			netId: 'net-1',
+			netName: 'monitor-anomalies',
+			netLoadState: 'unloaded',
+			...over,
+		});
+
+		it('names the net in the expected tone', () => {
+			const badge = notebookBadge(notebook(), neverSynced, T, 0, { bindings: [binding()] });
+
+			expect(badge.name).toBe('net_not_loaded');
+			expect(badge.label).toBe('net not loaded');
+			expect(badge.colour).toBe('#6b7280');
+			expect(badge.detail).toBe('monitor-anomalies unloaded');
+			expect(badge.title).toContain('traffic → monitor-anomalies: unloaded');
+		});
+
+		it('names every net that is not loaded, and only those', () => {
+			const badge = notebookBadge(notebook(), neverSynced, T, 0, {
+				bindings: [
+					binding(),
+					binding({ slotName: 'reach', netId: 'net-2', netName: 'monitor-reachability', netLoadState: 'error' }),
+					binding({ slotName: 'zeta', netId: 'net-3', netName: 'fine', netLoadState: 'loaded' }),
+				],
+			});
+
+			expect(badge.detail).toBe('monitor-anomalies unloaded, monitor-reachability error');
+			expect(badge.title).not.toContain('fine');
+		});
+
+		it('keeps stale for a net that is loaded and cannot be reached', () => {
+			const badge = notebookBadge(notebook(), neverSynced, T, 0, {
+				bindings: [binding({ netLoadState: 'loaded' })],
+			});
+
+			expect(badge.name).toBe('stale');
+			expect(badge.label).toBe('stale');
+		});
+
+		it('keeps stale when the net is not in the payload or no bindings are given', () => {
+			expect(
+				notebookBadge(notebook(), neverSynced, T, 0, {
+					bindings: [binding({ netName: null, netLoadState: null })],
+				}).name,
+			).toBe('stale');
+			expect(notebookBadge(notebook(), neverSynced, T).name).toBe('stale');
+		});
+
+		it('leaves a notebook nobody has opened as loaded, whatever its net', () => {
+			const badge = notebookBadge(
+				notebook(),
+				sync({ transport: transport({ first_report_age_s: null, ws_opened_total: 0 }) }),
+				T,
+				0,
+				{ bindings: [binding()] },
+			);
+
+			expect(badge.name).toBe('loaded');
+		});
 	});
 
 	it('reads a slot that reports an error as stale', () => {
@@ -581,7 +651,12 @@ describe('grouping', () => {
 			}),
 		);
 		expect(sections[0].rows[0].bindings).toEqual([
-			{ slotName: 'traffic', netId: 'net-1', netName: 'monitor-anomalies' },
+			{
+				slotName: 'traffic',
+				netId: 'net-1',
+				netName: 'monitor-anomalies',
+				netLoadState: 'loaded',
+			},
 		]);
 	});
 
@@ -594,6 +669,7 @@ describe('grouping', () => {
 			}),
 		);
 		expect(sections[0].rows[0].bindings[0].netName).toBeNull();
+		expect(sections[0].rows[0].bindings[0].netLoadState).toBeNull();
 	});
 
 	it('counts only the nets on that worker in its header', () => {
