@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import type { ApiToken } from './api';
 import {
 	DEFAULT_EXPIRY_DAYS,
+	DEFAULT_SCOPE,
 	EXPIRY_CHOICES,
+	SCOPE_CHOICES,
+	describeScope,
 	describeExpiry,
 	describeLastUsed,
 	tokenLabel,
@@ -23,6 +26,7 @@ function token(overrides: Partial<ApiToken> = {}): ApiToken {
 		id: 't1',
 		name: 'laptop scripts',
 		prefix: 'abcd1234',
+		scope: 'read',
 		created_at: iso(NOW - 10 * DAY),
 		expires_at: iso(NOW + 212 * DAY),
 		last_used_at: null,
@@ -120,5 +124,26 @@ describe('EXPIRY_CHOICES', () => {
 		expect(EXPIRY_CHOICES.map((c) => c.days)).toEqual([30, 90, 365]);
 		expect(EXPIRY_CHOICES.every((c) => c.label.length > 0)).toBe(true);
 		expect(EXPIRY_CHOICES.some((c) => c.days === DEFAULT_EXPIRY_DAYS)).toBe(true);
+	});
+});
+
+describe('SCOPE_CHOICES', () => {
+	it('offers read, operate and manage, narrowest first, defaulting to read', () => {
+		expect(SCOPE_CHOICES.map((c) => c.scope)).toEqual(['read', 'operate', 'manage']);
+		expect(DEFAULT_SCOPE).toBe('read');
+	});
+});
+
+describe('describeScope', () => {
+	it('gives one line per scope', () => {
+		expect(describeScope('read')).toBe('see everything, change nothing');
+		expect(describeScope('operate')).toBe('load, start, stop, step, inject and run what exists');
+		expect(describeScope('manage')).toBe(
+			'also create and delete workers, deployments, nets and repositories',
+		);
+	});
+
+	it('shows an unknown scope as itself', () => {
+		expect(describeScope('admin')).toBe('admin');
 	});
 });

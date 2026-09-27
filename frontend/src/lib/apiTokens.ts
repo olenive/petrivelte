@@ -3,7 +3,7 @@
  * Every function takes `nowMs` so the wording is deterministic in tests.
  */
 
-import type { ApiToken } from '$lib/api';
+import type { ApiToken, ApiTokenScope } from '$lib/api';
 
 export type ApiTokenStatus = 'active' | 'expiring' | 'expired' | 'revoked';
 
@@ -67,4 +67,19 @@ export function formatCreated(token: ApiToken): string {
 		month: 'short',
 		day: 'numeric',
 	});
+}
+
+/** The scopes offered when creating a token, narrowest first. */
+export const SCOPE_CHOICES: readonly { scope: ApiTokenScope; description: string }[] = [
+	{ scope: 'read', description: 'see everything, change nothing' },
+	{ scope: 'operate', description: 'load, start, stop, step, inject and run what exists' },
+	{ scope: 'manage', description: 'also create and delete workers, deployments, nets and repositories' },
+];
+
+/** The narrowest scope is the default, matching the server. */
+export const DEFAULT_SCOPE: ApiTokenScope = 'read';
+
+/** One line saying what a scope allows; an unknown scope is shown as itself. */
+export function describeScope(scope: string): string {
+	return SCOPE_CHOICES.find((c) => c.scope === scope)?.description ?? scope;
 }

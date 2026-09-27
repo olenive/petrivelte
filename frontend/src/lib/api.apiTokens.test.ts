@@ -14,6 +14,7 @@ const TOKEN = {
 	id: 'tok-1',
 	name: 'laptop scripts',
 	prefix: 'abcd1234',
+	scope: 'read',
 	created_at: '2026-09-25T12:00:00Z',
 	expires_at: '2027-09-25T12:00:00Z',
 	last_used_at: null,
@@ -51,29 +52,30 @@ describe('listApiTokens', () => {
 });
 
 describe('createApiToken', () => {
-	it('POSTs the name and expiry in days and returns the one-time token', async () => {
-		const created = { ...TOKEN, token: 'petri_pat_abcd1234secret' };
+	it('POSTs the name, expiry in days and scope and returns the one-time token', async () => {
+		const created = { ...TOKEN, scope: 'operate', token: 'petri_pat_abcd1234secret' };
 		const fetchMock = respond(201, created);
-		await expect(createApiToken('laptop scripts', 365)).resolves.toEqual(created);
+		await expect(createApiToken('laptop scripts', 365, 'operate')).resolves.toEqual(created);
 		const [url, init] = lastCall(fetchMock);
 		expect(url).toBe('http://cp.test/api/auth/tokens');
 		expect(init.method).toBe('POST');
 		expect(JSON.parse(String(init.body))).toEqual({
 			name: 'laptop scripts',
 			expires_in_days: 365,
+			scope: 'operate',
 		});
 	});
 
 	it('throws the 400 detail when a limit is exceeded', async () => {
 		respond(400, { detail: 'You already have 20 active API tokens; revoke one first.' });
-		await expect(createApiToken('one too many', 30)).rejects.toThrow(
+		await expect(createApiToken('one too many', 30, 'read')).rejects.toThrow(
 			'You already have 20 active API tokens; revoke one first.',
 		);
 	});
 
 	it('reads a Pydantic validation message', async () => {
 		respond(422, { detail: [{ loc: ['body', 'name'], msg: 'String should have at least 1 character', type: 'x' }] });
-		await expect(createApiToken('', 30)).rejects.toThrow('String should have at least 1 character');
+		await expect(createApiToken('', 30, 'read')).rejects.toThrow('String should have at least 1 character');
 	});
 });
 

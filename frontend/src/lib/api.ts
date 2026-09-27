@@ -216,10 +216,15 @@ export async function changePassword(currentPassword: string, newPassword: strin
 
 /** A personal API token as the control plane lists it. The secret itself is
  * never listed; `prefix` is the 8 characters after `petri_pat_`. */
+/** What a token may do: read sees everything and changes nothing, operate
+ * also drives what exists, manage also creates and deletes. */
+export type ApiTokenScope = 'read' | 'operate' | 'manage';
+
 export interface ApiToken {
 	id: string;
 	name: string;
 	prefix: string;
+	scope: ApiTokenScope;
 	created_at: string;
 	expires_at: string;
 	last_used_at: string | null;
@@ -237,8 +242,12 @@ export async function listApiTokens(): Promise<ApiToken[]> {
 	return res.json();
 }
 
-export async function createApiToken(name: string, expiresInDays: number): Promise<ApiTokenCreated> {
-	const res = await post('/api/auth/tokens', { name, expires_in_days: expiresInDays });
+export async function createApiToken(
+	name: string,
+	expiresInDays: number,
+	scope: ApiTokenScope,
+): Promise<ApiTokenCreated> {
+	const res = await post('/api/auth/tokens', { name, expires_in_days: expiresInDays, scope });
 	if (!res.ok) throw new Error(extractErrorMessage(await res.json().catch(() => null), 'Failed to create API token'));
 	return res.json();
 }

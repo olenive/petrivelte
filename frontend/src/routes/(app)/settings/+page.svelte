@@ -22,7 +22,10 @@
 	} from '$lib/api';
 	import {
 		DEFAULT_EXPIRY_DAYS,
+		DEFAULT_SCOPE,
 		EXPIRY_CHOICES,
+		SCOPE_CHOICES,
+		describeScope,
 		describeExpiry,
 		describeLastUsed,
 		formatCreated,
@@ -65,6 +68,7 @@
 	let tokensNow = $state(Date.now());
 	let tokenName = $state('');
 	let tokenExpiryDays = $state(DEFAULT_EXPIRY_DAYS);
+	let tokenScope = $state(DEFAULT_SCOPE);
 	let tokensError = $state('');
 	let tokenLoading = $state(false);
 	let revokingId = $state<string | null>(null);
@@ -208,7 +212,7 @@
 		}
 		tokenLoading = true;
 		try {
-			createdToken = await createApiToken(name, tokenExpiryDays);
+			createdToken = await createApiToken(name, tokenExpiryDays, tokenScope);
 			tokenName = '';
 			await loadTokens();
 		} catch (e: any) {
@@ -417,6 +421,7 @@
 										<div class="flex items-center gap-2">
 											<span class="text-foreground truncate">{token.name}</span>
 											<span class="text-xs px-2 py-0.5 rounded-sm {STATUS_BADGE[status]}">{status}</span>
+											<span class="text-xs px-2 py-0.5 rounded-sm bg-border text-foreground-muted" title={describeScope(token.scope)}>{token.scope}</span>
 										</div>
 										<code class="text-xs text-foreground-muted">{tokenLabel(token.prefix)}</code>
 									</div>
@@ -464,6 +469,16 @@
 							{/each}
 						</select>
 					</label>
+
+					<fieldset class="flex flex-col gap-1 text-sm text-foreground-muted">
+						<legend class="mb-1">Scope</legend>
+						{#each SCOPE_CHOICES as choice (choice.scope)}
+							<label class="flex items-baseline gap-2 cursor-pointer">
+								<input type="radio" name="token-scope" value={choice.scope} bind:group={tokenScope} />
+								<span><span class="text-foreground">{choice.scope}</span>: {choice.description}</span>
+							</label>
+						{/each}
+					</fieldset>
 
 					<button type="submit" disabled={tokenLoading}
 						class="w-full mt-2 py-2.5 border border-accent rounded-md bg-accent text-accent-foreground text-base font-semibold cursor-pointer transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed">
