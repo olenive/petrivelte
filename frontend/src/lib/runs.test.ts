@@ -794,17 +794,19 @@ describe('scheduleFacts', () => {
 		expect(withState('invalid')).toBe('invalid');
 	});
 
-	it('carries the server pending refusal on an overdue slot', () => {
+	it('shows the server message alone on an overdue slot, since it names the pending reason', () => {
+		const message = 'Due since 02:00 UTC on 5 Sep 2026, waiting: worker not ready since 02:00 UTC';
 		const facts = scheduleFacts({
 			...netSchedule(),
 			schedule_facts: {
 				expression: '0 2 * * *', state: 'overdue', next_run_at: '2026-09-05T02:00:00Z',
 				pending_reason: 'worker_not_ready', pending_since: '2026-09-05T02:00:10Z',
-				error: null, message: 'overdue since 02:00 UTC',
+				error: null, message,
 			},
 		}, NOW);
 		expect(facts?.kind).toBe('due');
-		expect(facts?.pending?.text).toContain('waiting for worker');
+		expect(facts?.when).toBe(message);
+		expect(facts?.pending).toBeNull();
 	});
 
 	it('falls back to the client composition when the server sends no facts', () => {

@@ -575,7 +575,9 @@ export function scheduleFacts(
 			kind,
 			when: server.message,
 			title: `${server.expression}: ${server.message}`,
-			pending: kind === 'due' ? pendingLabel(server, now) : null,
+			// The server's message already names the pending reason and since
+			// when on an overdue slot, so no client label is added beside it.
+			pending: null,
 			error,
 		};
 	}
