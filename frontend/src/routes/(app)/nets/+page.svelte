@@ -35,7 +35,7 @@
 	import { portal } from '$lib/actions/portal';
 	import { anomalyLabels, anomalySuffix } from '$lib/netAnomalies';
 	import { groupByDefinition } from '$lib/netInstances';
-	import { diagnoseClasses, diagnoseStateLabel } from '$lib/netDiagnose';
+	import { diagnoseActivityLine, diagnoseClasses, diagnoseStateLabel } from '$lib/netDiagnose';
 	import type { GraphState, Token, LogEntry, Transition } from '$lib/types';
 	import {
 		TOKEN_DOT_MAX,
@@ -1692,6 +1692,7 @@
 			{/if}
 			{#if shownDiagnosis}
 				{@const checked = formatStamp(shownDiagnosis.checked_at)}
+				{@const activity = diagnoseActivityLine(shownDiagnosis.facts)}
 				<div class="basis-full flex flex-col gap-1">
 					<div class="flex items-center gap-2 flex-wrap">
 						<span class="px-2 py-0.5 rounded-sm font-medium {diagnoseClasses(shownDiagnosis.state)}">{diagnoseStateLabel(shownDiagnosis.state)}</span>
@@ -1700,6 +1701,9 @@
 							<span class="text-foreground-faint" title={checked.title}>checked {checked.text}</span>
 						{/if}
 					</div>
+					{#if activity}
+						<p class="text-foreground-muted">{activity}</p>
+					{/if}
 					{#if shownDiagnosis.action}
 						<p class="text-foreground-muted">Next: {shownDiagnosis.action}</p>
 					{/if}

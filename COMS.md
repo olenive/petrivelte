@@ -54,6 +54,12 @@ worker. When the CP refuses on its own it answers
 `isNotLoaded` also accepts a bare 404 with no reason, from an older CP.
 `diagnoseNet` (`GET /api/nets/{id}/diagnose`) returns one verdict per net,
 judged against its own stall threshold; `netDiagnose.ts` colours it.
+State `waiting` (a 24/7 net with no stall threshold, running but with nothing
+enabled) is quiet like `scheduled`. `facts.worker_probe` may carry
+`executing_since`, `executing_transition` and `idle_since`, with
+`facts.executing_age_seconds`, `idle_age_seconds`, `stall_threshold_seconds`
+and `stall_threshold_source` (`declared` or `default`); all nullable, and the
+panel turns the first set into one line under the reason.
 
 ## Live channels
 

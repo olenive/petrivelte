@@ -596,8 +596,31 @@ export interface NetDiagnosis {
 	state: string;
 	reason: string;
 	action: string;
-	facts: Record<string, unknown>;
+	facts: NetDiagnosisFacts;
 	checked_at: string;
+}
+
+/** What the worker said about the net when asked. Every field is optional
+ *  and nullable: an older control plane or worker leaves them out. */
+export interface NetDiagnosisProbe {
+	/** When the transition now firing started, ISO 8601. */
+	executing_since?: string | null;
+	executing_transition?: string | null;
+	/** Since when nothing has been enabled, ISO 8601. */
+	idle_since?: string | null;
+	[key: string]: unknown;
+}
+
+/** The evidence behind a verdict. Only the fields the page reads are named;
+ *  the rest is shown as raw JSON under Facts. */
+export interface NetDiagnosisFacts {
+	worker_probe?: NetDiagnosisProbe | null;
+	executing_age_seconds?: number | null;
+	idle_age_seconds?: number | null;
+	stall_threshold_seconds?: number | null;
+	/** Whether the threshold is the net's own ("declared") or the process default. */
+	stall_threshold_source?: 'declared' | 'default' | null;
+	[key: string]: unknown;
 }
 
 export async function diagnoseNet(netId: string): Promise<NetDiagnosis> {
