@@ -136,10 +136,12 @@ describe('SCOPE_CHOICES', () => {
 
 describe('describeScope', () => {
 	it('gives one line per scope', () => {
-		expect(describeScope('read')).toBe('see everything, change nothing');
-		expect(describeScope('operate')).toBe('load, start, stop, step, inject and run what exists');
+		expect(describeScope('read')).toBe('GET requests only: see everything, change nothing');
+		expect(describeScope('operate')).toBe(
+			'start, stop, reset, inject, create and edit nets and notebooks: everything except deletes and creating workers or repositories',
+		);
 		expect(describeScope('manage')).toBe(
-			'also create and delete workers, deployments, nets and repositories',
+			'everything, including every delete, creating, provisioning and destroying workers, connecting repositories and starting builds',
 		);
 	});
 

@@ -69,11 +69,24 @@ export function formatCreated(token: ApiToken): string {
 	});
 }
 
-/** The scopes offered when creating a token, narrowest first. */
+/**
+ * The scopes offered when creating a token, narrowest first. The wording
+ * follows the server's rule in petritype_server/auth/scopes.py: manage is
+ * every DELETE plus creating, provisioning and destroying workers, connecting
+ * a GitHub repository and triggering its build; operate is every other write.
+ */
 export const SCOPE_CHOICES: readonly { scope: ApiTokenScope; description: string }[] = [
-	{ scope: 'read', description: 'see everything, change nothing' },
-	{ scope: 'operate', description: 'load, start, stop, step, inject and run what exists' },
-	{ scope: 'manage', description: 'also create and delete workers, deployments, nets and repositories' },
+	{ scope: 'read', description: 'GET requests only: see everything, change nothing' },
+	{
+		scope: 'operate',
+		description:
+			'start, stop, reset, inject, create and edit nets and notebooks: everything except deletes and creating workers or repositories',
+	},
+	{
+		scope: 'manage',
+		description:
+			'everything, including every delete, creating, provisioning and destroying workers, connecting repositories and starting builds',
+	},
 ];
 
 /** The narrowest scope is the default, matching the server. */
