@@ -52,6 +52,7 @@
 		viewersHint,
 		type NotebookRow,
 	} from '$lib/notebookIndex';
+	import { marimoVersionLabel } from '$lib/notebookSync';
 	import {
 		loadNotebookThresholds,
 		type NotebookViewerThresholds,
@@ -621,6 +622,7 @@
 								{@const badge = badgeFor(row)}
 								{@const viewers = viewersHint(syncById.get(nb.id) ?? null)}
 								{@const resume = resumeHint(nb)}
+								{@const marimoVersion = marimoVersionLabel(syncById.get(nb.id))}
 								{@const errors = errorsById.get(nb.id) ?? 0}
 								{@const changed = lastChange(nb.id)}
 								{@const operation = nb.load_state === 'loading' ? operationOf(nb.id) : null}
@@ -667,6 +669,9 @@
 									{/if}
 									{#if viewers}
 										<span class="text-xs text-foreground-faint whitespace-nowrap">{viewers}</span>
+									{/if}
+									{#if marimoVersion}
+										<span class="text-xs text-foreground-muted whitespace-nowrap">{marimoVersion}</span>
 									{/if}
 
 									{#each row.bindings as binding (binding.slotName)}

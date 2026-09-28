@@ -629,3 +629,9 @@ export function planRemount(
 	const delayS = backoff[recent.length] ?? backoff[backoff.length - 1];
 	return { remount: true, delayS, exhausted: false, history: [...recent, nowS + delayS] };
 }
+
+/** "Marimo 0.16.5" when the worker reported the version, else null. */
+export function marimoVersionLabel(sync: Pick<NotebookSync, 'marimo_version'> | null | undefined): string | null {
+	const version = sync?.marimo_version;
+	return version ? `Marimo ${version}` : null;
+}

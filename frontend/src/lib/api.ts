@@ -1651,6 +1651,9 @@ export interface NotebookSync {
 	 *  one runs the worker is known to be busy, and the page waits rather than
 	 *  remounting. Optional for an older control plane. */
 	worker_busy_with?: OperationSummary | null;
+	/** The Marimo version the notebook's subprocess runs. Null when the
+	 *  worker could not tell; absent from an older worker. */
+	marimo_version?: string | null;
 }
 
 /** The viewer's thresholds, served by the control plane from the same

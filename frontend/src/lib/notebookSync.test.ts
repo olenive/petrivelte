@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { NotebookSyncSlot } from './api';
-import { slotSyncState, syncBadge } from './notebookSync';
+import { marimoVersionLabel, slotSyncState, syncBadge } from './notebookSync';
 import { testThresholds } from './notebookThresholds.testing';
 
 /**
@@ -171,5 +171,17 @@ describe('syncBadge', () => {
 		];
 
 		expect(new Set(colours).size).toBe(4);
+	});
+});
+
+describe('marimoVersionLabel', () => {
+	it('names the version when the worker reports one', () => {
+		expect(marimoVersionLabel({ marimo_version: '0.16.5' })).toBe('Marimo 0.16.5');
+	});
+
+	it('is null when the version is null, absent, or there is no sync record', () => {
+		expect(marimoVersionLabel({ marimo_version: null })).toBeNull();
+		expect(marimoVersionLabel({})).toBeNull();
+		expect(marimoVersionLabel(null)).toBeNull();
 	});
 });

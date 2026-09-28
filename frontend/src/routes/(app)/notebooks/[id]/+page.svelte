@@ -39,6 +39,7 @@
 	import {
 		diagnose,
 		isDisconnected,
+		marimoVersionLabel,
 		mayRemountNow,
 		planRemount,
 		undrawnPushAgeS,
@@ -156,6 +157,7 @@
 	// badge disappears instead of freezing at its last reading — a stale
 	// freshness indicator being the one thing worse than none.
 	let syncState = $state<NotebookSync | null>(null);
+	let marimoVersion = $derived(marimoVersionLabel(syncState));
 	let syncPoll: ReturnType<typeof setTimeout> | null = null;
 
 	// Served by the control plane. Until they arrive the badge reads
@@ -876,6 +878,9 @@
 				>
 					· {timingsLabel}
 				</span>
+			{/if}
+			{#if marimoVersion}
+				<span class="text-foreground-muted text-xs whitespace-nowrap">· {marimoVersion}</span>
 			{/if}
 		{/if}
 	</div>
