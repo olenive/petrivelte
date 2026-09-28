@@ -1,139 +1,95 @@
-# Petrivelt Frontend
+# Petrivelte frontend
 
-A Svelte-based frontend for visualizing Petri nets from petritype-server.
+SvelteKit 2, Svelte 5, TypeScript and Tailwind 4. Client-rendered (`ssr =
+false` in the `(app)` layout), served by `adapter-node`. How it talks to the
+control plane is in [../COMS.md](../COMS.md).
 
-## What's Been Implemented
-
-### Core Components ✅
-
-- **WebSocket Store** (`src/lib/stores/webSocket.ts`) - Real-time connection to petritype-server
-- **Type Definitions** (`src/lib/types.ts`) - TypeScript types for graph data structures
-- **GraphPanel** - Main SVG canvas with zoom/pan controls
-- **Place** - Circle nodes representing Petri net places
-- **Transition** - Rectangle nodes representing transitions
-- **Edge** - Connecting lines between places and transitions
-- **Token** - Animated circles that move between places (uses `tweened` stores)
-- **ExecutionLog** - Scrollable log with preserved scroll position
-- **TokenInspector** - Tabbed interface for viewing token data by place
-
-### Features ✅
-
-- ✅ WebSocket connection with auto-reconnect
-- ✅ Real-time graph visualization
-- ✅ Smooth token animations using Svelte's motion stores
-- ✅ Independent panel updates (graph, log, inspector update separately)
-- ✅ Persistent UI state (tabs, scroll, expanded sections)
-- ✅ Zoom and pan controls
-- ✅ TypeScript throughout
-
-## Quick Start
-
-### 1. Start the Backend
-
-Make sure petritype-server is running:
+## Run, test, type-check
 
 ```bash
-cd ../petritype-server
-uv run python -m petritype_server.cli start
+npm install
+npm run dev          # http://localhost:5173, API at PUBLIC_API_URL or http://localhost:8000
+npm test             # vitest run (unit tests sit beside the modules as *.test.ts)
+npx vitest run src/lib/runs.test.ts   # one file
+npm run check        # svelte-kit sync + svelte-check (also type-checks api.contract.ts)
+npm run build && npm run preview
 ```
 
-### 2. Load a Test Graph
+The control plane runs from `../petritype-server` with
+`uv run uvicorn petritype_server.server:app --reload --port 8000`.
+Deploy with `fly deploy` (app `petrify-frontend`; `PUBLIC_API_URL` is set in
+`fly.toml` as a build arg and env var).
 
-```bash
-cd ../petritype-server
-uv run python -m petritype_server.cli create-graph \
-  --module graphs.coloured_balls \
-  --graph-id coloured_balls
-```
+## Routes (`src/routes`)
 
-### 3. Run the Frontend
+| Path | Page |
+|---|---|
+| `/` | Setup checklist and quick start. |
+| `/wiring` | Graph of workers, nets, notebooks and their bindings. |
+| `/nets` | Net selector, graph, execution controls, inject, runs and schedule, logs, secrets, Diagnose. |
+| `/notebooks` | Notebook index grouped by worker, badges from `load_state` plus `/sync`. |
+| `/notebooks/[id]` | One notebook in an iframe, with load progress and health. |
+| `/workers` | Workers, their nets, occupancy, build chip, logs, lifecycle actions. |
+| `/workers/[id]/logs` | Full-page worker log. |
+| `/deployments` | GitHub repos, builds and discovered definitions. |
+| `/settings` | Account, GitHub link, API tokens. |
+| `/login`, `/auth/callback`, `/forgot-password`, `/reset-password`, `/verify-email`, `/confirm-email-change` | Auth flows, under `(auth)`. |
+| `/dev` | Component playground, dev builds only. |
 
-```bash
-bun run dev
-```
+## Library (`src/lib`)
 
-Open http://localhost:5173
+Most modules are pure functions with a table of cases in a sibling test.
 
+- `api.ts`: every control-plane call and its types. `NetProxyError` and
+  `isNotLoaded` for proxy refusals, `diagnoseNet`, `getNetLogHistory(netId,
+  {limit, since, contains, newest_first})`, runs, operations, notebooks,
+  occupancy, wiring. `api.contract.ts` holds compile-time shape checks.
+- `apiTokens.ts`: token display helpers, `SCOPE_CHOICES`, `DEFAULT_SCOPE`
+  (`read`) and `describeScope`; `ApiTokenScope` is in `api.ts`.
+- `netHelpers.ts`: net labels, token layout, `applyTokenCounts`, and
+  `coerceParamValue`, which applies the server's declared `coerce` for a
+  factory parameter and falls back to the annotation text (`int`, `float`,
+  `bool`) for an older control plane.
+- `netAnomalies.ts`: words for the server's anomaly tags; unknown tags show
+  as themselves.
+- `netInstances.ts`: `groupByDefinition` and `workerLabel`, answering which
+  workers a definition runs on.
+- `netDiagnose.ts`: tone map for Diagnose verdict states; unknown states are
+  grey.
+- `runs.ts`: run labels and colours, and `scheduleFacts`, which prefers the
+  server's `schedule_facts` message and computes a client version only when
+  the server sends none.
+- `operations.ts` with `components/OperationStatus.svelte`: slow operations
+  (step, message, elapsed, heartbeat age) folded from operation events.
+- `workerStream.ts`: when the worker event stream must be replaced by a REST
+  refetch. `workerBuild.ts`: build chip and roll command. `workerDelete.ts`:
+  delete warnings.
+- Notebooks: `notebookSync.ts` (diagnosis and remount decisions),
+  `notebookHealth.ts` (net, data and frame facts), `notebookIndex.ts`
+  (index grouping and badges), `notebookLoadProgress.ts`,
+  `notebookLoadReason.ts`, `notebookOccupancy.ts` (memory fit),
+  `notebookIdleTimeout.ts`, `notebookThresholds.ts` (served by the CP),
+  `notebookDefects.ts` (build-time defects).
+- `provenance.ts`: deployment chip and newer-code marker.
+- `stores/`: `serverEvents`, `workerEvents`, `workerLogs`, `workerMemory`,
+  `backendHealth`, `slowRequests`, `tokenSelection`.
+- `idempotency.ts`, `theme.ts`, `types.ts` (graph shapes),
+  `actions/portal.ts`, `security/sensitiveQueryParams.ts`.
+- `components/`: graph rendering (`GraphPanel`, `Place*`, `Transition`,
+  `Edge`, `Token`, `AnimatingToken`), inspectors, `LogViewer`, `RunsPanel`,
+  notebook banners and panels, `AppNav`, `ProvenanceChip`, toasts.
 
-### 4. Deploy to Fly.io
-`fly deploy`
+## Logs
 
+The worker log viewer (inline on `/workers` and full page at
+`/workers/[id]/logs`) shares one store, `stores/workerLogs.ts`: it seeds from
+`/api/workers/{id}/logs/history`, then appends state changes,
+`net_load_log` and `worker_provision_log` from `/api/events`, and `log`,
+`subprocess_output`, `step_error` and `execution_stopped` from the worker's
+own event stream. The nets page
+seeds its log panel from the worker's durable per-net log file through
+`getNetLogHistory`.
 
-## Project Structure
+## Conventions
 
-```
-frontend/
-├── src/
-│   ├── lib/
-│   │   ├── components/
-│   │   │   ├── GraphPanel.svelte       # Main SVG canvas
-│   │   │   ├── Place.svelte           # Place nodes
-│   │   │   ├── Transition.svelte      # Transition nodes
-│   │   │   ├── Edge.svelte            # Edges between nodes
-│   │   │   ├── Token.svelte           # Animated tokens
-│   │   │   ├── ExecutionLog.svelte    # Log panel
-│   │   │   └── TokenInspector.svelte  # Token data viewer
-│   │   ├── stores/
-│   │   │   └── webSocket.ts           # WebSocket connection
-│   │   └── types.ts                   # TypeScript definitions
-│   └── routes/
-│       └── +page.svelte               # Main app
-├── package.json
-└── README.md
-```
-
-## Development
-
-```bash
-# Run dev server with hot reload
-bun run dev
-
-# Type check
-bun run check
-
-# Build for production
-bun run build
-
-# Preview production build
-bun run preview
-```
-
-## What You Should See
-
-When everything is working:
-
-1. **Header** shows "Connected ✓" status
-2. **GraphPanel** displays the Petri net graph
-   - Places as circles
-   - Transitions as rectangles
-   - Edges connecting them
-   - Tokens as colored circles
-3. **ExecutionLog** panel (collapsible)
-   - Shows transition executions
-   - Scroll position preserved during updates
-4. **TokenInspector** panel (collapsible)
-   - Tabs for each place
-   - Shows token data
-   - Tab selection persists during updates
-
-## Key Design Decisions
-
-### Direct SVG Rendering
-No graph library (like Cytoscape). We render SVG directly for full control over token animations.
-
-### Backend Handles Layout
-petritype-server calculates positions using grandalf. Frontend just renders at given coordinates.
-
-### Functional Programming Style
-- No classes with `self` or `@staticmethod`
-- Components are naturally functional in Svelte
-- Stores for shared state
-- TypeScript for type safety
-
-### Independent Panel Updates
-Each component manages its own state. When tokens move:
-- Only GraphPanel re-renders the tokens
-- ExecutionLog preserves scroll position
-- TokenInspector preserves tab selection
-
-This solves the main problem with the Streamlit version where everything would reset during updates.
+Style rules for code in this directory are in `CLAUDE.md` and `AGENTS.md`.
