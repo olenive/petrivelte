@@ -33,6 +33,7 @@
 	import { coerceParamValue, netDisplayName, suggestInstanceName } from '$lib/netHelpers';
 	import { applyRunEvent, pendingLabel, progressLabel, runHeadline } from '$lib/runs';
 	import { workerMemoryStore, type WorkerMemorySnapshot } from '$lib/stores/workerMemory';
+	import { gaugeReading } from '$lib/workerGauge';
 
 	let workers = $state<Worker[]>([]);
 	let nets = $state<Net[]>([]);
@@ -75,8 +76,9 @@
 		workerLogs = m;
 	});
 
-	// Live per-worker memory snapshots (populated by connectRuntimeLogs from
-	// the same SSE stream — no extra connections).
+	// Live per-worker memory snapshots, populated by connectRuntimeLogs from
+	// the same stream as the log lines. Until a worker's first snapshot, its
+	// gauge shows the worker list's figure (see gaugeReading).
 	let workerMemory = $state<Map<string, WorkerMemorySnapshot>>(new Map());
 	const unsubscribeMemory = workerMemoryStore.subscribe(m => {
 		workerMemory = m;
@@ -854,7 +856,9 @@
 		for (const id of activeIds) {
 			loadLogHistory(id); // self-guards against re-fetching
 			if (readyIds.has(id) && !runtimeDisconnects.has(id)) {
-				runtimeDisconnects.set(id, connectRuntimeLogs(id));
+				// A live tail: the page wants new lines and memory snapshots, and
+				// the full-page log viewer is where a worker's buffer is replayed.
+				runtimeDisconnects.set(id, connectRuntimeLogs(id, { replay: false }));
 			}
 		}
 		// Close connections for workers that are gone or no longer active
@@ -1132,17 +1136,21 @@
 					</div>
 
 					{#if expandedWorkerIds[worker.id]}
+						{@const reading = gaugeReading(workerMemory.get(worker.id), worker)}
 						<div class="px-4 py-3 border-t border-border bg-muted">
-							{#if workerMemory.get(worker.id)}
-								{@const snap = workerMemory.get(worker.id)!}
-								{@const limitMb = snap.container_total_mb ?? worker.memory_mb}
-								{@const totalUsedMb = (snap.parent_rss_mb ?? 0) + snap.nets.reduce((sum, n) => sum + n.rss_mb, 0)}
-								{@const percent = limitMb > 0 ? Math.min(100, (totalUsedMb / limitMb) * 100) : 0}
-								<div class="mb-3">
+							{#if reading}
+								{@const percent = reading.percent}
+								<div class="mb-3" data-testid="worker-memory-gauge" data-source={reading.source}>
 									<div class="flex items-center justify-between text-xs text-foreground-muted mb-1">
-										<span>Memory</span>
-										<span>
-											{Math.round(totalUsedMb)} MB / {Math.round(limitMb)} MB ({Math.round(percent)}%)
+										{#if reading.source === 'snapshot'}
+											<span>Memory</span>
+										{:else}
+											<span title="The control plane's last health check read the worker's own server process. Net and notebook processes are not included; the live reading with their breakdown replaces this within a few seconds.">
+												Memory · worker process only, from the last health check
+											</span>
+										{/if}
+										<span data-testid="worker-memory-figure">
+											{Math.round(reading.usedMb)} MB / {Math.round(reading.limitMb)} MB ({Math.round(percent)}%){#if reading.peakMb !== null && reading.peakMb > reading.usedMb}{' '}<span class="opacity-70">(peak {Math.round(reading.peakMb)})</span>{/if}
 										</span>
 									</div>
 									<div class="w-full h-2 bg-card rounded overflow-hidden">

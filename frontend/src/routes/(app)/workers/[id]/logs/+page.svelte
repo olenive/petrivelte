@@ -61,8 +61,9 @@
 	onMount(async () => {
 		await refreshWorker();
 		await loadHistory(workerId);
-		// Connect to runtime log SSE for subprocess output
-		disconnectRuntime = connectRuntimeLogs(workerId);
+		// The worker's buffered events are the only record of its runtime
+		// log, so this viewer asks for all of them before tailing.
+		disconnectRuntime = connectRuntimeLogs(workerId, { replay: true });
 	});
 
 	onDestroy(() => {

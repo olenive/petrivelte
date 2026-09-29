@@ -15,7 +15,7 @@ import { API_URL, getWorkerLogHistory, listNets, type Net } from '$lib/api';
 import { serverEventsStore, type ServerEvent } from '$lib/stores/serverEvents';
 import { setWorkerMemory, type WorkerMemorySnapshot } from '$lib/stores/workerMemory';
 import { createBatchScheduler } from '$lib/batchScheduler';
-import { advanceCursor } from '$lib/workerStream';
+import { advanceCursor, openCursor } from '$lib/workerStream';
 
 // ---- internal state ----
 
@@ -198,6 +198,7 @@ export function clearLogs(workerId: string) {
 interface RuntimeConnection {
 	source: EventSource | null;
 	lastSeq: number;
+	haveCursor: boolean; // whether lastSeq came from this worker's stream
 	reconnectTimer: ReturnType<typeof setTimeout> | null;
 	reconnectDelay: number;
 	failuresSinceOpen: number; // consecutive failed attempts with no successful open
@@ -265,14 +266,25 @@ function gapNote(reason: string | null): string {
 	return `${formatTs(new Date().toISOString())}[runtime] Log stream resumed; ${why}, so lines from that time are missing.`;
 }
 
+export interface RuntimeLogsOptions {
+	/** Whether the first connection asks for the worker's buffered events.
+	 *  The full-page log viewer does: the buffer is the only source of the
+	 *  worker's runtime log history. The workers page does not: it wants
+	 *  live lines and the ``memory_stats`` frames its gauges read, and a
+	 *  replay per ready worker downloads each one's whole buffer (about two
+	 *  thousand events) on every page load. */
+	replay: boolean;
+}
+
 /**
  * Connect to the unified worker event SSE stream and append log-like events
  * to the worker's log store. Returns a cleanup function.
  *
- * Tracks the last seq seen so that when EventSource auto-reconnects the
- * server can skip events we've already received.
+ * Tracks the last seq seen so that a connection the store reopens after a
+ * drop resumes from it and the worker replays only what was missed. The
+ * option has no default: each caller says whether it wants the buffer.
  */
-export function connectRuntimeLogs(workerId: string): () => void {
+export function connectRuntimeLogs(workerId: string, { replay }: RuntimeLogsOptions): () => void {
 	// Replace any existing connection (and stop its reconnect loop) so we
 	// never leak two streams for one worker.
 	const existing = _runtimeSources.get(workerId);
@@ -285,6 +297,7 @@ export function connectRuntimeLogs(workerId: string): () => void {
 	const conn: RuntimeConnection = {
 		source: null,
 		lastSeq: 0,
+		haveCursor: false,
 		reconnectTimer: null,
 		reconnectDelay: _RUNTIME_RECONNECT_BASE_MS,
 		failuresSinceOpen: 0,
@@ -320,7 +333,11 @@ export function connectRuntimeLogs(workerId: string): () => void {
 
 	const open = () => {
 		if (conn.stopped) return;
-		const url = `${API_URL}/api/workers/${workerId}/events?after=${conn.lastSeq}`;
+		// Fixed for this EventSource, whose own automatic reconnects reuse the
+		// URL: a connection opened to skip the replay keeps getting a marker
+		// in place of one.
+		const { after, skippedReplay } = openCursor(replay, conn.haveCursor ? conn.lastSeq : null);
+		const url = `${API_URL}/api/workers/${workerId}/events?after=${after}`;
 		const source = new EventSource(url, { withCredentials: true });
 		conn.source = source;
 
@@ -336,10 +353,13 @@ export function connectRuntimeLogs(workerId: string): () => void {
 			try {
 				const parsed = JSON.parse(event.data) as Record<string, any>;
 				const seq = typeof parsed.seq === 'number' ? parsed.seq : 0;
-				const cursor = advanceCursor(conn.lastSeq, { seq, kind: parsed.kind, data: parsed.data }, false);
+				const cursor = advanceCursor(conn.lastSeq, { seq, kind: parsed.kind, data: parsed.data }, skippedReplay);
 				conn.lastSeq = cursor.lastSeq;
+				conn.haveCursor = true;
 				if (parsed.kind === 'stream_gap') {
-					appendLine(workerId, gapNote(cursor.gap));
+					// The marker that answers a skip only seeds the cursor:
+					// nothing was missed, so there is nothing to note.
+					if (cursor.gap) appendLine(workerId, gapNote(cursor.gap));
 					return;
 				}
 				// Worker-scoped memory_stats events feed the memory gauge —

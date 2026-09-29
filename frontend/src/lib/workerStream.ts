@@ -73,6 +73,27 @@ interface StreamEventLike {
 export const SKIP_REPLAY_AFTER = 1_000_000_000_000;
 
 /**
+ * Where a new connection asks the worker to start, and whether that is a
+ * request to skip the replay.
+ *
+ * ``cursor`` is the last sequence heard on this worker's stream, or null
+ * while nothing has been heard. With a cursor, a connection resumes from it
+ * and the worker replays what followed. Without one, a connection that wants
+ * the worker's history (``replay``) asks from 0 and gets the whole buffer;
+ * any other asks with ``SKIP_REPLAY_AFTER`` and gets one ``stream_gap``
+ * marker that seeds the cursor. ``skippedReplay`` belongs to the connection
+ * opened with this cursor and goes to ``advanceCursor`` for every event on it,
+ * since the browser's own reconnects reuse the URL.
+ */
+export function openCursor(
+	replay: boolean,
+	cursor: number | null,
+): { after: number; skippedReplay: boolean } {
+	if (cursor !== null) return { after: cursor, skippedReplay: false };
+	return replay ? { after: 0, skippedReplay: false } : { after: SKIP_REPLAY_AFTER, skippedReplay: true };
+}
+
+/**
  * The next cursor after an event, and whether the event means the page must
  * resync. ``gap`` is null on the ordinary path.
  *

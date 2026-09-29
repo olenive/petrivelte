@@ -37,7 +37,7 @@ import { setWorkerMemory, type WorkerMemorySnapshot } from '$lib/stores/workerMe
 import {
 	advanceCursor,
 	initialStreamStatus,
-	SKIP_REPLAY_AFTER,
+	openCursor,
 	type StreamState,
 	type StreamStatus,
 } from '$lib/workerStream';
@@ -99,8 +99,7 @@ function connectSSE() {
 	// Fixed for this EventSource, whose own automatic reconnects reuse the
 	// URL: a connection opened to skip the replay keeps getting a marker in
 	// place of one, and a connection opened with a real cursor never does.
-	const skipReplay = !haveCursor;
-	const after = skipReplay ? SKIP_REPLAY_AFTER : lastSeq;
+	const { after, skippedReplay: skipReplay } = openCursor(false, haveCursor ? lastSeq : null);
 	const url = `${API_URL}/api/workers/${workerId}/events?after=${after}`;
 	setState(openedBefore ? 'reconnecting' : 'connecting');
 	eventSource = new EventSource(url, { withCredentials: true });

@@ -12,7 +12,9 @@ The worker stream answers its `after` cursor the way the worker does
 whole buffer, a cursor inside the buffer replays only what follows it, and a
 cursor ahead of the worker's sequence gets one `stream_gap` marker saying
 where the sequence is now, with nothing replayed. Every worker stream request
-and what it was answered with is kept in `worker_stream_answers`.
+and what it was answered with is kept in `worker_stream_answers`. All workers
+share one buffer and one sequence; `publish_worker` with a `worker_id` sends
+the live frame only to that worker's streams.
 
 Every request is recorded in `requests`, so a test can see what the page
 asked for, including anything this fake does not know about. Those unknown
@@ -59,6 +61,8 @@ class FakeControlPlane:
     unknown_paths: list[str] = field(default_factory=list)
     server_streams: list["queue.Queue[str | None]"] = field(default_factory=list)
     worker_streams: list["queue.Queue[str | None]"] = field(default_factory=list)
+    # Which worker each open worker stream was opened for, by `id()` of its queue.
+    worker_stream_owner: dict[int, str] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
     stopping: threading.Event = field(default_factory=threading.Event)
     worker_seq: int = 0
@@ -131,14 +135,18 @@ def _broadcast(streams: list["queue.Queue[str | None]"], frame: str | None) -> N
 
 
 def publish_worker(cp: FakeControlPlane, *, kind: str, data: dict[str, Any], net_id: str | None,
-                   scope: str = "net") -> None:
-    """Send one worker event, numbered like the worker numbers them."""
+                   scope: str = "net", worker_id: str | None = None) -> None:
+    """Send one worker event, numbered like the worker numbers them, to every
+    open worker stream, or with `worker_id` only to that worker's."""
     with cp.lock:
         cp.worker_seq += 1
         event = {"seq": cp.worker_seq, "scope": scope, "net_id": net_id, "kind": kind,
                  "ts": STAMP, "data": data}
         cp.worker_buffer.append(event)
-        _broadcast(cp.worker_streams, _worker_frame(event))
+        streams = cp.worker_streams if worker_id is None else [
+            stream for stream in cp.worker_streams
+            if cp.worker_stream_owner.get(id(stream)) == worker_id]
+        _broadcast(streams, _worker_frame(event))
 
 
 def _worker_frame(event: dict[str, Any]) -> str:
@@ -188,6 +196,21 @@ def _json_answer(cp: FakeControlPlane, path: str, query: str) -> Any:
         return cp.nets
     if path == "/api/events/history":
         return []
+    if path in ("/api/deployments", "/api/notebooks"):
+        return []
+    if path == "/api/wiring":
+        return {"workers": [], "nets": [], "notebooks": [], "bindings": [],
+                "control_plane_build": None}
+    match = re.fullmatch(r"/api/workers/([^/]+)", path)
+    if match:
+        row = next((worker for worker in cp.workers if worker["id"] == match.group(1)), None)
+        if row is not None:
+            return {**row, "assigned_nets": [
+                {key: net[key] for key in ("id", "definition_name", "instance_name", "load_state",
+                                           "entry_module", "entry_function")}
+                for net in cp.nets if net["worker_id"] == row["id"]]}
+    if re.fullmatch(r"/api/workers/[^/]+/logs/history", path):
+        return []
     match = re.fullmatch(r"/api/nets/([^/]+)/execution/state", path)
     if match:
         return cp.execution_state[match.group(1)]
@@ -233,8 +256,9 @@ def _handler_for(cp: FakeControlPlane) -> type[BaseHTTPRequestHandler]:
             if parts.path == "/api/events":
                 self._stream(cp.server_streams)
                 return
-            if re.fullmatch(r"/api/workers/[^/]+/events", parts.path):
-                self._worker_stream(parts.query)
+            match = re.fullmatch(r"/api/workers/([^/]+)/events", parts.path)
+            if match:
+                self._worker_stream(match.group(1), parts.query)
                 return
             self._send_json(_json_answer(cp, parts.path, parts.query))
 
@@ -264,7 +288,7 @@ def _handler_for(cp: FakeControlPlane) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             self.wfile.write(body)
 
-        def _worker_stream(self, query: str) -> None:
+        def _worker_stream(self, worker_id: str, query: str) -> None:
             after = int(parse_qs(query).get("after", ["0"])[0])
             with cp.lock:
                 if cp.refuse_worker_streams > 0:
@@ -279,6 +303,7 @@ def _handler_for(cp: FakeControlPlane) -> type[BaseHTTPRequestHandler]:
                         "seqs": [event["seq"] for event in catch_up_events]})
                     frames: "queue.Queue[str | None]" = queue.Queue()
                     cp.worker_streams.append(frames)
+                    cp.worker_stream_owner[id(frames)] = worker_id
             if refused:
                 self.send_response(204)
                 self._cors()
@@ -326,6 +351,7 @@ def _handler_for(cp: FakeControlPlane) -> type[BaseHTTPRequestHandler]:
                 with cp.lock:
                     if frames in streams:
                         streams.remove(frames)
+                    cp.worker_stream_owner.pop(id(frames), None)
 
     return Handler
 

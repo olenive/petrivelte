@@ -6,6 +6,7 @@ import {
 	capHead,
 	capTail,
 	liveAction,
+	openCursor,
 	prependLogEntry,
 	statusLabel,
 	initialStreamStatus,
@@ -62,6 +63,21 @@ describe('advanceCursor', () => {
 		expect(advanceCursor(2500, { seq: 2501, kind: 'transition_fired' }, true)).toEqual({ lastSeq: 2501, gap: null });
 		expect(advanceCursor(2500, { seq: 4, kind: 'memory_stats' }, true)).toEqual({ lastSeq: 4, gap: 'restarted' });
 	});
+});
+
+describe('openCursor', () => {
+	const cases: Array<[string, boolean, number | null, { after: number; skippedReplay: boolean }]> = [
+		['a live tail with no cursor asks to skip', false, null, { after: SKIP_REPLAY_AFTER, skippedReplay: true }],
+		['a replaying viewer with no cursor asks for the whole buffer', true, null, { after: 0, skippedReplay: false }],
+		['a live tail resumes from its cursor', false, 4200, { after: 4200, skippedReplay: false }],
+		['a replaying viewer resumes from its cursor', true, 4200, { after: 4200, skippedReplay: false }],
+		['a cursor of 0 heard from a fresh worker is still a cursor', false, 0, { after: 0, skippedReplay: false }],
+	];
+	for (const [name, replay, cursor, want] of cases) {
+		it(name, () => {
+			expect(openCursor(replay, cursor)).toEqual(want);
+		});
+	}
 });
 
 describe('statusLabel', () => {

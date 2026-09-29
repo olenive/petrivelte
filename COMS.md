@@ -73,21 +73,34 @@ apart from the one Marimo opens inside the notebook iframe.
   `worker_state_changed`, `net_state_changed`, `notebook_state_changed`,
   `notebook_error`, `net_load_log`, `worker_provision_log`,
   `net_run_started|finished|skipped`, `operation_started|progress|finished`.
-- `GET /api/workers/{id}/events?after={seq}` (`stores/workerEvents.ts`,
-  also opened by `stores/workerLogs.ts`): the worker's unified stream,
+- `GET /api/workers/{id}/events?after={seq}`: the worker's unified stream,
   `{seq, scope, net_id, kind, ts, data}`, with kinds such as
   `transition_fired`, `step_*`, `graph_state`, `log`, `subprocess_output`,
-  `memory_stats` and `stream_gap`. The first connection for a worker asks
-  with `after=1000000000000`, a cursor ahead of any worker sequence, as the
-  CP's own keepalive does: the worker replays nothing and sends one
-  `stream_gap` marker (`reason: restarted`, `data.current_seq` its sequence
-  now) that seeds the cursor. The page has just fetched the net over REST,
-  and replaying a busy worker's whole buffer (2000 events) on top of that
-  froze the tab. Reconnects the store makes itself ask with `after={seq}` so
-  the worker replays what was missed. The stream is a fast path, not the
-  truth: `workerStream.ts` bumps a generation on reconnect, on a
-  `stream_gap` that answers a real cursor, or on a restarted sequence, and
-  the page refetches over REST.
+  `memory_stats` (every 5 s) and `stream_gap`. `after=0` replays the whole
+  buffer, about 2000 events and 6 MB for a busy worker. A connection that
+  wants only a live tail asks with `after=1000000000000`, a cursor ahead of
+  any worker sequence, as the CP's own keepalive does: the worker replays
+  nothing and sends one `stream_gap` marker (`reason: restarted`,
+  `data.current_seq` its sequence now) that seeds the cursor. Reconnects a
+  store makes itself ask with `after={seq}` so the worker replays what was
+  missed. Three pages open it:
+  - The nets page (`stores/workerEvents.ts`) opens a live tail for the
+    selected net's worker. It fetches the net over REST on selection, and
+    replaying the buffer on top of that froze the tab. The stream is a fast
+    path, not the truth: `workerStream.ts` bumps a generation on reconnect,
+    on a `stream_gap` that answers a real cursor, or on a restarted
+    sequence, and the page refetches over REST.
+  - The workers page (`connectRuntimeLogs(id, { replay: false })` in
+    `stores/workerLogs.ts`) opens a live tail for every ready worker, for
+    new log lines and the `memory_stats` frames its gauges read. Until a
+    worker's first frame, its gauge shows `memory_used_mb` from
+    `GET /api/workers`, which is the worker server process alone (the
+    health loop reads it from the process itself), labelled as such and
+    without a per-net breakdown (`workerGauge.ts`).
+  - The full-page log viewer at `/workers/{id}/logs`
+    (`connectRuntimeLogs(id, { replay: true })`) asks with `after=0`: the
+    buffer is the only record of the worker's runtime log. Its lines reach
+    the store in batches (`batchScheduler.ts`).
 - `GET /api/workers/{id}/logs/history` seeds the worker log viewer;
   `GET /api/nets/{id}/logs/history` (`getNetLogHistory`, with `limit`,
   `since`, `contains`, `newest_first`) reads the worker's durable per-net

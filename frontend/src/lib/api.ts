@@ -931,6 +931,11 @@ export interface Worker {
 	url: string | null;
 	/** Running operations on this worker. Optional for an older control plane. */
 	active_operations?: number;
+	/** The worker server process's RSS and peak RSS as the control plane's
+	 *  health loop last read them: the process alone, without its net and
+	 *  notebook subprocesses. Null until a health check has answered. */
+	memory_used_mb?: number | null;
+	memory_peak_mb?: number | null;
 	created_at: string;
 	updated_at: string;
 	/** The worker's build: its git commit, when the control plane first saw
