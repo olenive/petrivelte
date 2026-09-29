@@ -17,9 +17,19 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.uv]
+# Nothing here is an installable package: Python is only the browser test
+# harness, so uv runs it without building the project.
+package = false
 dev-dependencies = [
     "pytest>=8.3.4",
 ]
+
+[tool.pytest.ini_options]
+# The files directly under tests/ are reference copies from another project
+# and import a library this repo does not have; the browser suite under
+# tests/ui runs on its own.
+testpaths = ["tests/ui"]
+addopts = "--confcutdir=tests/ui"
 
 # Note: This project is primarily a Svelte/JavaScript frontend.
 # Python dependencies here are optional - mainly for running reference tests

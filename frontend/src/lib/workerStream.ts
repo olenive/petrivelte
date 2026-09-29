@@ -18,6 +18,7 @@
 
 import type { Net } from '$lib/api';
 import type { ServerEvent } from '$lib/stores/serverEvents';
+import type { LogEntry } from '$lib/types';
 
 export type StreamState = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'unavailable';
 
@@ -98,6 +99,29 @@ export function capHead<T>(list: T[], max: number): T[] {
 /** Keep the last ``max`` of an oldest-first list. */
 export function capTail<T>(list: T[], max: number): T[] {
 	return list.length > max ? list.slice(list.length - max) : list;
+}
+
+/**
+ * The newest-first execution log with one more firing at its head.
+ *
+ * The same firing can reach the page twice: once in the history fetched on a
+ * resync, and again as a ``transition_fired`` event that arrives after that
+ * fetch answered. Opening a busy net does this every time, because the worker
+ * stream starts from the beginning of the worker's buffer and replays firings
+ * the history already lists. The log keys its rows by timestamp, and a
+ * repeated key stops Svelte updating the page at all, pan and zoom on the
+ * graph included. So a firing already in the log is not added again, and nor
+ * is an entry without a timestamp, which the worker sends as ``{}`` when it
+ * has no entry for a firing.
+ */
+export function prependLogEntry(
+	entries: LogEntry[],
+	entry: Partial<LogEntry> | null | undefined,
+	max: number,
+): LogEntry[] {
+	if (typeof entry?.timestamp !== 'number') return entries;
+	if (entries.some((known) => known.timestamp === entry.timestamp)) return entries;
+	return capHead([entry as LogEntry, ...entries], max);
 }
 
 export type LiveAction = 'reconnect' | 'resync' | 'clear' | 'running';

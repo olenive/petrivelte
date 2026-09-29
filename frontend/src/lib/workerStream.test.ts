@@ -5,6 +5,7 @@ import {
 	capHead,
 	capTail,
 	liveAction,
+	prependLogEntry,
 	statusLabel,
 	initialStreamStatus,
 } from './workerStream';
@@ -50,6 +51,33 @@ describe('caps', () => {
 		const list = [1, 2];
 		expect(capHead(list, 2)).toBe(list);
 		expect(capTail(list, 5)).toBe(list);
+	});
+});
+
+describe('prependLogEntry', () => {
+	const entry = (timestamp: number) => ({
+		timestamp,
+		transition: 'score',
+		duration_ms: 3,
+		inputs: {},
+		outputs: [],
+	});
+
+	it('puts a new firing at the head and keeps to the cap', () => {
+		expect(prependLogEntry([entry(2), entry(1)], entry(3), 2)).toEqual([entry(3), entry(2)]);
+	});
+
+	it('leaves the log alone for a firing it already lists', () => {
+		// The history fetched on a resync already holds it, and the stream
+		// delivers it again afterwards.
+		const log = [entry(3), entry(2), entry(1)];
+		expect(prependLogEntry(log, entry(2), 500)).toBe(log);
+	});
+
+	it('leaves the log alone for an entry without a timestamp', () => {
+		const log = [entry(1)];
+		expect(prependLogEntry(log, {}, 500)).toBe(log);
+		expect(prependLogEntry(log, undefined, 500)).toBe(log);
 	});
 });
 

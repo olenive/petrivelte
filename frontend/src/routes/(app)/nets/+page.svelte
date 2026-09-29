@@ -3,7 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { workerEventsStore, workerStreamStore, connectToWorker, disconnectWorkerEvents } from '$lib/stores/workerEvents';
-	import { statusLabel, liveAction, capHead, capTail, EXECUTION_LOG_CAP, NET_LOG_CAP } from '$lib/workerStream';
+	import { statusLabel, liveAction, capHead, capTail, prependLogEntry, EXECUTION_LOG_CAP, NET_LOG_CAP } from '$lib/workerStream';
 	import { selectedTokenId } from '$lib/stores/tokenSelection';
 	import { isOperationEvent, isRunEvent, serverEventsStore } from '$lib/stores/serverEvents';
 	import OperationStatus from '$lib/components/OperationStatus.svelte';
@@ -1333,7 +1333,7 @@
 			if (kind === 'transition_fired') {
 				isStepping = false;
 				stepError = null;
-				logEntries = capHead([data.log_entry, ...logEntries], EXECUTION_LOG_CAP);
+				logEntries = prependLogEntry(logEntries, data.log_entry, EXECUTION_LOG_CAP);
 
 				// Resolve auto-step promise: a transition fired
 				if (autoStepResolve) autoStepResolve(true);
