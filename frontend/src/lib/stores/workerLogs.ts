@@ -14,6 +14,8 @@ import { writable, get } from 'svelte/store';
 import { API_URL, getWorkerLogHistory, listNets, type Net } from '$lib/api';
 import { serverEventsStore, type ServerEvent } from '$lib/stores/serverEvents';
 import { setWorkerMemory, type WorkerMemorySnapshot } from '$lib/stores/workerMemory';
+import { createBatchScheduler } from '$lib/batchScheduler';
+import { advanceCursor } from '$lib/workerStream';
 
 // ---- internal state ----
 
@@ -58,12 +60,26 @@ function formatHistoryEvent(evt: Record<string, any>): string {
 	return `${ts}${evt.message ?? JSON.stringify(evt)}`;
 }
 
-function appendLine(workerId: string, line: string) {
+// Lines reach the store in batches: a log viewer's stream opens with a
+// replay of up to two thousand events, and one store update per line made
+// both viewers re-render their whole list and scroll that many times.
+const _pending = createBatchScheduler<{ workerId: string; line: string }>((items) => {
 	_logs.update(m => {
-		const lines = m.get(workerId) || [];
-		m.set(workerId, [...lines, line]);
+		const added = new Map<string, string[]>();
+		for (const { workerId, line } of items) {
+			const lines = added.get(workerId) ?? [];
+			lines.push(line);
+			added.set(workerId, lines);
+		}
+		for (const [workerId, lines] of added) {
+			m.set(workerId, [...(m.get(workerId) || []), ...lines]);
+		}
 		return new Map(m);
 	});
+});
+
+function appendLine(workerId: string, line: string) {
+	_pending.push({ workerId, line });
 }
 
 // ---- SSE subscription (runs once at module load) ----
@@ -115,6 +131,7 @@ export function setNets(nets: Net[]) {
 
 /** Seed error lines from nets that failed to load (for page-load display). */
 export function seedFromNetErrors(nets: Net[]) {
+	_pending.flushNow();
 	const current = get(_logs);
 	for (const net of nets) {
 		if (net.load_state === 'error' && net.load_error && net.worker_id) {
@@ -161,11 +178,14 @@ export async function loadHistory(workerId: string, force = false) {
 
 /** Get lines for a specific worker (non-reactive snapshot). */
 export function getLines(workerId: string): string[] {
+	_pending.flushNow();
 	return get(_logs).get(workerId) || [];
 }
 
 /** Clear logs for a specific worker. */
 export function clearLogs(workerId: string) {
+	// Lines that arrived before the clear belong to what is being cleared.
+	_pending.flushNow();
 	_logs.update(m => {
 		m.delete(workerId);
 		return new Map(m);
@@ -228,6 +248,21 @@ function formatRuntimeLine(evt: Record<string, any>): string | null {
 		}
 	}
 	return null;
+}
+
+/**
+ * The line a ``stream_gap`` marker leaves in the log. The worker sends the
+ * marker in place of a replay it cannot give in full, so the lines between
+ * the last one shown and the next one are missing.
+ */
+function gapNote(reason: string | null): string {
+	const why =
+		reason === 'restarted'
+			? 'the worker restarted while the stream was away'
+			: reason === 'evicted'
+				? 'the stream was away longer than the worker keeps events'
+				: 'the worker could not replay what the stream missed';
+	return `${formatTs(new Date().toISOString())}[runtime] Log stream resumed; ${why}, so lines from that time are missing.`;
 }
 
 /**
@@ -301,9 +336,12 @@ export function connectRuntimeLogs(workerId: string): () => void {
 			try {
 				const parsed = JSON.parse(event.data) as Record<string, any>;
 				const seq = typeof parsed.seq === 'number' ? parsed.seq : 0;
-				// Worker restart resets seq; discard local tracker in that case.
-				if (seq <= conn.lastSeq) conn.lastSeq = 0;
-				conn.lastSeq = Math.max(conn.lastSeq, seq);
+				const cursor = advanceCursor(conn.lastSeq, { seq, kind: parsed.kind, data: parsed.data }, false);
+				conn.lastSeq = cursor.lastSeq;
+				if (parsed.kind === 'stream_gap') {
+					appendLine(workerId, gapNote(cursor.gap));
+					return;
+				}
 				// Worker-scoped memory_stats events feed the memory gauge —
 				// they aren't log lines, so they bypass formatRuntimeLine.
 				if (parsed.scope === 'worker' && parsed.kind === 'memory_stats' && parsed.data) {
@@ -346,6 +384,7 @@ export function connectRuntimeLogs(workerId: string): () => void {
 	open();
 
 	return () => {
+		_pending.flushNow();
 		conn.stopped = true;
 		if (conn.reconnectTimer) {
 			clearTimeout(conn.reconnectTimer);
