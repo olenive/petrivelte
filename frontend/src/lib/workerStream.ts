@@ -63,21 +63,43 @@ interface StreamEventLike {
 }
 
 /**
+ * The cursor a connection asks with when it has nothing to resume: far ahead
+ * of any sequence a worker reaches, so the worker answers with one
+ * ``stream_gap`` marker and no replay. The control plane's keepalive asks the
+ * same way. A page that has just opened a net fetches its state over REST,
+ * so a replay of the worker's whole buffer would only redo that work, one
+ * event at a time on the main thread.
+ */
+export const SKIP_REPLAY_AFTER = 1_000_000_000_000;
+
+/**
  * The next cursor after an event, and whether the event means the page must
  * resync. ``gap`` is null on the ordinary path.
  *
  * A ``stream_gap`` marker is the worker saying the replay it just skipped
  * would have been incomplete (see ``event_buffer.gap_before`` on the worker).
+ * When it carries ``data.current_seq``, that is where the worker's sequence
+ * is now and where the cursor belongs, since nothing is replayed behind the
+ * marker. On a connection that asked to skip the replay (``skippedReplay``)
+ * the marker is the expected answer rather than news of a loss: the page
+ * fetched what it needs over REST, so the marker only seeds the cursor and
+ * never rewinds it to 0, which would make the next reconnect replay the
+ * whole buffer.
+ *
  * A sequence number at or below the cursor, without a marker, is a worker
- * whose sequence started over — it restarted between two of our events.
+ * whose sequence started over: it restarted between two of our events.
  */
 export function advanceCursor(
 	lastSeq: number,
 	event: StreamEventLike,
+	skippedReplay: boolean,
 ): { lastSeq: number; gap: string | null } {
 	if (event.kind === 'stream_gap') {
 		const reason = typeof event.data?.reason === 'string' ? event.data.reason : 'unknown';
-		return { lastSeq: reason === 'restarted' ? 0 : lastSeq, gap: reason };
+		const current = event.data?.current_seq;
+		const seeded = typeof current === 'number' ? current : null;
+		if (skippedReplay) return { lastSeq: seeded ?? lastSeq, gap: null };
+		return { lastSeq: seeded ?? (reason === 'restarted' ? 0 : lastSeq), gap: reason };
 	}
 	if (event.seq > 0 && event.seq <= lastSeq) {
 		return { lastSeq: event.seq, gap: 'restarted' };
@@ -106,9 +128,9 @@ export function capTail<T>(list: T[], max: number): T[] {
  *
  * The same firing can reach the page twice: once in the history fetched on a
  * resync, and again as a ``transition_fired`` event that arrives after that
- * fetch answered. Opening a busy net does this every time, because the worker
- * stream starts from the beginning of the worker's buffer and replays firings
- * the history already lists. The log keys its rows by timestamp, and a
+ * fetch answered. A reconnect does this routinely: the stream replays the
+ * firings since its cursor while the resync the reconnect triggered fetches
+ * a history that already lists them. The log keys its rows by timestamp, and a
  * repeated key stops Svelte updating the page at all, pan and zoom on the
  * graph included. So a firing already in the log is not added again, and nor
  * is an entry without a timestamp, which the worker sends as ``{}`` when it

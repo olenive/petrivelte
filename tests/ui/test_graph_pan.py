@@ -207,12 +207,14 @@ def test_net_opened_mid_run_pans_and_zooms(page: Page, frontend_url: str,
 
     The worker's history is full, and its event buffer still holds the
     firings that history already lists. Opening the page fetches the history
-    and opens the worker stream from the start, which replays those firings;
-    when the history answers first, each replayed firing arrives as news.
-    That once put the same entry in the execution log twice, and the log
-    keys its rows by timestamp: the dev build throws on the duplicate key,
-    the production build throws a little later as the cap evicts rows, and
-    either way the page stops updating, pan and zoom included.
+    and asks the worker stream to skip its replay, so none of the buffer is
+    sent. The same firing can still reach the page twice, once in the history
+    and once live, as it does when a reconnect replays what the resync's
+    history already lists. That once put the same entry in the execution log
+    twice, and the log keys its rows by timestamp: the dev build throws on the
+    duplicate key, the production build throws a little later as the cap
+    evicts rows, and either way the page stops updating, pan and zoom
+    included.
     """
     cp = fresh_control_plane
     _seed(cp, running=True, tokens_at="Requests")
@@ -220,17 +222,24 @@ def test_net_opened_mid_run_pans_and_zooms(page: Page, frontend_url: str,
     for index, firing in enumerate(firings):
         firing["log_entry"]["timestamp"] = 1_790_000_000.0 + index
     cp.execution_history = {NET_ID: [firing["log_entry"] for firing in firings]}
-    buffered = firings[-50:]
-    cp.worker_replay = [
-        {"seq": seq, "scope": "net", "net_id": NET_ID, "kind": "transition_fired",
-         "ts": fake_cp.STAMP, "data": firing}
-        for seq, firing in enumerate(buffered, start=1)
-    ]
-    cp.worker_seq = len(buffered)
+    with cp.lock:
+        first = cp.worker_seq + 1
+        cp.worker_buffer = [
+            {"seq": seq, "scope": "net", "net_id": NET_ID, "kind": "transition_fired",
+             "ts": fake_cp.STAMP, "data": firing}
+            for seq, firing in enumerate(firings[-50:], start=first)
+        ]
+        cp.worker_seq = cp.worker_buffer[-1]["seq"]
     cp.replay_delay_s = 0.8
     _open(page, frontend_url)
+    page.wait_for_function(f"document.querySelectorAll('.log-entry').length === {EXECUTION_LOG_CAP}")
 
+    # Firings the history already lists, arriving live.
+    for firing in firings[-10:]:
+        fake_cp.publish_worker(cp, kind="transition_fired", data=firing, net_id=NET_ID)
     with _executing(cp):
         page.wait_for_timeout(2500)
         _assert_pans_and_zooms(page)
     assert page.locator(".log-entry").count() == EXECUTION_LOG_CAP
+    assert [answer["answer"] for answer in cp.worker_stream_answers] == ["restarted"], (
+        f"the worker stream replayed its buffer: {cp.worker_stream_answers}")

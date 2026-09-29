@@ -1,9 +1,21 @@
 /**
  * Per-worker unified event stream.
  *
- * Connects to GET /api/workers/{workerId}/events?after=0 via EventSource.
- * Tracks the last seen seq and reconnects with ?after={lastSeq} so the
- * client can catch up on any events missed during disconnection.
+ * Connects to GET /api/workers/{workerId}/events via EventSource. The first
+ * connection for a worker asks with ``after=SKIP_REPLAY_AFTER``, a cursor far
+ * ahead of the worker's sequence, so the worker replays nothing and sends one
+ * ``stream_gap`` marker that says where its sequence is now; the store takes
+ * that as its cursor. The page fetches the net's state, history and log over
+ * REST when it selects the net, so a replay of the worker's buffer (thousands
+ * of events for a busy worker) would only redo that work, one event at a time
+ * on the main thread, while the page stays frozen behind it.
+ *
+ * A connection the store opens later (after the stream closed, or after the
+ * worker was unavailable) asks with ``after={lastSeq}``, and the worker
+ * replays what followed, filling a short outage. The browser's own automatic
+ * reconnect reuses its connection's URL, so on the first connection it asks
+ * to skip again; the marker it gets seeds the cursor there too, and the
+ * reopen itself triggers a resync.
  *
  * Each event has shape:
  *   { seq, scope: 'worker' | 'net', net_id, kind, ts, data }
@@ -22,7 +34,13 @@
 import { writable } from 'svelte/store';
 import { API_URL } from '$lib/api';
 import { setWorkerMemory, type WorkerMemorySnapshot } from '$lib/stores/workerMemory';
-import { advanceCursor, initialStreamStatus, type StreamState, type StreamStatus } from '$lib/workerStream';
+import {
+	advanceCursor,
+	initialStreamStatus,
+	SKIP_REPLAY_AFTER,
+	type StreamState,
+	type StreamStatus,
+} from '$lib/workerStream';
 
 export interface WorkerEvent {
 	seq: number;
@@ -54,6 +72,9 @@ const MAX_RECONNECT_DELAY = 30000;
 
 let currentWorkerId: string | null = null;
 let lastSeq = 0;
+// Whether ``lastSeq`` came from this worker's stream. Until it has, there is
+// nothing to resume from and a connection asks to skip the replay.
+let haveCursor = false;
 // Whether this worker's stream has been open before: a first open seeds
 // nothing (the page fetched on selection), a later one may have missed events.
 let openedBefore = false;
@@ -75,7 +96,12 @@ function connectSSE() {
 	const workerId = currentWorkerId;
 	if (!workerId) return;
 
-	const url = `${API_URL}/api/workers/${workerId}/events?after=${lastSeq}`;
+	// Fixed for this EventSource, whose own automatic reconnects reuse the
+	// URL: a connection opened to skip the replay keeps getting a marker in
+	// place of one, and a connection opened with a real cursor never does.
+	const skipReplay = !haveCursor;
+	const after = skipReplay ? SKIP_REPLAY_AFTER : lastSeq;
+	const url = `${API_URL}/api/workers/${workerId}/events?after=${after}`;
 	setState(openedBefore ? 'reconnecting' : 'connecting');
 	eventSource = new EventSource(url, { withCredentials: true });
 
@@ -83,7 +109,9 @@ function connectSSE() {
 		reconnectDelay = 1000;
 		setState('open');
 		// The browser reconnects an EventSource on its own after a sleep or a
-		// network blip, resuming from Last-Event-ID; what the worker could
+		// network blip, with the URL the connection was opened with. On a
+		// connection that skipped the replay that means everything since the
+		// drop is skipped too, and on any connection what the worker could
 		// not replay is not announced on this path, so a reopen is always a
 		// reason to refetch.
 		if (openedBefore) markStale('reconnected');
@@ -93,8 +121,9 @@ function connectSSE() {
 	eventSource.onmessage = (event) => {
 		try {
 			const parsed = JSON.parse(event.data) as WorkerEvent;
-			const cursor = advanceCursor(lastSeq, parsed);
+			const cursor = advanceCursor(lastSeq, parsed, skipReplay);
 			lastSeq = cursor.lastSeq;
+			haveCursor = true;
 			if (cursor.gap) markStale(cursor.gap);
 			// A gap marker is addressed to this store, not to the page.
 			if (parsed.kind === 'stream_gap') return;
@@ -162,6 +191,7 @@ export function connectToWorker(workerId: string) {
 	}
 	currentWorkerId = workerId;
 	lastSeq = 0;
+	haveCursor = false;
 	openedBefore = false;
 	reconnectDelay = 1000;
 	status.set({ ...initialStreamStatus, workerId });
@@ -172,6 +202,7 @@ export function disconnectWorkerEvents() {
 	cleanup();
 	currentWorkerId = null;
 	lastSeq = 0;
+	haveCursor = false;
 	openedBefore = false;
 	status.set(initialStreamStatus);
 	set(null);

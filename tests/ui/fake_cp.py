@@ -7,6 +7,13 @@ A test pushes frames onto either stream with `publish_server` and
 `publish_worker`, and `drop_worker_streams` closes the worker streams so the
 browser reconnects.
 
+The worker stream answers its `after` cursor the way the worker does
+(`_catch_up_messages` in the server's `worker/server.py`): `0` replays the
+whole buffer, a cursor inside the buffer replays only what follows it, and a
+cursor ahead of the worker's sequence gets one `stream_gap` marker saying
+where the sequence is now, with nothing replayed. Every worker stream request
+and what it was answered with is kept in `worker_stream_answers`.
+
 Every request is recorded in `requests`, so a test can see what the page
 asked for, including anything this fake does not know about. Those unknown
 paths get a 200 with `{}` and are also listed in `unknown_paths`.
@@ -20,7 +27,7 @@ import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 STAMP = "2026-09-29T10:00:00+00:00"
 
@@ -38,10 +45,16 @@ class FakeControlPlane:
     nets: list[dict[str, Any]] = field(default_factory=list)
     execution_state: dict[str, dict[str, Any]] = field(default_factory=dict)
     execution_history: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
-    # What the worker's buffer still holds: sent to a worker stream opened
-    # from the start (`after=0`), after `replay_delay_s`, before anything live.
-    worker_replay: list[dict[str, Any]] = field(default_factory=list)
+    # What the worker's buffer holds, oldest first. A test may seed it;
+    # `publish_worker` appends to it as the worker does. A replay is sent
+    # after `replay_delay_s`, before anything live.
+    worker_buffer: list[dict[str, Any]] = field(default_factory=list)
     replay_delay_s: float = 0.0
+    # How many of the next worker stream requests to refuse with a 204, which
+    # makes the browser's EventSource give up and leaves the reconnect to the
+    # page's store.
+    refuse_worker_streams: int = 0
+    worker_stream_answers: list[dict[str, Any]] = field(default_factory=list)
     requests: list[str] = field(default_factory=list)
     unknown_paths: list[str] = field(default_factory=list)
     server_streams: list["queue.Queue[str | None]"] = field(default_factory=list)
@@ -124,7 +137,32 @@ def publish_worker(cp: FakeControlPlane, *, kind: str, data: dict[str, Any], net
         cp.worker_seq += 1
         event = {"seq": cp.worker_seq, "scope": scope, "net_id": net_id, "kind": kind,
                  "ts": STAMP, "data": data}
-        _broadcast(cp.worker_streams, f"id: {cp.worker_seq}\ndata: {json.dumps(event)}\n\n")
+        cp.worker_buffer.append(event)
+        _broadcast(cp.worker_streams, _worker_frame(event))
+
+
+def _worker_frame(event: dict[str, Any]) -> str:
+    return f"id: {event['seq']}\ndata: {json.dumps(event)}\n\n"
+
+
+def catch_up(cp: FakeControlPlane, after: int) -> tuple[str, list[dict[str, Any]]]:
+    """What the worker sends a stream opened at `after` before tailing live.
+
+    Returns what kind of answer it is (`replay`, or the gap reason) and the
+    events. Call with `cp.lock` held, so nothing is published between the
+    answer and the stream starting to tail.
+    """
+    buffer = cp.worker_buffer
+    if after > cp.worker_seq:
+        reason = "restarted"
+    elif after > 0 and buffer and after < buffer[0]["seq"] - 1:
+        reason = "evicted"
+    else:
+        return "replay", [event for event in buffer if event["seq"] > after]
+    marker = {"seq": 0 if reason == "restarted" else after, "scope": "worker", "net_id": None,
+              "kind": "stream_gap", "ts": STAMP,
+              "data": {"reason": reason, "after": after, "current_seq": cp.worker_seq}}
+    return reason, [marker]
 
 
 def publish_server(cp: FakeControlPlane, event: dict[str, Any]) -> None:
@@ -196,8 +234,7 @@ def _handler_for(cp: FakeControlPlane) -> type[BaseHTTPRequestHandler]:
                 self._stream(cp.server_streams)
                 return
             if re.fullmatch(r"/api/workers/[^/]+/events", parts.path):
-                replay = parts.query in ("", "after=0")
-                self._stream(cp.worker_streams, replay=cp.worker_replay if replay else [])
+                self._worker_stream(parts.query)
                 return
             self._send_json(_json_answer(cp, parts.path, parts.query))
 
@@ -227,24 +264,51 @@ def _handler_for(cp: FakeControlPlane) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             self.wfile.write(body)
 
+        def _worker_stream(self, query: str) -> None:
+            after = int(parse_qs(query).get("after", ["0"])[0])
+            with cp.lock:
+                if cp.refuse_worker_streams > 0:
+                    cp.refuse_worker_streams -= 1
+                    cp.worker_stream_answers.append({"after": after, "answer": "refused", "seqs": []})
+                    refused = True
+                else:
+                    refused = False
+                    answer, catch_up_events = catch_up(cp, after)
+                    cp.worker_stream_answers.append({
+                        "after": after, "answer": answer,
+                        "seqs": [event["seq"] for event in catch_up_events]})
+                    frames: "queue.Queue[str | None]" = queue.Queue()
+                    cp.worker_streams.append(frames)
+            if refused:
+                self.send_response(204)
+                self._cors()
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            delay = cp.replay_delay_s if answer == "replay" and catch_up_events else 0.0
+            self._stream(cp.worker_streams, frames,
+                         catch_up=[_worker_frame(event) for event in catch_up_events],
+                         catch_up_delay_s=delay)
+
         def _stream(self, streams: list["queue.Queue[str | None]"],
-                    replay: list[dict[str, Any]] | None = None) -> None:
+                    frames: "queue.Queue[str | None] | None" = None,
+                    catch_up: list[str] | None = None, catch_up_delay_s: float = 0.0) -> None:
             self.close_connection = True
             self.send_response(200)
             self._cors()
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
-            frames: "queue.Queue[str | None]" = queue.Queue()
-            with cp.lock:
-                streams.append(frames)
+            if frames is None:
+                frames = queue.Queue()
+                with cp.lock:
+                    streams.append(frames)
             try:
                 self.wfile.write(b": open\n\n")
                 self.wfile.flush()
-                if replay:
-                    time.sleep(cp.replay_delay_s)
-                    for event in replay:
-                        frame = f"id: {event['seq']}\ndata: {json.dumps(event)}\n\n"
+                if catch_up:
+                    time.sleep(catch_up_delay_s)
+                    for frame in catch_up:
                         self.wfile.write(frame.encode())
                     self.wfile.flush()
                 while not cp.stopping.is_set():

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	advanceCursor,
+	SKIP_REPLAY_AFTER,
 	capHead,
 	capTail,
 	liveAction,
@@ -13,22 +14,53 @@ import type { ServerEvent } from './stores/serverEvents';
 
 describe('advanceCursor', () => {
 	it('moves forward on the ordinary path and reports no gap', () => {
-		expect(advanceCursor(10, { seq: 11, kind: 'transition_fired' })).toEqual({ lastSeq: 11, gap: null });
+		expect(advanceCursor(10, { seq: 11, kind: 'transition_fired' }, false)).toEqual({ lastSeq: 11, gap: null });
 	});
 
 	it('treats a sequence that started over as a worker restart', () => {
-		expect(advanceCursor(4000, { seq: 3, kind: 'memory_stats' })).toEqual({ lastSeq: 3, gap: 'restarted' });
+		expect(advanceCursor(4000, { seq: 3, kind: 'memory_stats' }, false)).toEqual({ lastSeq: 3, gap: 'restarted' });
 	});
 
 	it('honours a stream_gap marker and rewinds the cursor after a restart', () => {
-		expect(advanceCursor(4000, { seq: 0, kind: 'stream_gap', data: { reason: 'restarted' } }))
+		expect(advanceCursor(4000, { seq: 0, kind: 'stream_gap', data: { reason: 'restarted' } }, false))
 			.toEqual({ lastSeq: 0, gap: 'restarted' });
-		expect(advanceCursor(120, { seq: 120, kind: 'stream_gap', data: { reason: 'evicted' } }))
+		expect(advanceCursor(120, { seq: 120, kind: 'stream_gap', data: { reason: 'evicted' } }, false))
 			.toEqual({ lastSeq: 120, gap: 'evicted' });
 	});
 
 	it('does not mistake a marker with no reason for the ordinary path', () => {
-		expect(advanceCursor(5, { seq: 5, kind: 'stream_gap' }).gap).toBe('unknown');
+		expect(advanceCursor(5, { seq: 5, kind: 'stream_gap' }, false).gap).toBe('unknown');
+	});
+
+	it('seeds the cursor where the worker says its sequence is now', () => {
+		// A restarted worker: the cursor moves to the new incarnation's sequence.
+		expect(advanceCursor(4000, {
+			seq: 0, kind: 'stream_gap', data: { reason: 'restarted', after: 4000, current_seq: 37 },
+		}, false)).toEqual({ lastSeq: 37, gap: 'restarted' });
+		// An evicted cursor: nothing is replayed behind the marker, so the
+		// cursor jumps to the worker's sequence rather than staying behind.
+		expect(advanceCursor(120, {
+			seq: 120, kind: 'stream_gap', data: { reason: 'evicted', after: 120, current_seq: 9000 },
+		}, false)).toEqual({ lastSeq: 9000, gap: 'evicted' });
+	});
+
+	it('takes the marker that answers a skipped replay as a seed, not a gap', () => {
+		const answer = {
+			seq: 0, kind: 'stream_gap',
+			data: { reason: 'restarted', after: SKIP_REPLAY_AFTER, current_seq: 2500 },
+		};
+		// The first open: nothing heard yet.
+		expect(advanceCursor(0, answer, true)).toEqual({ lastSeq: 2500, gap: null });
+		// The browser reopening the same skip connection after hearing live
+		// events: the cursor follows the worker and is never rewound to 0.
+		expect(advanceCursor(2400, answer, true)).toEqual({ lastSeq: 2500, gap: null });
+		expect(advanceCursor(2400, { seq: 0, kind: 'stream_gap', data: { reason: 'restarted' } }, true))
+			.toEqual({ lastSeq: 2400, gap: null });
+	});
+
+	it('treats live events on a skip connection like any other', () => {
+		expect(advanceCursor(2500, { seq: 2501, kind: 'transition_fired' }, true)).toEqual({ lastSeq: 2501, gap: null });
+		expect(advanceCursor(2500, { seq: 4, kind: 'memory_stats' }, true)).toEqual({ lastSeq: 4, gap: 'restarted' });
 	});
 });
 

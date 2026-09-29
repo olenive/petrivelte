@@ -97,8 +97,10 @@ def fresh_control_plane(control_plane: fake_cp.FakeControlPlane) -> Iterator[fak
     control_plane.nets = []
     control_plane.execution_state = {}
     control_plane.execution_history = {}
-    control_plane.worker_replay = []
+    control_plane.worker_buffer = []
     control_plane.replay_delay_s = 0.0
+    control_plane.refuse_worker_streams = 0
+    control_plane.worker_stream_answers.clear()
     control_plane.requests.clear()
     control_plane.unknown_paths.clear()
     yield control_plane

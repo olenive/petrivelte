@@ -77,9 +77,17 @@ apart from the one Marimo opens inside the notebook iframe.
   also opened by `stores/workerLogs.ts`): the worker's unified stream,
   `{seq, scope, net_id, kind, ts, data}`, with kinds such as
   `transition_fired`, `step_*`, `graph_state`, `log`, `subprocess_output`,
-  `memory_stats` and `stream_gap`. The stream is a fast path, not the truth:
-  `workerStream.ts` bumps a generation on reconnect, `stream_gap` or a
-  restarted sequence, and the page refetches over REST.
+  `memory_stats` and `stream_gap`. The first connection for a worker asks
+  with `after=1000000000000`, a cursor ahead of any worker sequence, as the
+  CP's own keepalive does: the worker replays nothing and sends one
+  `stream_gap` marker (`reason: restarted`, `data.current_seq` its sequence
+  now) that seeds the cursor. The page has just fetched the net over REST,
+  and replaying a busy worker's whole buffer (2000 events) on top of that
+  froze the tab. Reconnects the store makes itself ask with `after={seq}` so
+  the worker replays what was missed. The stream is a fast path, not the
+  truth: `workerStream.ts` bumps a generation on reconnect, on a
+  `stream_gap` that answers a real cursor, or on a restarted sequence, and
+  the page refetches over REST.
 - `GET /api/workers/{id}/logs/history` seeds the worker log viewer;
   `GET /api/nets/{id}/logs/history` (`getNetLogHistory`, with `limit`,
   `since`, `contains`, `newest_first`) reads the worker's durable per-net
