@@ -115,15 +115,24 @@ def fresh_control_plane(control_plane: fake_cp.FakeControlPlane) -> Iterator[fak
 
 
 @pytest.fixture
-def page(browser: Browser, frontend_url: str) -> Iterator[Page]:
-    """A page that fails its test on any uncaught exception or console error."""
+def expected_console_errors() -> list[str]:
+    """Text of console errors a test provokes on purpose. A test appends to
+    it; a console error containing any of these does not fail the test."""
+    return []
+
+
+@pytest.fixture
+def page(browser: Browser, frontend_url: str, expected_console_errors: list[str]) -> Iterator[Page]:
+    """A page that fails its test on any uncaught exception or unexpected
+    console error."""
     context = browser.new_context(viewport={"width": 1600, "height": 1000})
     page = context.new_page()
     problems: list[str] = []
     page.on("pageerror", lambda error: problems.append(f"uncaught: {error}"))
 
     def on_console(message: ConsoleMessage) -> None:
-        if message.type == "error":
+        if message.type == "error" and not any(
+                expected in message.text for expected in expected_console_errors):
             problems.append(f"console error: {message.text}")
 
     page.on("console", on_console)

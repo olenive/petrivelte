@@ -25,6 +25,7 @@
 	} from '$lib/api';
 	import GraphPanel from '$lib/components/GraphPanel.svelte';
 	import ExecutionLog from '$lib/components/ExecutionLog.svelte';
+	import PanelFailed from '$lib/components/PanelFailed.svelte';
 	import LogViewer from '$lib/components/LogViewer.svelte';
 	import TokenInspector from '$lib/components/TokenInspector.svelte';
 	import TransitionInspector from '$lib/components/TransitionInspector.svelte';
@@ -131,6 +132,14 @@
 	function noteLiveReadFailure(netId: string, error: unknown) {
 		if (selectedNetId !== netId || isNotLoaded(error)) return;
 		liveReadError = { netId, message: error instanceof Error ? error.message : String(error) };
+	}
+
+	// The execution log and the graph each sit in their own error boundary,
+	// so an exception while one renders or runs an effect replaces that panel
+	// with a fallback instead of stopping every update on the page. The error
+	// still goes to the console for DevTools.
+	function panelFailed(panel: string, error: unknown) {
+		console.error(`[nets page] the ${panel} panel failed:`, error);
 	}
 	// Human-in-the-loop token injection: drop a typed token into a place to
 	// drive an end-to-end test (e.g. synthetic traffic into the anomaly monitor).
@@ -1788,7 +1797,12 @@
 							</button>
 							{#if !execLogCollapsed}
 								<div class="flex-1 overflow-hidden flex flex-col">
-									<ExecutionLog entries={logEntries} {isStepping} {stepError} {subprocessLines} />
+									<svelte:boundary onerror={(error) => panelFailed('execution log', error)}>
+										<ExecutionLog entries={logEntries} {isStepping} {stepError} {subprocessLines} />
+										{#snippet failed(error, reset)}
+											<PanelFailed name="execution log" {error} onReset={reset} />
+										{/snippet}
+									</svelte:boundary>
 								</div>
 							{/if}
 						</div>
@@ -1871,20 +1885,25 @@
 
 			<!-- Graph Panel -->
 			<div class="flex-1 p-4 overflow-hidden flex">
-				<GraphPanel
-					{graphState}
-					{tokens}
-					{animationStage}
-					{consumingTokens}
-					{producingTokens}
-					{transitionPosition}
-					{firingTransitionId}
-					{activeEdgeIds}
-					selectedTokenId={$selectedTokenId}
-					onTokenSelect={handleTokenSelect}
-					{selectedTransitionId}
-					onTransitionSelect={handleTransitionSelect}
-				/>
+				<svelte:boundary onerror={(error) => panelFailed('graph', error)}>
+					<GraphPanel
+						{graphState}
+						{tokens}
+						{animationStage}
+						{consumingTokens}
+						{producingTokens}
+						{transitionPosition}
+						{firingTransitionId}
+						{activeEdgeIds}
+						selectedTokenId={$selectedTokenId}
+						onTokenSelect={handleTokenSelect}
+						{selectedTransitionId}
+						onTransitionSelect={handleTransitionSelect}
+					/>
+					{#snippet failed(error, reset)}
+						<PanelFailed name="graph" {error} onReset={reset} />
+					{/snippet}
+				</svelte:boundary>
 			</div>
 
 			<!-- Right sidebar: Transition Inspector -->
