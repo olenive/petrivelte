@@ -7,6 +7,7 @@
 	import Token from './Token.svelte';
 	import AnimatingToken from './AnimatingToken.svelte';
 	import type { GraphState, Token as TokenType } from '$lib/types';
+	import { TOKEN_STAGE_MS } from '$lib/tokenAnimation';
 
 	type AnimationStage = 'idle' | 'consuming' | 'producing';
 
@@ -234,7 +235,7 @@
 							{...token}
 							targetX={transitionPosition.x}
 							targetY={transitionPosition.y}
-							duration={300}
+							duration={TOKEN_STAGE_MS}
 							fadeOut={true}
 						/>
 					{/each}
@@ -250,7 +251,7 @@
 							targetY={token.y}
 							color={token.color}
 							id={token.id}
-							duration={300}
+							duration={TOKEN_STAGE_MS}
 							fadeOut={false}
 						/>
 					{/each}

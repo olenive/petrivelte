@@ -36,6 +36,7 @@
 	import { portal } from '$lib/actions/portal';
 	import { anomalyLabels, anomalySuffix } from '$lib/netAnomalies';
 	import { groupByDefinition } from '$lib/netInstances';
+	import { TOKEN_STAGE_MS, FIRING_ANIMATION_MS } from '$lib/tokenAnimation';
 	import { diagnoseActivityLine, diagnoseClasses, diagnoseStateLabel } from '$lib/netDiagnose';
 	import type { GraphState, Token, LogEntry, Transition } from '$lib/types';
 	import {
@@ -635,8 +636,8 @@
 					break;
 				}
 
-				// Wait for animation to complete (600ms total)
-				await new Promise(resolve => setTimeout(resolve, 650));
+				// Let the firing animation play out before the next step.
+				await new Promise(resolve => setTimeout(resolve, FIRING_ANIMATION_MS + 50));
 			} catch (error) {
 				// Clean up the dangling resolver from this iteration.
 				autoStepResolve = null;
@@ -843,13 +844,13 @@
 		activeEdgeIds = inputEdgeIds; // Start with input edges
 		animationStage = 'consuming';
 
-		// Stage 1: Consuming (0-300ms) - tokens move to transition
+		// Stage 1: consuming, tokens move to the transition
 		const timeout1 = setTimeout(() => {
 			console.log('⚡ ANIMATION: Stage 1 complete, starting Stage 2 (producing)');
 			activeEdgeIds = outputEdgeIds; // Switch to output edges
 			animationStage = 'producing';
 
-			// Stage 2: Producing (300-600ms) - tokens move from transition to output
+			// Stage 2: producing, tokens move from the transition to the output places
 			const timeout2 = setTimeout(() => {
 				console.log('⚡ ANIMATION: Stage 2 complete, updating final state');
 				animationStage = 'idle';
@@ -865,10 +866,10 @@
 
 				// Process next animation in queue
 				processAnimationQueue();
-			}, 300);
+			}, TOKEN_STAGE_MS);
 
 			animationTimeouts = [timeout2];
-		}, 300);
+		}, TOKEN_STAGE_MS);
 
 		animationTimeouts = [timeout1];
 	}
