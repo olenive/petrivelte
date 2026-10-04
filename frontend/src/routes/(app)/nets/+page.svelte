@@ -39,6 +39,7 @@
 	import { TOKEN_STAGE_MS, FIRING_ANIMATION_MS } from '$lib/tokenAnimation';
 	import { diagnoseActivityLine, diagnoseClasses, diagnoseStateLabel } from '$lib/netDiagnose';
 	import type { GraphState, Token, LogEntry, Transition } from '$lib/types';
+	import { layoutFor, placeGraphState, type KeyedLayout } from '$lib/graphLayout';
 	import {
 		TOKEN_DOT_MAX,
 		applyTokenCounts,
@@ -50,6 +51,15 @@
 	} from '$lib/netHelpers';
 
 	let graphState = $state<GraphState | null>(null);
+	// The page lays the net out itself; the server's `x` and `y` are ignored.
+	// Recomputed only when the topology changes, not on a marking update.
+	let netLayout = $state.raw<KeyedLayout | null>(null);
+
+	// A graph state from the server, at the positions the layout gives it.
+	function laidOut(state: GraphState): GraphState {
+		netLayout = layoutFor(state, netLayout);
+		return placeGraphState(state, netLayout.layout);
+	}
 	let tokens = $state<Token[]>([]);
 	let logEntries = $state<LogEntry[]>([]);
 	let connectionStatus = $state('Connecting...');
@@ -459,7 +469,7 @@
 		try {
 			const stateData = await getExecutionState(netId);
 			if (selectedNetId !== netId) return;
-			graphState = stateData;
+			graphState = laidOut(stateData);
 			// Server-derived: adopt the worker's actual continuous-execution
 			// state rather than leaving the optimistic flag from a prior session.
 			isRunning = !!stateData?.running;
@@ -1452,7 +1462,7 @@
 				subprocessLines = [];
 				logEntries = [];
 
-				const state = data as GraphState;
+				const state = laidOut(data as GraphState);
 				graphState = state;
 				const tokensData: TokenSummary[] = [];
 				for (const place of state.places ?? []) {
@@ -1473,7 +1483,7 @@
 				// A non-reset state refresh (e.g. a token was injected). Rebuild
 				// tokens in every subscribed tab without disturbing logs or any
 				// in-flight step animation.
-				const state = data as GraphState;
+				const state = laidOut(data as GraphState);
 				graphState = state;
 				const tokensData: TokenSummary[] = [];
 				for (const place of state.places ?? []) {
@@ -1889,6 +1899,7 @@
 				<svelte:boundary onerror={(error) => panelFailed('graph', error)}>
 					<GraphPanel
 						{graphState}
+						layout={netLayout?.layout ?? null}
 						{tokens}
 						{animationStage}
 						{consumingTokens}

@@ -8,10 +8,15 @@
 	import AnimatingToken from './AnimatingToken.svelte';
 	import type { GraphState, Token as TokenType } from '$lib/types';
 	import { TOKEN_STAGE_MS } from '$lib/tokenAnimation';
+	import { frameView, isBackEdge, type NetLayout } from '$lib/layout';
 
 	type AnimationStage = 'idle' | 'consuming' | 'producing';
 
+	/** Places and transitions already at the positions `layout` gave them. */
 	export let graphState: GraphState | null;
+	/** The layout `graphState` was placed with: its back edges are drawn
+	 *  curved, and a new one (a new topology) reframes the view. */
+	export let layout: NetLayout | null = null;
 	export let tokens: TokenType[] = [];
 	export let animationStage: AnimationStage = 'idle';
 	export let consumingTokens: TokenType[] = [];
@@ -123,10 +128,18 @@
 		updateViewBox();
 	}
 
+	// The view onto the drawing: centred when it fits, else from its top.
 	function centerView() {
-		panX = 0;
-		panY = 0;
+		const corner = frameView(layout?.extent ?? null, 1000 / scale, 800 / scale);
+		panX = corner.x;
+		panY = corner.y;
 		updateViewBox();
+	}
+
+	let framedLayout: NetLayout | null = null;
+	$: if (layout !== framedLayout) {
+		framedLayout = layout;
+		centerView();
 	}
 
 	function updateViewBox() {
@@ -191,7 +204,13 @@
 			<!-- Edges layer -->
 			<g class="edges">
 				{#each graphState.edges as edge (edge.id)}
-					<Edge {...edge} {graphState} isActive={activeEdgeIds.has(edge.id)} />
+					<Edge
+						{...edge}
+						{graphState}
+						isActive={activeEdgeIds.has(edge.id)}
+						isBack={layout ? isBackEdge(layout, edge.source, edge.target) : false}
+						config={layout?.config}
+					/>
 				{/each}
 			</g>
 
