@@ -1,47 +1,66 @@
 import { describe, expect, it } from 'vitest';
-import type { GraphState } from './types';
-import { layoutFor, layoutInputOf, placeGraphState } from './graphLayout';
+import type { Topology } from './types';
+import { layoutFor, layoutInputOf } from './graphLayout';
 
-const state = (tokenCount = 0): GraphState => ({
+const topology = (): Topology => ({
 	places: [
-		{ id: 'In', name: 'In', x: 999, y: 999, type_name: 'int', token_count: tokenCount },
-		{ id: 'Out', name: 'Out', x: 5, y: 5, type_name: 'int' },
+		{ name: 'In', type_name: 'int', serializable: true },
+		{ name: 'Out', type_name: 'int', serializable: true },
+		{ name: 'Config', type_name: 'Settings', serializable: false },
 	],
-	transitions: [{ id: 'Go', name: 'Go', x: -7, y: 42, function_name: 'go' }],
+	transitions: [{ name: 'Go', detail: { function_name: 'go' } }],
 	edges: [
-		{ id: 'e1', source: 'In', target: 'Go', type: 'input' },
-		{ id: 'e2', source: 'Go', target: 'Out', type: 'output' },
+		{ place: 'In', transition: 'Go', direction: 'in', kind: 'take' },
+		{ place: 'Config', transition: 'Go', direction: 'in', kind: 'snapshot' },
+		{ place: 'Out', transition: 'Go', direction: 'out', slot: 0 },
 	],
 });
 
 describe('graphLayout', () => {
-	it('maps the version 0 edges to directed pairs', () => {
-		expect(layoutInputOf(state())).toEqual({
-			places: ['In', 'Out'],
+	it('reads the topology edges as directed pairs, read edges included', () => {
+		expect(layoutInputOf(topology())).toEqual({
+			places: ['In', 'Out', 'Config'],
 			transitions: ['Go'],
 			edges: [
 				{ from: 'In', to: 'Go' },
+				{ from: 'Config', to: 'Go' },
 				{ from: 'Go', to: 'Out' },
 			],
 		});
 	});
 
-	it('ignores the server coordinates', () => {
-		const { layout } = layoutFor(state(), null);
-		const placed = placeGraphState(state(), layout);
-		expect(placed.places.map((p) => [p.x, p.y])).toEqual([
-			[0, -120],
-			[0, 120],
-		]);
-		expect(placed.transitions[0]).toMatchObject({ x: 0, y: 0, function_name: 'go' });
-		expect(placed.places[0].token_count).toBe(0);
+	it('lays out a topology without hints around the origin', () => {
+		const { layout } = layoutFor(topology(), null);
+		const at = (name: string) => {
+			const p = layout.placements.get(name)!;
+			return [p.x, p.y, p.pinned];
+		};
+		expect(at('Go')).toEqual([0, 0, false]);
+		expect(at('Out')).toEqual([0, 120, false]);
+		expect(layout.placements.get('In')!.y).toBe(-120);
+		expect(layout.placements.get('Config')!.y).toBe(-120);
 	});
 
-	it('keeps the layout across marking updates and recomputes on a topology change', () => {
-		const first = layoutFor(state(0), null);
-		expect(layoutFor(state(3), first)).toBe(first);
-		const grown = state();
-		grown.places.push({ id: 'Extra', name: 'Extra', x: 0, y: 0, type_name: 'int' });
+	it('passes position hints as pins', () => {
+		const hinted: Topology = { ...topology(), hints: { positions: { Go: { x: 500, y: 300 } } } };
+		expect(layoutInputOf(hinted).pinned).toEqual({ Go: { x: 500, y: 300 } });
+		const { layout } = layoutFor(hinted, null);
+		expect(layout.placements.get('Go')).toMatchObject({ x: 500, y: 300, pinned: true });
+		expect(layout.placements.get('Out')).toMatchObject({ x: 500, y: 420, pinned: false });
+	});
+
+	it('leaves out empty hints', () => {
+		expect(layoutInputOf({ ...topology(), hints: { positions: {} } })).not.toHaveProperty('pinned');
+		expect(layoutInputOf({ ...topology(), hints: {} })).not.toHaveProperty('pinned');
+	});
+
+	it('keeps the layout for the same topology and recomputes on a change', () => {
+		const first = layoutFor(topology(), null);
+		expect(layoutFor(topology(), first)).toBe(first);
+		const grown = topology();
+		grown.places.push({ name: 'Extra', serializable: false });
 		expect(layoutFor(grown, first)).not.toBe(first);
+		const pinned = { ...topology(), hints: { positions: { In: { x: 1, y: 2 } } } };
+		expect(layoutFor(pinned, first)).not.toBe(first);
 	});
 });

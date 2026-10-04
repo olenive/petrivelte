@@ -9,6 +9,7 @@ import { API_URL as resolvedApiUrl } from '$lib/config/network';
 import { newIdempotencyKey, withIdempotency } from '$lib/idempotency';
 import { markRequestStart } from '$lib/stores/slowRequests';
 import { reportOutcome } from '$lib/stores/backendHealth';
+import type { InjectResult, LogEntry, NetState, StepResult, TokenValue } from '$lib/types';
 
 export const API_URL = resolvedApiUrl;
 
@@ -54,7 +55,15 @@ function _isStreamingPath(path: string): boolean {
 const _EXPECTED_SLOW_SUFFIXES = [
 	'/load', '/unload', '/provision', '/start', '/stop', '/destroy',
 	'/health-check', '/trigger', '/upgrade',
+	// A step waits for its firing to land, as long as the body runs.
+	'/execution/step',
 ];
+
+// A 504 from these is the control plane's own `timeout` answer to a request
+// that waits on a net (a long step), not a sign the backend is unreachable.
+function _waitsOnNet(path: string): boolean {
+	return path.endsWith('/execution/step');
+}
 function _isExpectedSlowPath(method: string, path: string): boolean {
 	if (_EXPECTED_SLOW_SUFFIXES.some((s) => path.endsWith(s))) return true;
 	// Worker creation provisions a machine — slow by nature.
@@ -91,7 +100,9 @@ async function _timed(method: string, path: string, fn: () => Promise<Response>)
 			const dbSlow = (res.headers.get('X-Backend-Slow') || '').startsWith('db');
 			// Classify this outcome so the UI can name a degraded condition
 			// (verified DB / rate limit / unreachable / slow) — not a bare spinner.
-			reportOutcome({ status: res.status, backendMs, expectSlow, dbSlow });
+			if (!(res.status === 504 && _waitsOnNet(path))) {
+				reportOutcome({ status: res.status, backendMs, expectSlow, dbSlow });
+			}
 		}
 		return res;
 	} catch (e) {
@@ -763,16 +774,52 @@ export async function deleteNetSecrets(netId: string): Promise<void> {
 
 // -- execution (proxied through control plane to worker) --
 
+/** Refusals the control plane gives on its own, before the net is asked. */
+export type ControlPlaneReason =
+	| 'net_not_found'
+	| 'not_assigned'
+	| 'worker_not_ready'
+	| 'worker_unreachable'
+	| 'not_loaded';
+
+/** The net protocol's error codes (§3), relayed with the status the
+ *  control plane maps each to: 404 for an unknown name or id, 422 for a
+ *  refused input, 501 for what this runtime cannot do, 409 not loaded, 500
+ *  anything else. */
+export type ProtocolReason =
+	| 'unknown_net'
+	| 'unknown_place'
+	| 'unknown_transition'
+	| 'unknown_token'
+	| 'invalid_params'
+	| 'invalid_token'
+	| 'not_serializable'
+	| 'load_failed'
+	| 'unsupported'
+	| 'unknown_method'
+	| 'not_loaded'
+	| 'internal';
+
+export const PROTOCOL_REASONS: readonly ProtocolReason[] = [
+	'unknown_net', 'unknown_place', 'unknown_transition', 'unknown_token', 'invalid_params',
+	'invalid_token', 'not_serializable', 'load_failed', 'unsupported', 'unknown_method',
+	'not_loaded', 'internal',
+];
+
+/** `timeout`: a request outlasted the control plane's bound (504). For a
+ *  step it means the firing is still running; it lands on the stream. */
+export type NetProxyReason = ControlPlaneReason | ProtocolReason | 'timeout';
+
 /**
- * A refusal from the net execution proxy (execution, log history, tokens,
- * inject). ``message`` is the server's ``detail``, written for a person;
- * ``reason`` is the tag a caller branches on: net_not_found,
- * not_assigned, worker_not_ready, not_loaded or worker_unreachable. Null
- * when the body carried no reason, as from an older control plane.
+ * A refusal from the net execution proxy (execution, history, tokens,
+ * inject, enable and disable). ``message`` is the server's ``detail``,
+ * written for a person; ``reason`` is the tag a caller branches on, one of
+ * ``NetProxyReason`` from this control plane, any string from a newer one,
+ * and null when the body carried none.
  */
 export class NetProxyError extends Error {
 	readonly status: number;
-	readonly reason: string | null;
+	readonly reason: NetProxyReason | (string & {}) | null;
 	constructor(message: string, status: number, reason: string | null) {
 		super(message);
 		this.name = 'NetProxyError';
@@ -792,32 +839,54 @@ export async function netProxyError(res: Response, fallback: string): Promise<Ne
 
 /**
  * True when the failure only says the net is not loaded, which is a state
- * rather than a fault and is shown quietly. The proxy says so with a 409
- * ``not_loaded``; an older control plane passed the worker's bare 404 on.
+ * rather than a fault and is shown quietly: the proxy's or the protocol's
+ * 409 ``not_loaded``. A bare 404 with no reason, from an older control
+ * plane, still counts.
  */
 export function isNotLoaded(error: unknown): boolean {
 	if (!(error instanceof NetProxyError)) return false;
 	return error.reason === 'not_loaded' || (error.reason === null && error.status === 404);
 }
 
-export async function getExecutionState(netId: string): Promise<any> {
-	const res = await get(`/api/nets/${netId}/execution/state`);
+/** True when the failure is the net protocol's own error code (§3). */
+export function isProtocolError(error: unknown): error is NetProxyError {
+	return error instanceof NetProxyError && (PROTOCOL_REASONS as readonly string[]).includes(error.reason ?? '');
+}
+
+/**
+ * True when a request outlasted the control plane's bound, a 504 with
+ * ``reason: "timeout"``. A step that times out has not failed: its firing
+ * runs on and lands on the worker stream.
+ */
+export function isStillInProgress(error: unknown): boolean {
+	return error instanceof NetProxyError && error.status === 504 && error.reason === 'timeout';
+}
+
+function query(params: Record<string, string | number | undefined>): string {
+	const search = new URLSearchParams();
+	for (const [key, value] of Object.entries(params)) {
+		if (value !== undefined) search.set(key, String(value));
+	}
+	const text = search.toString();
+	return text ? `?${text}` : '';
+}
+
+/** The net's whole state (protocol §5), each place's token list capped at
+ *  ``tokenLimit``. */
+export async function getExecutionState(netId: string, tokenLimit?: number): Promise<NetState> {
+	const res = await get(`/api/nets/${netId}/execution/state${query({ token_limit: tokenLimit })}`);
 	if (!res.ok) throw await netProxyError(res, 'Failed to get execution state');
 	return res.json();
 }
 
-/** The worker's per-net transition history, oldest first. Capped on the
- *  worker (500), so it is the whole story only for a young subprocess.
- *  Empty for a net that is not loaded; other refusals throw
- *  ``NetProxyError``. */
-export async function getExecutionHistory(netId: string): Promise<Array<{
-	timestamp: number;
-	transition: string;
-	duration_ms: number;
-	inputs: Record<string, string[]>;
-	outputs: string[];
-}>> {
-	const res = await get(`/api/nets/${netId}/execution/history`);
+/** The net's log of firings (protocol §8), oldest first: the entries with a
+ *  ``seq`` above ``after``, at most ``limit`` of them. Empty for a net that
+ *  is not loaded; other refusals throw ``NetProxyError``. */
+export async function getExecutionHistory(
+	netId: string,
+	options: { after?: number; limit?: number } = {},
+): Promise<LogEntry[]> {
+	const res = await get(`/api/nets/${netId}/execution/history${query(options)}`);
 	if (!res.ok) {
 		// Not loaded means no history to show; any other refusal is news.
 		const error = await netProxyError(res, 'Failed to get execution history');
@@ -825,13 +894,18 @@ export async function getExecutionHistory(netId: string): Promise<Array<{
 		throw error;
 	}
 	const body = await res.json();
-	return Array.isArray(body) ? body : [];
+	return Array.isArray(body?.entries) ? body.entries : [];
 }
 
+/**
+ * Fire one transition. Answers once the firing has landed, with the
+ * protocol's result; throws a ``NetProxyError`` that ``isStillInProgress``
+ * recognises when the body outlasts the control plane's bound.
+ */
 export async function executionStep(
 	netId: string,
 	idempotencyKey?: string,
-): Promise<{ status: string }> {
+): Promise<StepResult> {
 	// Mint a key if the caller didn't supply one. Each call to this
 	// function represents one logical "fire one step" action; minting
 	// per-call means: an in-flight retry by the CP / network layer with
@@ -871,44 +945,53 @@ export async function executionReset(netId: string): Promise<void> {
 	);
 }
 
-// Inject a typed token into a place on a loaded net (human-in-the-loop). The
-// worker validates `token` against the place's declared type, so a bad shape is
-// rejected before it reaches the graph. Each call mints its own idempotency key:
-// a network-layer retry dedupes to one token, two clicks inject two tokens.
+// Inject a token into a place on a loaded net (human-in-the-loop). The net
+// decodes `token`, plain JSON, into the place's type, strictly: a bad shape
+// is refused (422 `invalid_token`, or `not_serializable` for a place with no
+// JSON form) before it reaches the net. Each call mints its own idempotency
+// key: a network-layer retry dedupes to one token, two clicks inject two.
 export async function executionInject(
 	netId: string,
-	placeName: string,
+	place: string,
 	token: unknown,
-): Promise<{ status: string; place_name: string }> {
+): Promise<InjectResult> {
 	const res = await post(
 		`/api/nets/${netId}/inject`,
-		{ place_name: placeName, token },
+		{ place, token },
 		withIdempotency(newIdempotencyKey()),
 	);
 	if (!res.ok) throw await netProxyError(res, 'Failed to inject token');
 	return res.json();
 }
 
-export interface TokenJsonView {
-	kind: 'json';
-	id: string;
-	place_id: string;
-	type_name: string;
-	value: unknown;
+async function toggleTransition(
+	netId: string,
+	transition: string,
+	verb: 'enable' | 'disable',
+): Promise<{ marking_version: number }> {
+	const res = await post(
+		`/api/nets/${netId}/transitions/${encodeURIComponent(transition)}/${verb}`,
+		undefined,
+		withIdempotency(newIdempotencyKey()),
+	);
+	if (!res.ok) throw await netProxyError(res, `Failed to ${verb} ${transition}`);
+	return res.json();
 }
 
-export interface TokenTextView {
-	kind: 'text';
-	id: string;
-	place_id: string;
-	type_name: string;
-	text: string;
+/** Switch a transition on. Watchers see ``toggled`` if it changed. */
+export function enableTransition(netId: string, transition: string) {
+	return toggleTransition(netId, transition, 'enable');
 }
 
-export type TokenView = TokenJsonView | TokenTextView;
+/** Switch a transition off. Watchers see ``toggled`` if it changed. */
+export function disableTransition(netId: string, transition: string) {
+	return toggleTransition(netId, transition, 'disable');
+}
 
-export async function getToken(netId: string, tokenId: string): Promise<TokenView> {
-	const res = await get(`/api/nets/${netId}/tokens/${tokenId}`);
+/** One live token whole (protocol §6.5): JSON when its place is
+ *  serializable, the runtime's full text otherwise. */
+export async function getToken(netId: string, tokenId: string): Promise<TokenValue> {
+	const res = await get(`/api/nets/${netId}/tokens/${encodeURIComponent(tokenId)}`);
 	if (!res.ok) throw await netProxyError(res, 'Failed to get token');
 	return res.json();
 }

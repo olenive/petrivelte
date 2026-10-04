@@ -1,11 +1,17 @@
 <script lang="ts">
-	import type { GraphState } from '$lib/types';
+	import type { Point } from '$lib/types';
+	import type { EdgeStroke } from '$lib/netView';
 	import { DEFAULT_LAYOUT_CONFIG, backEdgeControl, type LayoutConfig } from '$lib/layout';
 
-	export let source: string;
-	export let target: string;
-	export let type: 'input' | 'output';
-	export let graphState: GraphState;
+	/** The centres of the two ends, already laid out. */
+	export let from: Point;
+	export let to: Point;
+	export let fromShape: 'place' | 'transition';
+	export let toShape: 'place' | 'transition';
+	/** `in`: place to transition; `out`: transition to place. */
+	export let direction: 'in' | 'out';
+	/** Read edges are dashed (`snapshot`) or dotted (`mutate`). */
+	export let stroke: EdgeStroke = 'solid';
 	export let isActive: boolean = false;
 	/** A back edge, set aside by the layout to break a cycle: drawn as a
 	 *  curve bowing out to the side, as the Bevy view draws it. */
@@ -17,20 +23,14 @@
 	$: TRANSITION_WIDTH = config.transitionWidth;
 	$: TRANSITION_HEIGHT = config.transitionHeight;
 
-	// Find nodes and determine their types
-	$: sourcePlace = graphState.places.find((p) => p.id === source);
-	$: sourceTransition = graphState.transitions.find((t) => t.id === source);
-	$: targetPlace = graphState.places.find((p) => p.id === target);
-	$: targetTransition = graphState.transitions.find((t) => t.id === target);
-
-	$: sourceNode = sourcePlace || sourceTransition;
-	$: targetNode = targetPlace || targetTransition;
+	$: input = direction === 'in';
+	$: dash = stroke === 'dashed' ? '8 5' : stroke === 'dotted' ? '2 4' : 'none';
 
 	// Center coordinates
-	$: cx1 = sourceNode?.x || 0;
-	$: cy1 = sourceNode?.y || 0;
-	$: cx2 = targetNode?.x || 0;
-	$: cy2 = targetNode?.y || 0;
+	$: cx1 = from.x;
+	$: cy1 = from.y;
+	$: cx2 = to.x;
+	$: cy2 = to.y;
 
 	// Compute intersection with circle (for Place nodes)
 	function circleIntersection(
@@ -87,17 +87,13 @@
 	$: aimEnd = control ?? { x: cx1, y: cy1 };
 
 	// Compute edge endpoints at node borders
-	$: edgeStart = sourcePlace
+	$: edgeStart = fromShape === 'place'
 		? circleIntersection(cx1, cy1, PLACE_RADIUS, aimStart.x, aimStart.y, cx1, cy1)
-		: sourceTransition
-			? rectIntersection(cx1, cy1, TRANSITION_WIDTH, TRANSITION_HEIGHT, aimStart.x, aimStart.y, cx1, cy1)
-			: { x: cx1, y: cy1 };
+		: rectIntersection(cx1, cy1, TRANSITION_WIDTH, TRANSITION_HEIGHT, aimStart.x, aimStart.y, cx1, cy1);
 
-	$: edgeEnd = targetPlace
+	$: edgeEnd = toShape === 'place'
 		? circleIntersection(cx2, cy2, PLACE_RADIUS, aimEnd.x, aimEnd.y, cx2, cy2)
-		: targetTransition
-			? rectIntersection(cx2, cy2, TRANSITION_WIDTH, TRANSITION_HEIGHT, aimEnd.x, aimEnd.y, cx2, cy2)
-			: { x: cx2, y: cy2 };
+		: rectIntersection(cx2, cy2, TRANSITION_WIDTH, TRANSITION_HEIGHT, aimEnd.x, aimEnd.y, cx2, cy2);
 
 	$: x1 = edgeStart.x;
 	$: y1 = edgeStart.y;
@@ -109,12 +105,14 @@
 	<path
 		d="M {x1} {y1} Q {control.x} {control.y} {x2} {y2}"
 		fill="none"
-		stroke={isActive ? '#00ff00' : (type === 'input' ? 'var(--edge-input)' : 'var(--edge-output)')}
+		stroke={isActive ? '#00ff00' : (input ? 'var(--edge-input)' : 'var(--edge-output)')}
 		stroke-width="2"
-		marker-end={type === 'input' ? 'url(#arrowhead-input)' : 'url(#arrowhead-output)'}
+		stroke-dasharray={dash}
+		marker-end={input ? 'url(#arrowhead-input)' : 'url(#arrowhead-output)'}
+		data-edge-stroke={stroke}
 		class="edge back"
-		class:input={type === 'input'}
-		class:output={type === 'output'}
+		class:input
+		class:output={!input}
 		class:active={isActive}
 		data-back-edge="true"
 	/>
@@ -124,19 +122,20 @@
 		y1={y1}
 		x2={x2}
 		y2={y2}
-		stroke={isActive ? '#00ff00' : (type === 'input' ? 'var(--edge-input)' : 'var(--edge-output)')}
+		stroke={isActive ? '#00ff00' : (input ? 'var(--edge-input)' : 'var(--edge-output)')}
 		stroke-width="2"
-		marker-end={type === 'input' ? 'url(#arrowhead-input)' : 'url(#arrowhead-output)'}
+		stroke-dasharray={dash}
+		marker-end={input ? 'url(#arrowhead-input)' : 'url(#arrowhead-output)'}
+		data-edge-stroke={stroke}
 		class="edge"
-		class:input={type === 'input'}
-		class:output={type === 'output'}
+		class:input
+		class:output={!input}
 		class:active={isActive}
 	/>
 {/if}
 
 <style>
 	.edge {
-		stroke-dasharray: none;
 		transition: stroke 0.15s;
 	}
 

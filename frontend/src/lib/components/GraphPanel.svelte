@@ -1,29 +1,32 @@
 <script lang="ts">
-	import Place from './Place.svelte';
 	import PlaceCircle from './PlaceCircle.svelte';
 	import PlaceText from './PlaceText.svelte';
 	import Transition from './Transition.svelte';
 	import Edge from './Edge.svelte';
 	import Token from './Token.svelte';
 	import AnimatingToken from './AnimatingToken.svelte';
-	import type { GraphState, Token as TokenType } from '$lib/types';
 	import { TOKEN_STAGE_MS } from '$lib/tokenAnimation';
-	import { frameView, isBackEdge, type NetLayout } from '$lib/layout';
+	import { frameView, type NetLayout } from '$lib/layout';
+	import type { DrawnNet, DrawnToken } from '$lib/netView';
+	import type { TokenCue } from '$lib/firingPlayback';
 
-	type AnimationStage = 'idle' | 'consuming' | 'producing';
-
-	/** Places and transitions already at the positions `layout` gave them. */
-	export let graphState: GraphState | null;
-	/** The layout `graphState` was placed with: its back edges are drawn
-	 *  curved, and a new one (a new topology) reframes the view. */
+	/** What to draw, already at the positions `layout` gave it. */
+	export let graph: DrawnNet | null;
+	/** The layout `graph` was placed with: a new one (a new topology)
+	 *  reframes the view. */
 	export let layout: NetLayout | null = null;
-	export let tokens: TokenType[] = [];
-	export let animationStage: AnimationStage = 'idle';
-	export let consumingTokens: TokenType[] = [];
-	export let producingTokens: TokenType[] = [];
-	export let transitionPosition: { x: number; y: number } | null = null;
-	export let firingTransitionId: string | null = null;
-	export let activeEdgeIds: Set<string> = new Set();
+	/** The token dots at rest. */
+	export let tokens: DrawnToken[] = [];
+	/** Tokens on their way to a place, not drawn there until they land. */
+	export let hiddenTokenIds: Set<string> = new Set();
+	/** Tokens travelling now, between a place and a transition. */
+	export let travelling: TokenCue[] = [];
+	/** Edges a token is travelling along, by `DrawnEdge.ends`. */
+	export let activeEdges: Set<string> = new Set();
+	/** Transitions tokens are travelling to or from. */
+	export let firingTransitions: Set<string> = new Set();
+	/** Transitions whose body just failed. */
+	export let failingTransitions: Set<string> = new Set();
 	export let selectedTokenId: string | null = null;
 	export let onTokenSelect: ((tokenId: string | null) => void) | null = null;
 	export let selectedTransitionId: string | null = null;
@@ -146,7 +149,7 @@
 		viewBox = `${panX} ${panY} ${1000 / scale} ${800 / scale}`;
 	}
 
-	$: if (graphState) {
+	$: if (graph) {
 		updateViewBox();
 	}
 </script>
@@ -200,15 +203,19 @@
 			</radialGradient>
 		</defs>
 
-		{#if graphState}
+		{#if graph}
 			<!-- Edges layer -->
 			<g class="edges">
-				{#each graphState.edges as edge (edge.id)}
+				{#each graph.edges as edge (edge.key)}
 					<Edge
-						{...edge}
-						{graphState}
-						isActive={activeEdgeIds.has(edge.id)}
-						isBack={layout ? isBackEdge(layout, edge.source, edge.target) : false}
+						from={edge.from}
+						to={edge.to}
+						fromShape={edge.fromShape}
+						toShape={edge.toShape}
+						direction={edge.direction}
+						stroke={edge.stroke}
+						isActive={activeEdges.has(edge.ends)}
+						isBack={edge.back}
 						config={layout?.config}
 					/>
 				{/each}
@@ -216,78 +223,63 @@
 
 			<!-- Place circles layer (background) -->
 			<g class="place-circles">
-				{#each graphState.places as place (place.id)}
-					<PlaceCircle {...place} />
+				{#each graph.places as place (place.name)}
+					<PlaceCircle name={place.name} x={place.x} y={place.y} />
 				{/each}
 			</g>
 
 			<!-- Tokens layer (on top of place circles, below place text) -->
 			<g class="tokens">
-				{#if animationStage === 'idle'}
-					<!-- Normal state: show all tokens -->
-					{#each tokens as token (token.id)}
+				{#each tokens as token (token.id)}
+					{#if !hiddenTokenIds.has(token.id)}
 						<Token
-							{...token}
+							id={token.id}
+							x={token.x}
+							y={token.y}
+							color={token.color}
 							animating={false}
 							isSelected={token.id === selectedTokenId}
 							onSelect={handleTokenSelect}
 						/>
-					{/each}
-				{:else}
-					<!-- During animation: hide consumed tokens, show static tokens -->
-					{#each tokens as token (token.id)}
-						{#if !consumingTokens.find(t => t.id === token.id)}
-							<Token
-								{...token}
-								animating={false}
-								isSelected={token.id === selectedTokenId}
-								onSelect={handleTokenSelect}
-							/>
-						{/if}
-					{/each}
-				{/if}
+					{/if}
+				{/each}
 
-				<!-- Consuming tokens animation (Stage 1) -->
-				{#if animationStage === 'consuming' && transitionPosition}
-					{#each consumingTokens as token (token.id)}
-						<AnimatingToken
-							{...token}
-							targetX={transitionPosition.x}
-							targetY={transitionPosition.y}
-							duration={TOKEN_STAGE_MS}
-							fadeOut={true}
-						/>
-					{/each}
-				{/if}
-
-				<!-- Producing tokens animation (Stage 2) -->
-				{#if animationStage === 'producing' && transitionPosition}
-					{#each producingTokens as token (token.id)}
-						<AnimatingToken
-							startX={transitionPosition.x}
-							startY={transitionPosition.y}
-							targetX={token.x}
-							targetY={token.y}
-							color={token.color}
-							id={token.id}
-							duration={TOKEN_STAGE_MS}
-							fadeOut={false}
-						/>
-					{/each}
-				{/if}
+				<!-- Tokens travelling between places and transitions -->
+				{#each travelling as cue (cue.key)}
+					<AnimatingToken
+						id={cue.id}
+						startX={cue.from.x}
+						startY={cue.from.y}
+						targetX={cue.to.x}
+						targetY={cue.to.y}
+						color={cue.color ?? '#9ca3af'}
+						duration={Math.max(0, cue.endsAt - cue.startAt) || TOKEN_STAGE_MS}
+						fadeOut={cue.fade === 'out'}
+					/>
+				{/each}
 			</g>
 
 			<!-- Place text layer (rendered after tokens so text appears on top) -->
 			<g class="place-texts">
-				{#each graphState.places as place (place.id)}
-					<PlaceText {...place} />
+				{#each graph.places as place (place.name)}
+					<PlaceText name={place.name} x={place.x} y={place.y} type_name={place.type_name} count={place.count} />
 				{/each}
 			</g>
 
 			<!-- Transitions layer -->
 			<g class="transitions">
-				{#each graphState.transitions as transition (transition.id)}
-					<Transition {...transition} isFiring={transition.id === firingTransitionId} isSelected={transition.id === selectedTransitionId} onSelect={handleTransitionSelect} />
+				{#each graph.transitions as transition (transition.name)}
+					<Transition
+						name={transition.name}
+						x={transition.x}
+						y={transition.y}
+						subtitle={transition.subtitle}
+						look={transition.look}
+						isFiring={firingTransitions.has(transition.name)}
+						isFailing={failingTransitions.has(transition.name)}
+						isSelected={transition.name === selectedTransitionId}
+						onSelect={handleTransitionSelect}
+					/>
 				{/each}
 			</g>
 		{/if}

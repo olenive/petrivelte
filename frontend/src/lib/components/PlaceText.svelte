@@ -1,21 +1,17 @@
 <script lang="ts">
-	import { placeShowsCounter, placeTokenCount } from '$lib/netHelpers';
+	import { placeShowsCounter } from '$lib/netHelpers';
 
-	export let id: string;
 	export let name: string;
 	export let x: number;
 	export let y: number;
 	export let type_name: string;
-	// Spread in from the place. `tokens` is a capped sample, so the count comes
-	// from `token_count` — see placeTokenCount.
-	export let tokens: unknown[] | undefined = undefined;
-	export let token_count: number | undefined = undefined;
+	/** The place's true count (protocol §5.3), not its capped token list. */
+	export let count: number = 0;
 
-	$: count = placeTokenCount({ tokens, token_count });
-	$: showCount = placeShowsCounter({ tokens, token_count });
+	$: showCount = placeShowsCounter(count);
 </script>
 
-<g class="place-text" data-place-id={id}>
+<g class="place-text" data-place-id={name} data-count={count}>
 	<!-- Scrim, drawn first so everything below sits on top of it. Veils the
 	     dots toward the centre so the labels and count read cleanly, while the
 	     outer dots stay visible through its transparent edge — no hard boundary

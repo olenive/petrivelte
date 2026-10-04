@@ -2,9 +2,10 @@
 
 A drag on the graph's background must move the view, and the wheel must zoom
 it, whatever the worker's event stream is doing at the time. The executing
-case streams what a continuous monitor net sends while it fires: a step
-starting, the subprocess printing, a transition firing with the tokens it
-moved, the worker's memory, and run events on the control plane's stream.
+case streams what a continuous monitor net sends while it fires, in protocol
+version 1: each firing as `launched` then `distributed`, the subprocess
+printing, the worker's memory, a fresh token `added` when the chain runs
+dry, and run events on the control plane's stream.
 """
 
 import threading
@@ -29,39 +30,39 @@ TRANSITIONS = ["collect", "score", "detect", "notify"]
 EXECUTION_LOG_CAP = 500
 
 
-def _graph(tokens_at: str | None) -> dict:
-    places = []
-    for index, name in enumerate(PLACES):
-        tokens = []
-        if name == tokens_at:
-            tokens = [
-                {"id": f"tok-{slot}", "preview": "{'deviation': 0.4}", "type_name": "Sample",
-                 "color": "#4f9dde"}
-                for slot in range(3)
-            ]
-        places.append({
-            "id": name, "name": name, "x": 80 + index * 200, "y": 150,
-            "type_name": "Sample", "tokens": tokens, "token_count": len(tokens),
-        })
-    transitions = [
-        {"id": name, "name": name, "x": 180 + index * 200, "y": 300, "function_name": name,
-         "signature": None, "docstring": None}
-        for index, name in enumerate(TRANSITIONS)
-    ]
+def _state(tokens_at: str | None, *, running: bool = False, marking_version: int = 0) -> dict:
+    """The monitor chain as a protocol state, three tokens in `tokens_at`."""
+    marking = {}
+    if tokens_at is not None:
+        marking[tokens_at] = [{"id": str(slot + 1), "label": "{'deviation': 0.4}", "color": "#4f9dde"}
+                              for slot in range(3)]
     edges = []
     for index, name in enumerate(TRANSITIONS):
-        edges.append({"id": f"{PLACES[index]}->{name}", "source": PLACES[index], "target": name,
-                      "type": "input"})
-        edges.append({"id": f"{name}->{PLACES[index + 1]}", "source": name,
-                      "target": PLACES[index + 1], "type": "output"})
-    return {"places": places, "transitions": transitions, "edges": edges}
+        edges.append({"place": PLACES[index], "transition": name, "direction": "in", "kind": "take"})
+        edges.append({"place": PLACES[index + 1], "transition": name, "direction": "out"})
+    return fake_cp.net_state(
+        net="monitor_anomalies",
+        places=[{"name": name, "type_name": "Sample", "serializable": True} for name in PLACES],
+        transitions=[{"name": name, "detail": {"function_name": name, "signature": "(sample: Sample) -> Sample"}}
+                     for name in TRANSITIONS],
+        edges=edges, marking=marking, running=running, marking_version=marking_version)
 
 
-def _seed(cp: fake_cp.FakeControlPlane, *, running: bool, tokens_at: str | None) -> None:
+def _seed(cp: fake_cp.FakeControlPlane, *, running: bool, tokens_at: str | None,
+          marking_version: int = 0, history: list[dict] | None = None) -> None:
     cp.workers = [fake_cp.worker_row(WORKER_ID)]
     cp.nets = [fake_cp.net_row(NET_ID, WORKER_ID, name="monitor_anomalies",
                                execution_mode="continuous")]
-    cp.execution_state = {NET_ID: {**_graph(tokens_at), "running": running}}
+    fake_cp.seed_net(cp, NET_ID, _state(tokens_at, running=running, marking_version=marking_version),
+                     history)
+
+
+def _entry(seq: int) -> dict:
+    """A log entry (protocol §8) for firing number `seq` along the chain."""
+    index = seq % len(TRANSITIONS)
+    return {"seq": seq, "transition": TRANSITIONS[index], "started_at": "2026-10-04T10:00:00Z",
+            "duration_ms": 12.5, "outcome": "fired",
+            "consumed": [[PLACES[index], str(seq)]], "produced": [[PLACES[index + 1], str(seq + 10_000)]]}
 
 
 def _open(page: Page, frontend_url: str) -> None:
@@ -117,19 +118,11 @@ def _assert_pans_and_zooms(page: Page, *, before_first_move: Callable[[], None] 
     assert zoomed[2] < after[2], f"the wheel did not zoom: viewBox {after} -> {zoomed}"
 
 
-def _firing(transition_index: int, cycle: int) -> dict:
-    """What the worker sends when `transition_index` fires on cycle `cycle`."""
-    name = TRANSITIONS[transition_index]
-    source, target = PLACES[transition_index], PLACES[transition_index + 1]
-    moved = [{"id": f"tok-{cycle}-{slot}", "place_id": target, "color": "#4f9dde",
-              "preview": "{'deviation': 0.4}", "type_name": "Sample"} for slot in range(3)]
-    return {
-        "transition_name": name,
-        "log_entry": {"timestamp": time.time(), "transition": name, "duration_ms": 12.5,
-                      "inputs": {source: [f"tok-{cycle}-0"]}, "outputs": [target]},
-        "new_token_positions": moved,
-        "token_counts": {place: (3 if place == target else 0) for place in PLACES},
-    }
+def _fire_or_refill(cp: fake_cp.FakeControlPlane) -> None:
+    """Fire the next transition along the chain; when it has run dry, a new
+    token arrives at its head."""
+    if fake_cp.fire(cp, NET_ID) is None:
+        fake_cp.inject(cp, NET_ID, PLACES[0], {"deviation": 0.4})
 
 
 def _memory() -> dict:
@@ -139,7 +132,7 @@ def _memory() -> dict:
 
 
 @contextmanager
-def _executing(cp: fake_cp.FakeControlPlane, *, graph_state_every: int = 0,
+def _executing(cp: fake_cp.FakeControlPlane, *, resync_every: int = 0,
                period_s: float = 0.3) -> Iterator[None]:
     """Stream a firing net's events until the block ends."""
     done = threading.Event()
@@ -147,17 +140,13 @@ def _executing(cp: fake_cp.FakeControlPlane, *, graph_state_every: int = 0,
     def run() -> None:
         tick = 0
         while not done.is_set():
-            transition_index = tick % len(TRANSITIONS)
-            fake_cp.publish_worker(cp, kind="step_started", data={}, net_id=NET_ID)
             fake_cp.publish_worker(cp, kind="subprocess_output",
                                    data={"text": f"scoring window {tick}"}, net_id=NET_ID)
-            fake_cp.publish_worker(cp, kind="transition_fired",
-                                   data=_firing(transition_index, tick), net_id=NET_ID)
+            _fire_or_refill(cp)
             fake_cp.publish_worker(cp, kind="memory_stats", data=_memory(), net_id=None,
                                    scope="worker")
-            if graph_state_every and tick % graph_state_every == 0:
-                fake_cp.publish_worker(cp, kind="graph_state",
-                                       data=_graph(PLACES[transition_index + 1]), net_id=NET_ID)
+            if resync_every and tick % resync_every == 0:
+                fake_cp.resync(cp, NET_ID)
             fake_cp.publish_server(cp, {
                 "type": "net_run_started", "run_id": f"run-{tick}", "net_id": NET_ID,
                 "trigger": "resume", "state": "running", "reason": None,
@@ -190,13 +179,14 @@ def test_executing_net_pans_and_zooms(page: Page, frontend_url: str,
     _open(page, frontend_url)
 
     def replace_graph_mid_drag() -> None:
-        # Between the button going down and the first move: a new graph
-        # object for the panel, and a firing that starts an animation.
-        fake_cp.publish_worker(cp, kind="graph_state", data=_graph("Window"), net_id=NET_ID)
-        fake_cp.publish_worker(cp, kind="transition_fired", data=_firing(1, 999), net_id=NET_ID)
+        # Between the button going down and the first move: a `reloaded`
+        # that makes the page read and rebuild its whole state, and a
+        # firing that starts an animation.
+        fake_cp.resync(cp, NET_ID)
+        _fire_or_refill(cp)
         page.wait_for_timeout(400)
 
-    with _executing(cp, graph_state_every=3):
+    with _executing(cp, resync_every=3):
         page.wait_for_timeout(1500)
         _assert_pans_and_zooms(page, before_first_move=replace_graph_mid_drag)
 
@@ -205,41 +195,46 @@ def test_net_opened_mid_run_pans_and_zooms(page: Page, frontend_url: str,
                                            fresh_control_plane: fake_cp.FakeControlPlane) -> None:
     """A net that has been firing for a while when the page opens.
 
-    The worker's history is full, and its event buffer still holds the
-    firings that history already lists. Opening the page fetches the history
-    and asks the worker stream to skip its replay, so none of the buffer is
-    sent. The same firing can still reach the page twice, once in the history
-    and once live, as it does when a reconnect replays what the resync's
-    history already lists. That once put the same entry in the execution log
-    twice, and the log keys its rows by timestamp: the dev build throws on the
-    duplicate key, the production build throws a little later as the cap
-    evicts rows, and either way the page stops updating, pan and zoom
-    included.
+    The net's log is full, and the worker's event buffer still holds the
+    notifications for firings the log already lists. Opening the page reads
+    the state and the log and asks the worker stream to skip its replay, so
+    none of the buffer is sent. Old notifications can still reach the page,
+    as they do when a reconnect replays what the resync's read already
+    holds: they are at or below the marking version the page holds and are
+    ignored. The log keys its rows by `seq`, and a repeated key once stopped
+    the page updating, pan and zoom included; the log is read again only
+    after the newest entry it holds, and capped.
     """
     cp = fresh_control_plane
-    _seed(cp, running=True, tokens_at="Requests")
-    firings = [_firing(index % len(TRANSITIONS), index) for index in range(EXECUTION_LOG_CAP)]
-    for index, firing in enumerate(firings):
-        firing["log_entry"]["timestamp"] = 1_790_000_000.0 + index
-    cp.execution_history = {NET_ID: [firing["log_entry"] for firing in firings]}
+    _seed(cp, running=True, tokens_at="Requests", marking_version=1000,
+          history=[_entry(seq) for seq in range(1, EXECUTION_LOG_CAP + 1)])
+    old = [{"kind": "distributed",
+            "data": {"transition": TRANSITIONS[0], "produced": [[PLACES[1], str(9000 + v), "x"]],
+                     "duration_ms": 1.0, "marking_version": v, "running": True}}
+           for v in range(950, 1000)]
     with cp.lock:
         first = cp.worker_seq + 1
         cp.worker_buffer = [
-            {"seq": seq, "scope": "net", "net_id": NET_ID, "kind": "transition_fired",
-             "ts": fake_cp.STAMP, "data": firing}
-            for seq, firing in enumerate(firings[-50:], start=first)
+            {"seq": seq, "scope": "net", "net_id": NET_ID, "ts": fake_cp.STAMP, **event}
+            for seq, event in enumerate(old, start=first)
         ]
         cp.worker_seq = cp.worker_buffer[-1]["seq"]
     cp.replay_delay_s = 0.8
     _open(page, frontend_url)
     page.wait_for_function(f"document.querySelectorAll('.log-entry').length === {EXECUTION_LOG_CAP}")
 
-    # Firings the history already lists, arriving live.
-    for firing in firings[-10:]:
-        fake_cp.publish_worker(cp, kind="transition_fired", data=firing, net_id=NET_ID)
+    # Notifications the page's state already holds, arriving live.
+    for event in old[-10:]:
+        fake_cp.publish_worker(cp, kind=event["kind"], data=event["data"], net_id=NET_ID)
     with _executing(cp):
         page.wait_for_timeout(2500)
         _assert_pans_and_zooms(page)
+    newest = cp.execution_history[NET_ID][-1]["seq"]
+    assert newest > EXECUTION_LOG_CAP
+    page.wait_for_function(
+        f"document.querySelector('.log-entry')?.dataset.seq === '{newest}'", timeout=10_000)
     assert page.locator(".log-entry").count() == EXECUTION_LOG_CAP
     assert [answer["answer"] for answer in cp.worker_stream_answers] == ["restarted"], (
         f"the worker stream replayed its buffer: {cp.worker_stream_answers}")
+    # None of the old notifications reached the drawing: they are not tokens.
+    assert page.locator('[data-token-id="9990"]').count() == 0

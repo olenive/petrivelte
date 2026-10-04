@@ -37,19 +37,33 @@ relies on.
 
 ## Net execution proxy
 
-Execution state, history, step, start, stop, reset, inject, tokens and net log
-history go to `/api/nets/{id}/...` and the CP forwards them to the net's
-worker. When the CP refuses on its own it answers
-`{"detail": <sentence>, "reason": <tag>}`, parsed into `NetProxyError`
-(`status`, `reason`, message = detail):
+Execution state, history, step, start, stop, reset, inject, tokens, enable
+and disable go to `/api/nets/{id}/...` and the CP forwards them to the net's
+worker. Since 2026-10-04 bodies and answers are the net protocol's, version 1
+(`PROTOCOL.md` in the petritype library); the shapes live in `src/lib/types.ts`:
 
-| Status | Reason | What the UI does |
-|---|---|---|
-| 404 | `net_not_found` | Shows the detail as an error. |
-| 409 | `not_assigned` | Shows the detail. |
-| 409 | `not_loaded` | `isNotLoaded()` is true: shown quietly as a state, and reads return empty (history, log history). |
-| 503 | `worker_not_ready` | Shows the detail. |
-| 502 | `worker_unreachable` | Shows the detail; log history says why it is missing. |
+| Call | Answer |
+|---|---|
+| `GET .../execution/state?token_limit=` | The protocol state: `topology.{places, transitions, edges, hints?}`, `transitions[name].{enabled, fireable, in_flight, priority?}`, `marking.places[name].{count, tokens}` (the page reads sizes from `count`; `tokens` is capped at `token_limit`, 200), `generation`, `marking_version`, `running`, `runtime`, `progress`. |
+| `GET .../execution/history?after=&limit=` | `{entries}`, oldest first, each `{seq, transition, started_at, duration_ms, outcome, consumed, produced}` with consumed and produced as `[place, id]` pairs. The page reads it whole on a resync and `after` its newest `seq` once a firing lands. |
+| `GET .../tokens/{id}` | `{id, place, type_name, kind: "json", value}`, or `kind: "text"` with `text` for a place with no JSON form. |
+| `POST .../inject {place, token}` | `{status, id, marking_version}`; watchers see `added`. The page offers only places with `serializable: true`. |
+| `POST .../execution/step` | `{fired, transition?, failed?, marking_version, running}` once the firing has landed. |
+| `POST .../transitions/{name}/enable\|disable` | `{marking_version}`; watchers see `toggled` if it changed. |
+
+Every refusal arrives as `{"detail": <sentence>, "reason": <tag>}`, parsed
+into `NetProxyError` (`status`, `reason`, message = detail). The CP refuses on
+its own with 404 `net_not_found`, 409 `not_assigned`, 503 `worker_not_ready`
+and 502 `worker_unreachable`, and the page shows the detail. Protocol errors
+carry the protocol's code (`isProtocolError()`): 404
+`unknown_net|unknown_place|unknown_transition|unknown_token`, 422
+`invalid_params|invalid_token|not_serializable|load_failed`, 501
+`unsupported|unknown_method`, 409 `not_loaded`, 500 `internal`. A 409
+`not_loaded` makes `isNotLoaded()` true: shown quietly as a state, and reads
+return empty (history, log history). A step outlasting 15 s answers 504
+`timeout` (`isStillInProgress()`); the page treats it as in progress, since
+the firing lands on the stream, and does not report the 504 as the backend
+being unreachable.
 
 `isNotLoaded` also accepts a bare 404 with no reason, from an older CP.
 `diagnoseNet` (`GET /api/nets/{id}/diagnose`) returns one verdict per net,
@@ -74,9 +88,18 @@ apart from the one Marimo opens inside the notebook iframe.
   `notebook_error`, `net_load_log`, `worker_provision_log`,
   `net_run_started|finished|skipped`, `operation_started|progress|finished`.
 - `GET /api/workers/{id}/events?after={seq}`: the worker's unified stream,
-  `{seq, scope, net_id, kind, ts, data}`, with kinds such as
-  `transition_fired`, `step_*`, `graph_state`, `log`, `subprocess_output`,
-  `memory_stats` (every 5 s) and `stream_gap`. `after=0` replays the whole
+  `{seq, scope, net_id, kind, ts, data, marking_version, running}`. A net's
+  kinds are the protocol notification methods with `data` their params:
+  `launched`, `distributed`, `fired`, `failed`, `added`, `removed`,
+  `mutated`, `toggled`, `param_changed` (each moves `marking_version` by
+  exactly one and carries it in `data`), `reloaded` (refetch), `fireable`,
+  `idle`, `execution_stopped {reason: no_fireable_transitions |
+  transition_failed | subprocess_exited, error_type?, message?}`,
+  `heartbeat`, `load_progress`; plus the host's own `subprocess_output`,
+  `memory_stats` (every 5 s), `log` and `stream_gap`. `transition_fired`,
+  `step_*`, `graph_state` and `net_reset` are gone. The envelope's
+  `marking_version` is the worker's latest on every net event, log lines
+  included; the page's version rule reads the one in `data`. `after=0` replays the whole
   buffer, about 2000 events and 6 MB for a busy worker. A connection that
   wants only a live tail asks with `after=1000000000000`, a cursor ahead of
   any worker sequence, as the CP's own keepalive does: the worker replays
@@ -87,9 +110,17 @@ apart from the one Marimo opens inside the notebook iframe.
   - The nets page (`stores/workerEvents.ts`) opens a live tail for the
     selected net's worker. It fetches the net over REST on selection, and
     replaying the buffer on top of that froze the tab. The stream is a fast
-    path, not the truth: `workerStream.ts` bumps a generation on reconnect,
-    on a `stream_gap` that answers a real cursor, or on a restarted
-    sequence, and the page refetches over REST.
+    path, not the truth: the page keeps a marking mirror (`netMirror.ts`)
+    and applies a state notification only at its held `marking_version`
+    plus one, ignoring older ones; a gap, a `reloaded`, a name it does not
+    know, or a place whose drawn tokens fell short of its count refetches
+    the state. `workerStream.ts` also bumps a generation on reconnect, on a
+    `stream_gap` that answers a real cursor, or on a restarted sequence,
+    and the page refetches over REST. A new protocol `generation` drops
+    every token, animation and cached token view. Firings are animated from
+    the events (`firingPlayback.ts`): stage one on `launched`, stage two on
+    `distributed` once stage one is over, and a one-piece `fired` plays both
+    in turn.
   - The workers page (`connectRuntimeLogs(id, { replay: false })` in
     `stores/workerLogs.ts`) opens a live tail for every ready worker, for
     new log lines and the `memory_stats` frames its gauges read. Until a

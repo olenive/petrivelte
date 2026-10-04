@@ -1,33 +1,86 @@
 <script lang="ts">
-	import type { Transition } from '$lib/types';
+	import type { Topology, TopologyTransition, TransitionState } from '$lib/types';
+	import { detailRows, transitionArcs } from '$lib/transitionDetail';
 
-	export let transition: Transition | null = null;
+	export let transition: TopologyTransition | null = null;
+	/** Its live state: the switch, whether it can fire, whether it runs. */
+	export let state: TransitionState | null = null;
+	export let topology: Topology | null = null;
+	export let onEnable: ((name: string) => void) | null = null;
+	export let onDisable: ((name: string) => void) | null = null;
+	/** An enable or disable request is in flight. */
+	export let toggling: boolean = false;
+	export let toggleError: string | null = null;
+
+	$: rows = detailRows(transition?.detail);
+	$: arcs = transition ? transitionArcs(topology, transition.name) : { inputs: [], outputs: [] };
+	$: status = !state
+		? 'unknown'
+		: !state.enabled
+			? 'disabled'
+			: state.in_flight
+				? 'running'
+				: state.fireable
+					? 'fireable'
+					: 'waiting';
 </script>
 
 <div class="transition-inspector">
 	{#if transition}
 		<div class="section">
 			<div class="transition-name">{transition.name}</div>
-			<div class="function-name">{transition.function_name}</div>
-		</div>
-
-		<div class="section">
-			<div class="label">Signature</div>
-			{#if transition.signature}
-				<pre class="signature">{transition.function_name}{transition.signature}</pre>
-			{:else}
-				<div class="muted">No signature available</div>
+			<div class="status" data-transition-status={status}>
+				<span class="badge {status}">{status}</span>
+				{#if state?.priority !== undefined}
+					<span class="muted-inline">priority {state.priority}</span>
+				{/if}
+			</div>
+			{#if state && (onEnable || onDisable)}
+				<div class="actions">
+					{#if state.enabled}
+						<button type="button" disabled={toggling} on:click={() => onDisable?.(transition!.name)}>
+							{toggling ? 'Disabling…' : 'Disable'}
+						</button>
+					{:else}
+						<button type="button" disabled={toggling} on:click={() => onEnable?.(transition!.name)}>
+							{toggling ? 'Enabling…' : 'Enable'}
+						</button>
+					{/if}
+				</div>
+			{/if}
+			{#if toggleError}
+				<div class="error">{toggleError}</div>
 			{/if}
 		</div>
 
-		<div class="section">
-			<div class="label">Docstring</div>
-			{#if transition.docstring}
-				<pre class="docstring">{transition.docstring}</pre>
-			{:else}
-				<div class="muted">No docstring</div>
-			{/if}
-		</div>
+		{#if rows.length > 0}
+			<div class="section">
+				<div class="label">Detail</div>
+				{#each rows as [key, value] (key)}
+					<div class="row" data-detail-key={key}>
+						<div class="key">{key}</div>
+						<pre class="value">{value}</pre>
+					</div>
+				{/each}
+			</div>
+		{:else}
+			<div class="section">
+				<div class="label">Inputs</div>
+				{#each arcs.inputs as arc}
+					<div class="arc" data-arc="in">{arc.place}{#if arc.note}<span class="muted-inline"> · {arc.note}</span>{/if}</div>
+				{:else}
+					<div class="muted">None</div>
+				{/each}
+			</div>
+			<div class="section">
+				<div class="label">Outputs</div>
+				{#each arcs.outputs as arc}
+					<div class="arc" data-arc="out">{arc.place}{#if arc.note}<span class="muted-inline"> · {arc.note}</span>{/if}</div>
+				{:else}
+					<div class="muted">None</div>
+				{/each}
+			</div>
+		{/if}
 	{:else}
 		<div class="empty">Click a transition to inspect it</div>
 	{/if}
@@ -60,10 +113,53 @@
 		margin-bottom: 0.25rem;
 	}
 
-	.function-name {
-		font-family: monospace;
-		font-size: 0.85em;
+	.status {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		margin-bottom: 0.5rem;
+	}
+
+	.badge {
+		font-size: 0.75em;
+		padding: 0.1rem 0.5rem;
+		border-radius: 999px;
+		background: var(--bg-tertiary);
+		color: var(--text-secondary);
+	}
+
+	.badge.disabled {
+		color: #9ca3af;
+		border: 1px dashed #9ca3af;
+	}
+
+	.badge.fireable {
+		color: #16a34a;
+	}
+
+	.badge.running {
+		color: #d97706;
+	}
+
+	.actions button {
+		padding: 0.3rem 0.75rem;
+		border: 1px solid var(--button-border);
+		border-radius: 4px;
+		background: var(--bg-secondary);
 		color: var(--button-border);
+		font-size: 0.8em;
+		cursor: pointer;
+	}
+
+	.actions button:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.error {
+		margin-top: 0.4rem;
+		font-size: 0.8em;
+		color: #ef4444;
 	}
 
 	.label {
@@ -75,7 +171,17 @@
 		margin-bottom: 0.4rem;
 	}
 
-	.signature {
+	.row {
+		margin-bottom: 0.5rem;
+	}
+
+	.key {
+		font-size: 0.75em;
+		color: var(--text-secondary);
+		margin-bottom: 0.15rem;
+	}
+
+	.value {
 		font-family: monospace;
 		font-size: 0.8em;
 		color: var(--text-primary);
@@ -84,25 +190,24 @@
 		border-radius: 4px;
 		overflow-x: auto;
 		white-space: pre-wrap;
-		word-break: break-all;
+		word-break: break-word;
 		margin: 0;
 	}
 
-	.docstring {
+	.arc {
 		font-family: monospace;
-		font-size: 0.8em;
+		font-size: 0.85em;
 		color: var(--text-primary);
-		background: var(--bg-tertiary);
-		padding: 0.5rem;
-		border-radius: 4px;
-		overflow-x: auto;
-		white-space: pre-wrap;
-		margin: 0;
+		padding: 0.1rem 0;
+	}
+
+	.muted,
+	.muted-inline {
+		font-size: 0.85em;
+		color: var(--text-tertiary);
 	}
 
 	.muted {
-		font-size: 0.85em;
-		color: var(--text-tertiary);
 		font-style: italic;
 	}
 

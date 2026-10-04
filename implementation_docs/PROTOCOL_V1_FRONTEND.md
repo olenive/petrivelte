@@ -1,10 +1,7 @@
 # Protocol version 1 in the frontend
 
 **Date:** 2026-10-03, revised 2026-10-04 after the server moved to version 1
-**Status:** Design proposal, not yet implemented. Revised in lockstep with the
-server: there is no version 0 path to keep, no `?protocol=1`, and the server
-no longer sends `x` and `y`, so the layout (slice 1) and the version 1 page
-(slice 3) land together before the next deploy of either.
+**Status:** Implemented 2026-10-04: slice 1 (the layout) and slice 3 (the version 1 page) landed.
 
 The net protocol is specified once, in the Python library:
 [`../../petritype/PROTOCOL.md`](../../petritype/PROTOCOL.md)

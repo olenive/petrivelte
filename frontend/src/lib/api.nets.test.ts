@@ -4,13 +4,19 @@ vi.mock('$lib/config/network', () => ({ API_URL: 'http://cp.test' }));
 
 import {
 	NetProxyError,
+	PROTOCOL_REASONS,
 	diagnoseNet,
+	disableTransition,
+	enableTransition,
+	executionInject,
 	executionStep,
 	getExecutionHistory,
 	getExecutionState,
 	getNetLogHistory,
 	getToken,
 	isNotLoaded,
+	isProtocolError,
+	isStillInProgress,
 } from './api';
 
 function respond(status: number, body: unknown) {
@@ -92,6 +98,136 @@ describe('net execution proxy refusals', () => {
 		respond(503, { detail: 'Worker is not ready', reason: 'worker_not_ready' });
 		await expect(executionStep('n-1', 'k-1')).rejects.toThrow('Worker is not ready');
 		await expect(getToken('n-1', 't-1')).rejects.toThrow('Worker is not ready');
+	});
+});
+
+describe('protocol refusals', () => {
+	const CODES: Array<[number, string]> = [
+		[404, 'unknown_net'],
+		[404, 'unknown_place'],
+		[404, 'unknown_transition'],
+		[404, 'unknown_token'],
+		[422, 'invalid_params'],
+		[422, 'invalid_token'],
+		[422, 'not_serializable'],
+		[422, 'load_failed'],
+		[501, 'unsupported'],
+		[501, 'unknown_method'],
+		[500, 'internal'],
+	];
+
+	for (const [status, reason] of CODES) {
+		it(`carries ${status} ${reason} as a protocol error`, async () => {
+			respond(status, { detail: `refused: ${reason}`, reason });
+			const error = await executionInject('n-1', 'Receiving', { id: 1 }).catch((e) => e);
+			expect(error).toBeInstanceOf(NetProxyError);
+			expect(error.status).toBe(status);
+			expect(error.reason).toBe(reason);
+			expect(error.message).toBe(`refused: ${reason}`);
+			expect(isProtocolError(error)).toBe(true);
+			expect(isNotLoaded(error)).toBe(false);
+			expect(isStillInProgress(error)).toBe(false);
+		});
+	}
+
+	it('knows every protocol code', () => {
+		expect([...PROTOCOL_REASONS].sort()).toEqual([...CODES.map(([, r]) => r), 'not_loaded'].sort());
+	});
+
+	it('reads the protocol not_loaded as not loaded', async () => {
+		respond(409, { detail: 'not loaded', reason: 'not_loaded' });
+		const error = await getToken('n-1', '7').catch((e) => e);
+		expect(isNotLoaded(error)).toBe(true);
+		expect(isProtocolError(error)).toBe(true);
+	});
+
+	it('is not fooled by a control plane refusal', async () => {
+		respond(503, { detail: 'Worker is not ready', reason: 'worker_not_ready' });
+		const error = await getExecutionState('n-1').catch((e) => e);
+		expect(isProtocolError(error)).toBe(false);
+	});
+});
+
+describe('a step that outlasts the control plane', () => {
+	it('is still in progress, not a failure', async () => {
+		respond(504, { detail: 'The step is still running', reason: 'timeout' });
+		const error = await executionStep('n-1', 'k-1').catch((e) => e);
+		expect(error).toBeInstanceOf(NetProxyError);
+		expect(error.status).toBe(504);
+		expect(error.reason).toBe('timeout');
+		expect(isStillInProgress(error)).toBe(true);
+		expect(isProtocolError(error)).toBe(false);
+	});
+
+	it('is not mistaken for a bare 504 or another reason', async () => {
+		respond(504, { detail: 'Gateway timeout' });
+		expect(isStillInProgress(await executionStep('n-1', 'k-1').catch((e) => e))).toBe(false);
+		respond(502, { detail: 'down', reason: 'worker_unreachable' });
+		expect(isStillInProgress(await executionStep('n-1', 'k-1').catch((e) => e))).toBe(false);
+		expect(isStillInProgress(new Error('timeout'))).toBe(false);
+	});
+});
+
+describe('version 1 bodies', () => {
+	it('reads the state with a token limit', async () => {
+		const fetchMock = respond(200, { marking_version: 3 });
+		await getExecutionState('n-1', 50);
+		expect(fetchMock.mock.calls[0][0]).toBe('http://cp.test/api/nets/n-1/execution/state?token_limit=50');
+		await getExecutionState('n-1');
+		expect(fetchMock.mock.calls[1][0]).toBe('http://cp.test/api/nets/n-1/execution/state');
+	});
+
+	it('reads the history after a seq, answering its entries', async () => {
+		const entry = { seq: 5, transition: 'Sort', started_at: 't', duration_ms: 1, outcome: 'fired', consumed: [], produced: [] };
+		const fetchMock = respond(200, { entries: [entry] });
+		await expect(getExecutionHistory('n-1', { after: 4, limit: 10 })).resolves.toEqual([entry]);
+		const url = new URL(fetchMock.mock.calls[0][0]);
+		expect(url.pathname).toBe('/api/nets/n-1/execution/history');
+		expect(url.searchParams.get('after')).toBe('4');
+		expect(url.searchParams.get('limit')).toBe('10');
+	});
+
+	it('posts inject by place and answers the new id', async () => {
+		const fetchMock = respond(200, { status: 'injected', id: '17', marking_version: 4 });
+		await expect(executionInject('n-1', 'Receiving', { weight: 2 })).resolves.toEqual({
+			status: 'injected',
+			id: '17',
+			marking_version: 4,
+		});
+		const init = fetchMock.mock.calls[0][1]!;
+		expect(JSON.parse(String(init.body))).toEqual({ place: 'Receiving', token: { weight: 2 } });
+	});
+
+	it('answers the step result', async () => {
+		respond(200, { fired: true, transition: 'Sort', marking_version: 6, running: false });
+		await expect(executionStep('n-1', 'k-1')).resolves.toEqual({
+			fired: true,
+			transition: 'Sort',
+			marking_version: 6,
+			running: false,
+		});
+	});
+
+	it('enables and disables a transition by name', async () => {
+		const fetchMock = respond(200, { marking_version: 9 });
+		await expect(enableTransition('n-1', 'Dispatch Truck')).resolves.toEqual({ marking_version: 9 });
+		await disableTransition('n-1', 'Sort');
+		expect(fetchMock.mock.calls[0][0]).toBe('http://cp.test/api/nets/n-1/transitions/Dispatch%20Truck/enable');
+		expect(fetchMock.mock.calls[0][1]!.method).toBe('POST');
+		expect(fetchMock.mock.calls[1][0]).toBe('http://cp.test/api/nets/n-1/transitions/Sort/disable');
+	});
+
+	it('refuses an unknown transition with the protocol code', async () => {
+		respond(404, { detail: 'no transition named Nope', reason: 'unknown_transition' });
+		const error = await enableTransition('n-1', 'Nope').catch((e) => e);
+		expect(error.reason).toBe('unknown_transition');
+	});
+
+	it('reads a token as JSON or text', async () => {
+		const value = { id: '3', place: 'Receiving', type_name: 'Parcel', kind: 'json', value: { id: 3 } };
+		const fetchMock = respond(200, value);
+		await expect(getToken('n-1', '3')).resolves.toEqual(value);
+		expect(fetchMock.mock.calls[0][0]).toBe('http://cp.test/api/nets/n-1/tokens/3');
 	});
 });
 

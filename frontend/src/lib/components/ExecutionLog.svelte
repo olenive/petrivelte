@@ -5,11 +5,14 @@
 	interface Props {
 		entries?: LogEntry[];
 		isStepping?: boolean;
+		/** A quiet line about the step, such as one still running past the
+		 *  control plane's bound. */
+		stepNotice?: string | null;
 		stepError?: string | null;
 		subprocessLines?: string[];
 	}
 
-	let { entries = [], isStepping = false, stepError = null, subprocessLines = [] }: Props = $props();
+	let { entries = [], isStepping = false, stepNotice = null, stepError = null, subprocessLines = [] }: Props = $props();
 
 	let logContainer = $state<HTMLDivElement | null>(null);
 	let autoScroll = $state(true);
@@ -46,20 +49,36 @@
 		}
 	});
 
-	function formatTimestamp(timestamp: number): string {
-		return new Date(timestamp * 1000).toLocaleTimeString();
+	function formatTime(iso: string): string {
+		const date = new Date(iso);
+		return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString();
+	}
+
+	function formatDuration(ms: number): string {
+		return typeof ms === 'number' ? `${ms < 10 ? ms.toFixed(1) : Math.round(ms)}ms` : '';
+	}
+
+	/** `[place, id]` pairs as `Place #id`, comma separated. */
+	function formatPairs(pairs: [string, string][]): string {
+		return (pairs ?? []).map(([place, id]) => `${place} #${id}`).join(', ') || '∅';
 	}
 </script>
 
 <div class="execution-log" bind:this={logContainer} onscroll={checkScrollPosition}>
-	{#each entries as entry (entry.timestamp)}
-		<div class="log-entry">
-			<span class="timestamp">{formatTimestamp(entry.timestamp)}</span>
+	{#each entries as entry (entry.seq)}
+		<div class="log-entry" class:failed={entry.outcome === 'failed'} data-seq={entry.seq} data-outcome={entry.outcome}>
+			<span class="timestamp">{formatTime(entry.started_at)}</span>
 			<span class="transition">{entry.transition}</span>
-			<span class="duration">{entry.duration_ms}ms</span>
+			{#if entry.outcome === 'failed'}
+				<span class="outcome">failed{entry.restored ? ', restored' : ''}</span>
+			{/if}
+			<span class="duration">{formatDuration(entry.duration_ms)}</span>
 			<div class="details">
-				{JSON.stringify(entry.inputs)} → {JSON.stringify(entry.outputs)}
+				{formatPairs(entry.consumed)} → {formatPairs(entry.produced)}
 			</div>
+			{#if entry.outcome === 'failed' && entry.error}
+				<div class="entry-error">{entry.error}</div>
+			{/if}
 		</div>
 	{/each}
 
@@ -68,6 +87,10 @@
 			<span class="spinner"></span>
 			<span>Executing transition...</span>
 		</div>
+	{/if}
+
+	{#if stepNotice}
+		<div class="step-status step-notice">{stepNotice}</div>
 	{/if}
 
 	{#if subprocessLines.length > 0}
@@ -123,6 +146,25 @@
 	.details {
 		margin-top: 0.25rem;
 		color: var(--text-primary);
+		word-break: break-word;
+	}
+
+	.log-entry.failed .transition,
+	.outcome,
+	.entry-error {
+		color: #ef4444;
+	}
+
+	.outcome {
+		margin-right: 0.5rem;
+		font-size: 0.9em;
+	}
+
+	.entry-error {
+		margin-top: 0.25rem;
+		font-size: 0.9em;
+		white-space: pre-wrap;
+		word-break: break-all;
 	}
 
 	.empty {

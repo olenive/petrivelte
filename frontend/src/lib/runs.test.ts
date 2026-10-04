@@ -47,7 +47,7 @@ const run = (over: Partial<RunRecord> = {}): RunRecord => ({
 	trigger: 'manual',
 	scheduled_for: null,
 	state: 'succeeded',
-	reason: 'no_enabled_transitions',
+	reason: 'no_fireable_transitions',
 	error: null,
 	step_count: 12,
 	created_at: '2026-09-05T10:00:00Z',
@@ -80,7 +80,7 @@ const lastRun = (over: Partial<LastRun> = {}): LastRun => ({
 	id: 'r-1',
 	trigger: 'manual',
 	state: 'succeeded',
-	reason: 'no_enabled_transitions',
+	reason: 'no_fireable_transitions',
 	started_at: '2026-09-05T10:00:00Z',
 	ended_at: '2026-09-05T10:01:00Z',
 	duration_s: 60,
@@ -173,7 +173,7 @@ describe('runStateMeta', () => {
 describe('reasonLabel', () => {
 	it('spells out every tag in the closed set', () => {
 		const tags = [
-			'no_enabled_transitions', 'user_stop', 'unloaded', 'transition_raised',
+			'no_fireable_transitions', 'user_stop', 'unloaded', 'transition_raised',
 			'subprocess_exited', 'load_failed', 'dispatch_failed', 'worker_lost',
 			'abandoned', 'overlap', 'paused',
 		];
@@ -292,14 +292,14 @@ describe('lastRunBadge', () => {
 		const badge = lastRunBadge(lastRun({
 			trigger: null,
 			state: 'succeeded',
-			reason: 'no_enabled_transitions',
+			reason: 'no_fireable_transitions',
 			started_at: null,
 			ended_at: null,
 			duration_s: null,
 		}), NOW);
 
 		expect(badge?.label).toBe('succeeded');
-		expect(badge?.detail).toBe('no enabled transitions');
+		expect(badge?.detail).toBe('no fireable transitions');
 		expect(badge?.title).not.toContain('took');
 	});
 });
@@ -456,11 +456,11 @@ describe('previousRunLabel', () => {
 	it('keeps the state when the reason does not already say it', () => {
 		const label = previousRunLabel(lastRun({
 			state: 'succeeded',
-			reason: 'no_enabled_transitions',
+			reason: 'no_fireable_transitions',
 			duration_s: 1864,
 		}), NOW);
 
-		expect(label?.text).toBe('previous run: succeeded · no enabled transitions · 31m 04s');
+		expect(label?.text).toBe('previous run: succeeded · no fireable transitions · 31m 04s');
 	});
 
 	it('leaves the duration out when retention has taken it', () => {
@@ -571,7 +571,7 @@ describe('applyRunEvent', () => {
 		const closed = applyRunEvent(net, runEvent({
 			type: 'net_run_finished',
 			state: 'succeeded',
-			reason: 'no_enabled_transitions',
+			reason: 'no_fireable_transitions',
 			ended_at: '2026-09-05T11:59:00Z',
 		}));
 

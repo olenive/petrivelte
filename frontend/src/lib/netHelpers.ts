@@ -88,52 +88,11 @@ export function tokenSlotOffset(index: number): { dx: number; dy: number } {
 	return { dx: 0, dy: 0 };
 }
 
-/**
- * How many tokens a place actually holds.
- *
- * `place.tokens` is a capped sample — the worker truncates per-place token
- * detail so the IPC payload stays bounded by the net's shape rather than its
- * runtime — so counts must come from `token_count`. The fallback covers
- * workers predating that field.
- */
-export function placeTokenCount(place: { token_count?: number; tokens?: unknown[] }): number {
-	return place.token_count ?? place.tokens?.length ?? 0;
-}
-
-/** True when a place should show its token count as a number. */
-export function placeShowsCounter(place: { token_count?: number; tokens?: unknown[] }): boolean {
-	return placeTokenCount(place) >= TOKEN_COUNTER_THRESHOLD;
-}
-
-/**
- * Merge authoritative per-place counts from a `transition_fired` event into
- * the graph's places.
- *
- * Counts cannot be derived from `new_token_positions`: that payload is capped
- * per place, so a large place would report the cap. And they cannot wait for
- * the next full state snapshot either — transitions fire continuously between
- * refreshes, and counts would visibly freeze while the execution log kept
- * scrolling. Hence the worker sends `token_counts` with every fire.
- *
- * Places absent from `tokenCounts` are left untouched rather than zeroed, so a
- * partial payload can't blank out the marking.
- */
-export function applyTokenCounts<P extends { id: string; name: string; token_count?: number }>(
-	places: P[],
-	tokenCounts: Record<string, number> | undefined,
-): P[] {
-	if (!tokenCounts) return places;
-	return places.map((place) => {
-		// The worker keys counts by place *name*; the graph keys places by id.
-		// They coincide today, so accept either rather than depending on it.
-		const count = tokenCounts[place.name] ?? tokenCounts[place.id];
-		return count === undefined ? place : { ...place, token_count: count };
-	});
-}
-
-/** Total tokens across every place, from the authoritative counts. */
-export function totalTokenCount(places: { token_count?: number; tokens?: unknown[] }[]): number {
-	return places.reduce((sum, place) => sum + placeTokenCount(place), 0);
+/** True when a place holding `count` tokens shows the count as a number.
+ *  `count` is the place's true count (protocol §5.3), never the length of
+ *  its capped token list. */
+export function placeShowsCounter(count: number): boolean {
+	return count >= TOKEN_COUNTER_THRESHOLD;
 }
 
 function coerceAs(value: string, kind: string | null | undefined): unknown {

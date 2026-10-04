@@ -3,7 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { workerEventsStore, workerStreamStore, connectToWorker, disconnectWorkerEvents } from '$lib/stores/workerEvents';
-	import { statusLabel, liveAction, capHead, capTail, prependLogEntry, EXECUTION_LOG_CAP, NET_LOG_CAP } from '$lib/workerStream';
+	import { statusLabel, liveAction, capTail, mergeLogEntries, lastLogSeq, EXECUTION_LOG_CAP, NET_LOG_CAP } from '$lib/workerStream';
 	import { selectedTokenId } from '$lib/stores/tokenSelection';
 	import { isOperationEvent, isRunEvent, serverEventsStore } from '$lib/stores/serverEvents';
 	import OperationStatus from '$lib/components/OperationStatus.svelte';
@@ -19,8 +19,9 @@
 		logout,
 		listNets, listWorkers, patchNet, loadNet, unloadNet,
 		getExecutionState, executionStep, executionStart, executionStop, executionReset, executionInject,
+		enableTransition, disableTransition,
 		listNetSecrets, setNetSecrets, getNetLogHistory, getExecutionHistory, runNetNow,
-		diagnoseNet, isNotLoaded, type NetDiagnosis,
+		diagnoseNet, isNotLoaded, isStillInProgress, type NetDiagnosis,
 		type Net, type Worker, type NetParam, type SecretMetadata,
 	} from '$lib/api';
 	import GraphPanel from '$lib/components/GraphPanel.svelte';
@@ -38,77 +39,113 @@
 	import { groupByDefinition } from '$lib/netInstances';
 	import { TOKEN_STAGE_MS, FIRING_ANIMATION_MS } from '$lib/tokenAnimation';
 	import { diagnoseActivityLine, diagnoseClasses, diagnoseStateLabel } from '$lib/netDiagnose';
-	import type { GraphState, Token, LogEntry, Transition } from '$lib/types';
-	import { layoutFor, placeGraphState, type KeyedLayout } from '$lib/graphLayout';
+	import type { LogEntry, NetEvent, NetState, StepResult } from '$lib/types';
+	import { layoutFor, type KeyedLayout } from '$lib/graphLayout';
 	import {
-		TOKEN_DOT_MAX,
-		applyTokenCounts,
-		coerceParamValue,
-		netFullLabel,
-		parseOptionalSeconds,
-		tokenSlotOffset,
-		totalTokenCount as sumTokenCounts,
-	} from '$lib/netHelpers';
+		DEFAULT_TOKEN_LIMIT,
+		anyInFlight,
+		applyEvent,
+		mirrorFromState,
+		shouldAdopt,
+		totalCount,
+		type Change,
+		type Mirror,
+	} from '$lib/netMirror';
+	import {
+		activeEdges,
+		busyTransitions,
+		flashingTransitions,
+		hiddenTokenIds,
+		liveCues,
+		nextWake,
+		playChange,
+		travelling,
+		type Cue,
+	} from '$lib/firingPlayback';
+	import { drawNet, drawTokens, tokenPoint } from '$lib/netView';
+	import { TOKEN_DOT_MAX, coerceParamValue, netFullLabel, parseOptionalSeconds } from '$lib/netHelpers';
 
-	let graphState = $state<GraphState | null>(null);
-	// The page lays the net out itself; the server's `x` and `y` are ignored.
-	// Recomputed only when the topology changes, not on a marking update.
+	// What the page believes about the selected net's marking: built from a
+	// state read and moved by the worker stream's state notifications, at
+	// the held marking version plus one and no other (`netMirror.ts`). Null
+	// while there is no state to show.
+	let mirror = $state.raw<Mirror | null>(null);
+	// The page lays the net out itself from the topology. Recomputed only
+	// when the topology changes (a new generation), not on a marking update.
 	let netLayout = $state.raw<KeyedLayout | null>(null);
-
-	// A graph state from the server, at the positions the layout gives it.
-	function laidOut(state: GraphState): GraphState {
-		netLayout = layoutFor(state, netLayout);
-		return placeGraphState(state, netLayout.layout);
-	}
-	let tokens = $state<Token[]>([]);
 	let logEntries = $state<LogEntry[]>([]);
 	let connectionStatus = $state('Connecting...');
 
-	// `tokens` holds only what the worker sends for rendering, and that is
-	// capped per place so the IPC payload can't grow with the marking. Counts
-	// must therefore come from each place's `token_count`, or a net with a
-	// large place would report the cap instead of its real size. Falls back to
-	// the rendered length for workers predating the cap.
-	let totalTokenCount = $derived(
-		graphState?.places ? sumTokenCounts(graphState.places) : tokens.length,
+	// Sizes come from each place's `count`, never from its capped list.
+	let totalTokenCount = $derived(totalCount(mirror));
+	// Every place in topology order, for the token inspector.
+	let mirrorPlaces = $derived(
+		mirror ? mirror.topology.places.flatMap((p) => (mirror!.places[p.name] ? [mirror!.places[p.name]] : [])) : [],
 	);
+	// What the graph panel draws.
+	let drawnNet = $derived(mirror && netLayout ? drawNet(mirror, netLayout.layout) : null);
+	let drawnTokens = $derived(mirror && netLayout ? drawTokens(mirror, netLayout.layout) : []);
+	// Places the inject form offers: only those whose tokens have a JSON form.
+	let injectablePlaces = $derived((mirror?.topology.places ?? []).filter((p) => p.serializable));
 
-	// The inspector needs its own list rather than the positioned `tokens`:
-	// that one omits places rendered as a count, and is swapped out mid-
-	// animation. This is the worker's capped sample for every place, which is
-	// exactly what's inspectable.
-	let inspectorTokens = $derived<Token[]>(
-		(graphState?.places ?? []).flatMap((place) =>
-			(place.tokens ?? []).map((t) => ({
-				id: t.id,
-				place_id: place.id,
-				x: place.x,
-				y: place.y,
-				color: t.color,
-				preview: t.preview,
-				type_name: t.type_name,
-			})),
-		),
-	);
+	// Animation: cues played from the changes the mirror applied
+	// (`firingPlayback.ts`), against a clock this page moves when a cue
+	// starts or ends. The mirror is the truth; cues only travel over it.
+	const MAX_CUES = 300;
+	let cues = $state.raw<Cue[]>([]);
+	let clock = $state(0);
+	let stageOneEnds: Record<string, number> = {};
+	let cueSerial = 0;
+	let cueTimer: ReturnType<typeof setTimeout> | null = null;
+	let travellingCues = $derived(travelling(cues, clock));
+	let hiddenIds = $derived(hiddenTokenIds(cues, clock));
+	let activeEdgeEnds = $derived(activeEdges(cues, clock));
+	let firingTransitions = $derived(busyTransitions(cues, clock));
+	let failingTransitions = $derived(flashingTransitions(cues, clock));
 
-	// Animation state
-	type AnimationStage = 'idle' | 'consuming' | 'producing';
-	let animationStage = $state<AnimationStage>('idle');
-	let consumingTokens = $state<Token[]>([]);
-	let producingTokens = $state<Token[]>([]);
-	let transitionPosition = $state<{ x: number; y: number } | null>(null);
-	let firingTransitionId = $state<string | null>(null);
-	let activeEdgeIds = $state<Set<string>>(new Set());
-	let animationTimeouts: number[] = [];
-
-	// Animation queue for handling rapid-fire transitions
-	interface QueuedAnimation {
-		transitionName: string;
-		transitionPosition: { x: number; y: number };
-		newTokens: Token[];
+	function tickCues() {
+		if (cueTimer) {
+			clearTimeout(cueTimer);
+			cueTimer = null;
+		}
+		clock = performance.now();
+		const live = liveCues(cues, clock);
+		if (live.length !== cues.length) cues = live;
+		const wake = nextWake(live, clock);
+		if (wake !== null) cueTimer = setTimeout(tickCues, Math.max(0, wake - performance.now()) + 5);
 	}
-	let animationQueue: QueuedAnimation[] = [];
-	let isAnimating = false;
+
+	function clearPlayback() {
+		if (cueTimer) {
+			clearTimeout(cueTimer);
+			cueTimer = null;
+		}
+		cues = [];
+		stageOneEnds = {};
+	}
+
+	function play(change: Change) {
+		const layout = netLayout?.layout;
+		if (!layout) return;
+		const now = performance.now();
+		const played = playChange(change, {
+			now,
+			stageMs: TOKEN_STAGE_MS,
+			stageOneEnds,
+			transitionAt: (name) => {
+				const at = layout.placements.get(name);
+				return at ? { x: at.x, y: at.y } : null;
+			},
+			tokenAt: (place, slot) => tokenPoint(layout, place, slot),
+			serial: ++cueSerial,
+		});
+		stageOneEnds = played.stageOneEnds;
+		// A net firing faster than it can be watched: the drawing keeps up
+		// with the mirror and the animation skips until it has caught up.
+		if (played.cues.length === 0 || cues.length > MAX_CUES) return;
+		cues = [...liveCues(cues, now), ...played.cues];
+		tickCues();
+	}
 
 	// Auth state
 	let userEmail = $derived($page.data.user?.email ?? '');
@@ -126,7 +163,17 @@
 	// non-optimistic) toggle doesn't look unresponsive during the round-trip.
 	let isToggling = $state(false);
 	let isAutoStepping = $state(false);
+	// The step button's spinner: this page's own step request in flight.
 	let isStepping = $state(false);
+	// A step that outlasted the control plane's bound (504 `timeout`) has
+	// not failed: its body runs on and the firing lands on the stream. Until
+	// it does, the page still shows the step as under way.
+	let stepAwaitingStream = $state(false);
+	let stepBusy = $derived(isStepping || stepAwaitingStream);
+	let stepNotice = $state<string | null>(null);
+	// Enable and disable from the transition inspector.
+	let togglingTransition = $state(false);
+	let toggleError = $state<string | null>(null);
 	let isResetting = $state(false);
 	// Run now: one dispatch — unload, load, and the start that follows —
 	// recorded as a manual run. `runNowError` holds the server's own words for
@@ -162,7 +209,7 @@
 	let injectNotice = $state<string | null>(null);
 	// Reason the net's continuous execution stopped on an error (a raised
 	// transition). Cleared when the user next acts. A normal end-of-run
-	// ("no_enabled_transitions") is not shown here.
+	// ("no_fireable_transitions") is not shown here.
 	let executionStoppedReason = $state<string | null>(null);
 	let subprocessLines = $state<string[]>([]);
 	// Durable, net-wide subprocess log: seeded from the worker's rotating
@@ -347,9 +394,10 @@
 		$selectedTokenId = tokenId;
 	}
 
-	// Transition selection handler
+	// Transition selection handler. Transitions are keyed by name.
 	function handleTransitionSelect(transitionId: string | null) {
 		selectedTransitionId = transitionId;
+		toggleError = null;
 		// Auto-expand right sidebar when a transition is selected
 		if (transitionId && rightSidebarCollapsed) {
 			rightSidebarCollapsed = false;
@@ -358,10 +406,28 @@
 	}
 
 	let selectedTransition = $derived(
-		selectedTransitionId && graphState
-			? graphState.transitions.find(t => t.id === selectedTransitionId) ?? null
+		selectedTransitionId && mirror
+			? mirror.topology.transitions.find(t => t.name === selectedTransitionId) ?? null
 			: null
 	);
+	let selectedTransitionState = $derived(
+		selectedTransitionId && mirror ? mirror.transitions[selectedTransitionId] ?? null : null
+	);
+
+	async function handleToggleTransition(name: string, enable: boolean) {
+		const netId = selectedNetId;
+		if (!netId || togglingTransition) return;
+		togglingTransition = true;
+		toggleError = null;
+		try {
+			// The change itself arrives as `toggled` on the stream.
+			await (enable ? enableTransition(netId, name) : disableTransition(netId, name));
+		} catch (error) {
+			if (selectedNetId === netId) toggleError = error instanceof Error ? error.message : String(error);
+		} finally {
+			togglingTransition = false;
+		}
+	}
 
 	async function fetchNets() {
 		try {
@@ -398,8 +464,7 @@
 	async function selectNet(netId: string) {
 		selectedNetId = netId;
 		isRunning = false;
-		graphState = null;
-		tokens = [];
+		dropMirror();
 		netLogLines = [];
 		executionStoppedReason = null;
 		selectedTransitionId = null;
@@ -435,14 +500,7 @@
 		if (liveReadError?.netId === netId) liveReadError = null;
 		await Promise.all([
 			refreshGraphState(netId),
-			getExecutionHistory(netId)
-				.then((history) => {
-					if (selectedNetId !== netId) return;
-					// The worker keeps history oldest first; the panel shows
-					// newest first.
-					logEntries = capHead([...history].reverse(), EXECUTION_LOG_CAP);
-				})
-				.catch((error) => noteLiveReadFailure(netId, error)),
+			refreshHistory(netId, true),
 			// Seeded from the worker's rotating file so it survives
 			// subprocess and worker restarts.
 			getNetLogHistory(netId)
@@ -454,43 +512,82 @@
 		]);
 	}
 
+	// Forget the drawn net, its animation and its selection.
+	function dropMirror() {
+		mirror = null;
+		clearPlayback();
+		stepAwaitingStream = false;
+		logEntries = [];
+		historyFetch = null;
+	}
+
 	// The worker no longer answers for this net — an unload, or a load that
 	// failed. What is drawn is a subprocess that is gone.
 	function clearLiveState() {
-		graphState = null;
-		tokens = [];
+		dropMirror();
 		isRunning = false;
 	}
 
-	// Pull the worker's current graph state and recompute token positions. Used
-	// on net selection and after an inject, so the acting tab updates without
-	// waiting on the broadcast round-trip.
-	async function refreshGraphState(netId: string) {
-		try {
-			const stateData = await getExecutionState(netId);
-			if (selectedNetId !== netId) return;
-			graphState = laidOut(stateData);
-			// Server-derived: adopt the worker's actual continuous-execution
-			// state rather than leaving the optimistic flag from a prior session.
-			isRunning = !!stateData?.running;
+	// Adopt a state read: always for a new generation, otherwise only if it
+	// is not older than the mirror (notifications applied since the read was
+	// answered must not be undone). A new generation drops every token,
+	// animation and cached token view, and rereads the log, which the net
+	// process starts over.
+	function adoptState(state: NetState) {
+		if (!shouldAdopt(mirror, state)) return;
+		const previous = mirror;
+		const newGeneration = !previous || previous.generation !== state.generation;
+		if (newGeneration) {
+			clearPlayback();
+			$selectedTokenId = null;
+		}
+		mirror = mirrorFromState(state, DEFAULT_TOKEN_LIMIT);
+		netLayout = layoutFor(mirror.topology, netLayout);
+		// Server-derived: adopt the worker's actual continuous-execution
+		// state rather than leaving the optimistic flag from a prior session.
+		isRunning = !!state.running;
+		if (!anyInFlight(mirror)) stepAwaitingStream = false;
+		if (previous && newGeneration && selectedNetId) {
+			// A reset: drop what belonged to the old net.
+			stepError = null;
+			stepNotice = null;
+			executionStoppedReason = null;
+			subprocessLines = [];
+			logEntries = [];
+			refreshHistory(selectedNetId, true);
+		}
+	}
 
-			const tokensData: TokenSummary[] = [];
-			if (graphState?.places) {
-				for (const place of graphState.places) {
-					if (place.tokens && place.tokens.length > 0) {
-						for (const token of place.tokens) {
-							tokensData.push({
-								id: token.id,
-								place_id: place.id,
-								color: token.color,
-								preview: token.preview,
-								type_name: token.type_name,
-							});
-						}
-					}
-				}
-			}
-			tokens = calculateTokenPositions(tokensData, graphState!);
+	// One state read at a time per net: a request made while one is in
+	// flight is folded into one more read after it, so a burst of gaps
+	// costs two reads, not one per gap.
+	let stateFetch: { netId: string; again: boolean; done: Promise<void> } | null = null;
+
+	// Pull the worker's current state and rebuild the mirror from it. Used on
+	// net selection, on a version gap, a `reloaded`, a stream gap, a
+	// reconnect and the tab coming back into view.
+	function refreshGraphState(netId: string): Promise<void> {
+		if (stateFetch && stateFetch.netId === netId) {
+			stateFetch.again = true;
+			return stateFetch.done;
+		}
+		const entry = { netId, again: false, done: Promise.resolve() };
+		entry.done = (async () => {
+			do {
+				entry.again = false;
+				await readStateOnce(netId);
+			} while (entry.again && selectedNetId === netId);
+			if (stateFetch === entry) stateFetch = null;
+		})();
+		stateFetch = entry;
+		return entry.done;
+	}
+
+	async function readStateOnce(netId: string) {
+		try {
+			const state = await getExecutionState(netId, DEFAULT_TOKEN_LIMIT);
+			if (selectedNetId !== netId) return;
+			adoptState(state);
 		} catch (error) {
 			// A net that is not loaded has no state to fetch, and says so
 			// with a 409; that is quiet. Any other refusal carries the
@@ -500,17 +597,99 @@
 		}
 	}
 
+	// A place whose drawn dots fell short of its count (its listed tokens
+	// were consumed, and what lies beyond the cap is not known here) is
+	// refilled by a state read, at most every two seconds.
+	let refillTimer: ReturnType<typeof setTimeout> | null = null;
+	function scheduleRefill() {
+		if (refillTimer) return;
+		refillTimer = setTimeout(() => {
+			refillTimer = null;
+			if (selectedNetId) refreshGraphState(selectedNetId);
+		}, 2000);
+	}
+
+	// The execution log: the whole log on a resync, then only what follows
+	// the newest entry held, after each firing lands. One read at a time,
+	// with one more after it if asked meanwhile.
+	let historyFetch: { netId: string; again: boolean; whole: boolean } | null = null;
+
+	async function refreshHistory(netId: string, whole: boolean) {
+		if (historyFetch && historyFetch.netId === netId) {
+			historyFetch.again = true;
+			historyFetch.whole = historyFetch.whole || whole;
+			return;
+		}
+		const entry = { netId, again: false, whole };
+		historyFetch = entry;
+		try {
+			do {
+				const readWhole = entry.whole;
+				entry.again = false;
+				entry.whole = false;
+				const after = readWhole ? undefined : lastLogSeq(logEntries);
+				const entries = await getExecutionHistory(netId, after ? { after } : {});
+				if (selectedNetId !== netId || historyFetch !== entry) return;
+				// The log answers oldest first; the panel shows newest first.
+				logEntries = mergeLogEntries(readWhole ? [] : logEntries, entries, EXECUTION_LOG_CAP);
+			} while (entry.again);
+		} catch (error) {
+			noteLiveReadFailure(netId, error);
+		} finally {
+			if (historyFetch === entry) historyFetch = null;
+		}
+	}
+
+	// Fire one transition. The request answers once the firing has landed,
+	// by which time the stream has (or is about to have) carried its
+	// `launched` and `distributed`, which the animation plays. A step that
+	// outlasts the control plane's bound is still running, not failed.
+	// Returns the result, or 'in_progress' for that case; throws any other
+	// refusal.
+	async function stepOnce(netId: string): Promise<StepResult | 'in_progress'> {
+		isStepping = true;
+		try {
+			const result = await executionStep(netId);
+			if (selectedNetId === netId && result.failed && !stepError) {
+				stepError = `${result.transition ?? 'The transition'} failed.`;
+			}
+			return result;
+		} catch (error) {
+			if (!isStillInProgress(error)) throw error;
+			if (selectedNetId === netId) {
+				stepAwaitingStream = true;
+				stepNotice = 'Still running: the firing will show when its body returns.';
+			}
+			return 'in_progress';
+		} finally {
+			isStepping = false;
+		}
+	}
+
 	async function handleStep() {
 		if (!selectedNetId) return;
+		const netId = selectedNetId;
 		stepError = null;
+		stepNotice = null;
 		executionStoppedReason = null;
 		subprocessLines = [];
 		try {
-			await executionStep(selectedNetId);
+			const result = await stepOnce(netId);
+			if (result !== 'in_progress' && !result.fired && selectedNetId === netId) {
+				stepNotice = 'Nothing is fireable.';
+			}
 		} catch (error) {
 			console.error('Step failed:', error);
 			stepError = error instanceof Error ? error.message : 'Step failed.';
 		}
+	}
+
+	// Resolves once `ready()` holds, checking every 200 ms.
+	function waitUntil(ready: () => boolean): Promise<void> {
+		return new Promise((resolve) => {
+			const check = () => (ready() ? resolve() : setTimeout(check, 200));
+			check();
+		});
 	}
 
 	// Pull the worker's authoritative running flag and adopt it. Returns the
@@ -598,50 +777,48 @@
 		}
 	}
 
-	// Resolve function for auto-step to wait on WebSocket step result
-	let autoStepResolve: ((fired: boolean) => void) | null = null;
-
 	async function handleAutoStep() {
 		if (!selectedNetId) return;
 
 		if (isAutoStepping) {
 			isAutoStepping = false;
-			if (autoStepResolve) {
-				autoStepResolve(false);
-				autoStepResolve = null;
-			}
 			console.log('AUTO STEP: Stopped by user');
 			return;
 		}
 
+		const netId = selectedNetId;
 		isAutoStepping = true;
+		stepNotice = null;
 		console.log('AUTO STEP: Starting...');
 
-		// A single failed step is usually a transient backend blip (a 30s
-		// timeout under load, a flycast drop) — NOT a reason to abandon a
-		// long-running net. Tolerate consecutive failures with backoff and
-		// only give up after several in a row, mirroring the worker
-		// health-check hysteresis. A success resets the counter.
+		// A single failed step is usually a transient backend blip (a flycast
+		// drop, a worker restart) — NOT a reason to abandon a long-running
+		// net. Tolerate consecutive failures with backoff and only give up
+		// after several in a row, mirroring the worker health-check
+		// hysteresis. A success resets the counter.
 		const MAX_CONSECUTIVE_STEP_FAILURES = 5;
 		let consecutiveFailures = 0;
 
-		while (isAutoStepping) {
+		while (isAutoStepping && selectedNetId === netId) {
 			try {
 				subprocessLines = [];
-				// Register the resolver BEFORE POSTing the step so that a
-				// transition_fired event arriving between POST response and
-				// this line isn't lost (would otherwise hang the loop).
-				const pending = new Promise<boolean>((resolve) => {
-					autoStepResolve = resolve;
-				});
-				await executionStep(selectedNetId);
-				const fired = await pending;
-				autoStepResolve = null;
+				const result = await stepOnce(netId);
 				consecutiveFailures = 0;
-				stepError = null;
+				if (result === 'in_progress') {
+					// The body runs on; the next step waits for it to land.
+					await waitUntil(() => !stepAwaitingStream || !isAutoStepping || selectedNetId !== netId);
+					continue;
+				}
+				if (!result.failed) stepError = null;
+				stepNotice = null;
 
-				if (!fired) {
+				if (!result.fired) {
 					console.log('AUTO STEP: No more transitions can fire, stopping');
+					isAutoStepping = false;
+					break;
+				}
+				if (result.failed) {
+					console.log('AUTO STEP: the transition failed, stopping');
 					isAutoStepping = false;
 					break;
 				}
@@ -649,8 +826,6 @@
 				// Let the firing animation play out before the next step.
 				await new Promise(resolve => setTimeout(resolve, FIRING_ANIMATION_MS + 50));
 			} catch (error) {
-				// Clean up the dangling resolver from this iteration.
-				autoStepResolve = null;
 				consecutiveFailures += 1;
 				console.warn(
 					`AUTO STEP: step failed (${consecutiveFailures}/${MAX_CONSECUTIVE_STEP_FAILURES}):`,
@@ -678,9 +853,10 @@
 		isResetting = true;
 		try {
 			await executionReset(selectedNetId);
-			// Tokens, log entries, and animation state are cleared by the
-			// `net_reset` event handler below. That path runs for every open
-			// tab/client, keeping them in sync.
+			// Every watcher hears `reloaded` and refetches, which brings the
+			// new generation and with it a clean marking, log and animation.
+			// This tab reads it now too, in case its stream is behind.
+			await refreshGraphState(selectedNetId);
 		} catch (error) {
 			console.error('Reset failed:', error);
 		} finally {
@@ -701,11 +877,10 @@
 		}
 		isInjecting = true;
 		try {
-			await executionInject(selectedNetId, injectPlaceName, token);
-			injectNotice = `Injected into ${injectPlaceName}.`;
-			// New token positions arrive via the worker's graph_state broadcast;
-			// refresh now so the injecting tab updates immediately too.
-			await refreshGraphState(selectedNetId);
+			const result = await executionInject(selectedNetId, injectPlaceName, token);
+			// The token itself arrives on the stream as `added`, for every
+			// watcher alike.
+			injectNotice = `Injected token #${result.id} into ${injectPlaceName}.`;
 		} catch (error) {
 			injectError = error instanceof Error ? error.message : 'Inject failed.';
 		} finally {
@@ -718,170 +893,13 @@
 		const netId = target.value;
 
 		// Clear current state when switching nets
-		graphState = null;
-		tokens = [];
-		logEntries = [];
+		dropMirror();
 		// A refusal belongs to the net it was about.
 		runNowError = null;
 
 		if (netId) {
 			await selectNet(netId);
 		}
-	}
-
-	type TokenSummary = {
-		id: string;
-		place_id: string;
-		color: string;
-		preview: string;
-		type_name: string;
-	};
-
-	function calculateTokenPositions(tokensData: TokenSummary[], state: GraphState): Token[] {
-		if (!state.places) return [];
-
-		const tokensByPlace = new Map<string, TokenSummary[]>();
-		for (const token of tokensData) {
-			if (!tokensByPlace.has(token.place_id)) {
-				tokensByPlace.set(token.place_id, []);
-			}
-			tokensByPlace.get(token.place_id)!.push(token);
-		}
-
-		const positionedTokens: Token[] = [];
-		for (const [placeId, placeTokens] of tokensByPlace) {
-			const place = state.places.find(p => p.id === placeId);
-			if (!place) continue;
-
-			// Fixed slots, capped at TOKEN_DOT_MAX. Slot N is always the same
-			// point regardless of how many tokens the place holds, so an arriving
-			// token fills the next empty slot instead of shifting every dot
-			// already on screen. Beyond the cap the counter carries the number.
-			placeTokens.slice(0, TOKEN_DOT_MAX).forEach((token, index) => {
-				const { dx, dy } = tokenSlotOffset(index);
-
-				positionedTokens.push({
-					id: token.id,
-					place_id: placeId,
-					x: place.x + dx,
-					y: place.y + dy,
-					color: token.color,
-					preview: token.preview,
-					type_name: token.type_name,
-				});
-			});
-		}
-
-		return positionedTokens;
-	}
-
-	function processAnimationQueue() {
-		if (animationQueue.length === 0) {
-			isAnimating = false;
-			return;
-		}
-
-		isAnimating = true;
-		const animation = animationQueue.shift()!;
-
-		console.log(`⚡ ANIMATION: Starting animation for ${animation.transitionName}`);
-
-		// Build maps for efficient lookup
-		const oldTokenMap = new Map(tokens.map(t => [t.id, t]));
-		const newTokenMap = new Map(animation.newTokens.map(t => [t.id, t]));
-
-		// Detect consumed tokens (IDs that disappeared)
-		const consumed = tokens.filter(t => !newTokenMap.has(t.id));
-
-		// Detect produced tokens (IDs that are new)
-		const produced = animation.newTokens.filter(t => !oldTokenMap.has(t.id));
-
-		// Detect moved tokens (same ID, different place_id)
-		const moved: { old: Token; new: Token }[] = [];
-		for (const [id, oldToken] of oldTokenMap) {
-			const newToken = newTokenMap.get(id);
-			if (newToken && oldToken.place_id !== newToken.place_id) {
-				moved.push({ old: oldToken, new: newToken });
-			}
-		}
-
-		// Moved tokens should animate like consumed (stage 1) then produced (stage 2)
-		// Add old positions to consumed, new positions to produced
-		const movedAsConsumed = moved.map(m => m.old);
-		const movedAsProduced = moved.map(m => m.new);
-
-		const allConsuming = [...consumed, ...movedAsConsumed];
-		const allProducing = [...produced, ...movedAsProduced];
-
-		console.log(`⚡ ANIMATION: Consumed ${consumed.length}, produced ${produced.length}, moved ${moved.length} tokens`);
-
-		// Calculate active edges for each stage
-		if (!graphState) {
-			console.warn('⚡ ANIMATION: No graphState available');
-			isAnimating = false;
-			return;
-		}
-
-		// Stage 1: Find input edges (place → transition) for consuming tokens
-		const inputEdgeIds = new Set<string>();
-		const consumingPlaceIds = new Set(allConsuming.map(t => t.place_id));
-		graphState.edges.forEach(edge => {
-			if (edge.type === 'input' &&
-			    edge.target === animation.transitionName &&
-			    consumingPlaceIds.has(edge.source)) {
-				inputEdgeIds.add(edge.id);
-			}
-		});
-
-		// Stage 2: Find output edges (transition → place) for producing tokens
-		const outputEdgeIds = new Set<string>();
-		const producingPlaceIds = new Set(allProducing.map(t => t.place_id));
-		graphState.edges.forEach(edge => {
-			if (edge.type === 'output' &&
-			    edge.source === animation.transitionName &&
-			    producingPlaceIds.has(edge.target)) {
-				outputEdgeIds.add(edge.id);
-			}
-		});
-
-		console.log(`⚡ ANIMATION: Active edges - input: ${inputEdgeIds.size}, output: ${outputEdgeIds.size}`);
-
-		// Start two-stage animation
-		transitionPosition = animation.transitionPosition;
-		firingTransitionId = animation.transitionName;
-		consumingTokens = allConsuming;
-		producingTokens = allProducing;
-		activeEdgeIds = inputEdgeIds; // Start with input edges
-		animationStage = 'consuming';
-
-		// Stage 1: consuming, tokens move to the transition
-		const timeout1 = setTimeout(() => {
-			console.log('⚡ ANIMATION: Stage 1 complete, starting Stage 2 (producing)');
-			activeEdgeIds = outputEdgeIds; // Switch to output edges
-			animationStage = 'producing';
-
-			// Stage 2: producing, tokens move from the transition to the output places
-			const timeout2 = setTimeout(() => {
-				console.log('⚡ ANIMATION: Stage 2 complete, updating final state');
-				animationStage = 'idle';
-				consumingTokens = [];
-				producingTokens = [];
-				transitionPosition = null;
-				firingTransitionId = null;
-				activeEdgeIds = new Set();
-				tokens = animation.newTokens;
-
-				// Remove completed timeouts
-				animationTimeouts = [];
-
-				// Process next animation in queue
-				processAnimationQueue();
-			}, TOKEN_STAGE_MS);
-
-			animationTimeouts = [timeout2];
-		}, TOKEN_STAGE_MS);
-
-		animationTimeouts = [timeout1];
 	}
 
 	function selectedNetOperation() {
@@ -1281,6 +1299,92 @@
 		goto('/login');
 	}
 
+	// What the page does with each kind on the worker stream (protocol §7,
+	// and the host's own kinds, §9). State notifications go through the
+	// mirror's version rule; a gap or a `reloaded` refetches; what the
+	// mirror applied is animated.
+	function handleNetEvent(event: NetEvent, ts: string) {
+		const netId = selectedNetId;
+		if (!netId) return;
+		switch (event.kind) {
+			case 'subprocess_output':
+				subprocessLines = [...subprocessLines, event.data.text];
+				// Also accumulate into the durable, net-wide panel (not cleared
+				// per step). ts comes from the event so it matches file replay.
+				netLogLines = capTail([...netLogLines, formatNetLogEntry({ ts, text: event.data.text })], NET_LOG_CAP);
+				return;
+			case 'memory_stats':
+			case 'log':
+			case 'stream_gap':
+			case 'heartbeat':
+			case 'idle':
+			case 'load_progress':
+				return;
+		}
+
+		// Every protocol notification says whether the net is running.
+		if (typeof event.data?.running === 'boolean' && !isToggling) isRunning = event.data.running;
+
+		if (event.kind === 'execution_stopped') {
+			isRunning = false;
+			// Loud, legible stop: show error stops only. A normal end-of-run
+			// (nothing fireable) is not an error, so don't alarm on it.
+			const reason = event.data.reason;
+			if (reason && reason !== 'no_fireable_transitions') {
+				executionStoppedReason = event.data.error_type
+					? `${event.data.error_type}: ${event.data.message ?? ''}`.trim()
+					: event.data.message
+						? `${reason}: ${event.data.message}`
+						: String(reason);
+			}
+		}
+
+		if (!mirror) {
+			// Nothing to apply to: a read is under way or due.
+			if (event.kind === 'reloaded') refreshGraphState(netId);
+			return;
+		}
+		const applied = applyEvent(mirror, event);
+		switch (applied.outcome) {
+			case 'applied': {
+				mirror = applied.mirror;
+				play(applied.change);
+				const layoutShort = applied.short.some((name) => {
+					const place = applied.mirror.places[name];
+					return place.tokens.length < Math.min(place.count, TOKEN_DOT_MAX);
+				});
+				if (layoutShort) scheduleRefill();
+				landed(netId, applied.change);
+				break;
+			}
+			case 'gap':
+				console.info(`[nets page] marking version gap: held ${applied.expected - 1}, got ${applied.got}; refetching`);
+				refreshGraphState(netId);
+				break;
+			case 'refetch':
+				console.info(`[nets page] refetching the state: ${applied.reason}`);
+				refreshGraphState(netId);
+				break;
+			case 'stale':
+			case 'ignored':
+				break;
+		}
+	}
+
+	// The page's own bookkeeping once a change is in the mirror: a firing
+	// that landed ends a step still awaited and adds to the log.
+	function landed(netId: string, change: Change) {
+		if (change.kind === 'distributed' || change.kind === 'fired' || change.kind === 'failed') {
+			if (stepAwaitingStream && !anyInFlight(mirror)) {
+				stepAwaitingStream = false;
+				stepNotice = null;
+			}
+			refreshHistory(netId, false);
+		}
+		if (change.kind === 'distributed' || change.kind === 'fired') stepError = null;
+		if (change.kind === 'failed') stepError = `${change.transition} failed: ${change.error}`;
+	}
+
 	onDestroy(() => {
 		unsubscribeSSE();
 		unsubscribeMemory();
@@ -1292,6 +1396,11 @@
 			clearInterval(runningPollTimer);
 			runningPollTimer = null;
 		}
+		if (refillTimer) {
+			clearTimeout(refillTimer);
+			refillTimer = null;
+		}
+		clearPlayback();
 	});
 
 	onMount(() => {
@@ -1328,10 +1437,10 @@
 		document.addEventListener('visibilitychange', onVisible);
 
 		// Load workers first — selectNet() (called from fetchNets) needs workers
-		// to determine if a net has a ready worker and set graphState.
+		// to determine if a net has a ready worker and read its state.
 		(async () => {
 			await listWorkers().then(w => workers = w).catch(() => {});
-			// Now fetch nets (which may auto-select and load graphState)
+			// Now fetch nets (which may auto-select and read the net state)
 			await fetchNets();
 		})();
 
@@ -1340,165 +1449,8 @@
 
 			// Only net-scoped events drive this view. Filter to the selected net.
 			if (event.scope !== 'net' || event.net_id !== selectedNetId) return;
-
-			const { kind, data } = event;
-
-			if (kind === 'step_started') {
-				isStepping = true;
-				// Don't clear stepError here — keep the previous error visible
-				// until this step either succeeds or produces a new error.
-				subprocessLines = [];
-			}
-
-			if (kind === 'transition_fired') {
-				isStepping = false;
-				stepError = null;
-				logEntries = prependLogEntry(logEntries, data.log_entry, EXECUTION_LOG_CAP);
-
-				// Resolve auto-step promise: a transition fired
-				if (autoStepResolve) autoStepResolve(true);
-
-				if (!graphState) return;
-
-				// Counts must come off the event, not the capped position payload,
-				// or they freeze between full state refreshes while the log keeps
-				// streaming.
-				graphState = {
-					...graphState,
-					places: applyTokenCounts(graphState.places, data.token_counts),
-				};
-
-				const newTokens = calculateTokenPositions(data.new_token_positions, graphState);
-
-				const transition = graphState.transitions.find(t => t.name === data.transition_name);
-				if (!transition) {
-					tokens = newTokens;
-					return;
-				}
-
-				animationQueue.push({
-					transitionName: transition.name,
-					transitionPosition: { x: transition.x, y: transition.y },
-					newTokens
-				});
-
-				// If queue is getting too long, skip to catch up
-				if (animationQueue.length > 3) {
-					const lastAnimation = animationQueue[animationQueue.length - 1];
-					tokens = lastAnimation.newTokens;
-					animationQueue = [];
-					animationStage = 'idle';
-					consumingTokens = [];
-					producingTokens = [];
-					transitionPosition = null;
-					isAnimating = false;
-					animationTimeouts.forEach(t => clearTimeout(t));
-					animationTimeouts = [];
-					return;
-				}
-
-				if (!isAnimating) {
-					processAnimationQueue();
-				}
-			}
-
-			if (kind === 'step_completed') {
-				isStepping = false;
-				stepError = null;
-				if (autoStepResolve) autoStepResolve(false);
-			}
-
-			if (kind === 'step_error') {
-				isStepping = false;
-				stepError = data.error;
-				if (autoStepResolve) {
-					autoStepResolve(false);
-					autoStepResolve = null;
-				}
-			}
-
-			if (kind === 'subprocess_output') {
-				subprocessLines = [...subprocessLines, data.text];
-				// Also accumulate into the durable, net-wide panel (not cleared
-				// per step). ts comes from the event so it matches file replay.
-				netLogLines = capTail([...netLogLines, formatNetLogEntry({ ts: event.ts, text: data.text })], NET_LOG_CAP);
-			}
-
-			if (kind === 'execution_stopped') {
-				isRunning = false;
-				// Loud, legible stop: show error stops only. A normal end-of-run
-				// (no enabled transitions) is not an error, so don't alarm on it.
-				// Accept the legacy 'deadlock' sentinel too, so an old worker
-				// mid-deploy doesn't trip a spurious banner.
-				if (
-					data.reason &&
-					data.reason !== 'no_enabled_transitions' &&
-					data.reason !== 'deadlock'
-				) {
-					executionStoppedReason = data.error_type
-						? `${data.error_type}: ${data.message ?? ''}`.trim()
-						: String(data.reason);
-				}
-			}
-
-			if (kind === 'net_reset') {
-				// Worker reset the net — rebuild tokens and drop any stale log
-				// entries / in-flight animations. This handler runs in every
-				// tab/client subscribed to the worker, not just the one that
-				// clicked Reset.
-				animationTimeouts.forEach(t => clearTimeout(t));
-				animationTimeouts = [];
-				animationQueue = [];
-				animationStage = 'idle';
-				consumingTokens = [];
-				producingTokens = [];
-				transitionPosition = null;
-				firingTransitionId = null;
-				activeEdgeIds = new Set();
-				isAnimating = false;
-				isStepping = false;
-				stepError = null;
-				executionStoppedReason = null;
-				subprocessLines = [];
-				logEntries = [];
-
-				const state = laidOut(data as GraphState);
-				graphState = state;
-				const tokensData: TokenSummary[] = [];
-				for (const place of state.places ?? []) {
-					for (const token of place.tokens ?? []) {
-						tokensData.push({
-							id: token.id,
-							place_id: place.id,
-							color: token.color,
-							preview: token.preview,
-							type_name: token.type_name,
-						});
-					}
-				}
-				tokens = calculateTokenPositions(tokensData, state);
-			}
-
-			if (kind === 'graph_state') {
-				// A non-reset state refresh (e.g. a token was injected). Rebuild
-				// tokens in every subscribed tab without disturbing logs or any
-				// in-flight step animation.
-				const state = laidOut(data as GraphState);
-				graphState = state;
-				const tokensData: TokenSummary[] = [];
-				for (const place of state.places ?? []) {
-					for (const token of place.tokens ?? []) {
-						tokensData.push({
-							id: token.id,
-							place_id: place.id,
-							color: token.color,
-							preview: token.preview,
-							type_name: token.type_name,
-						});
-					}
-				}
-				tokens = calculateTokenPositions(tokensData, state);
-			}
+			if (event.kind === 'worker_unavailable') return;
+			handleNetEvent(event, event.ts);
 		});
 
 		return () => {
@@ -1521,12 +1473,16 @@
 <div class="flex flex-col h-screen bg-surface">
 	<AppNav title="Nets" {userEmail} onLogout={handleLogout} />
 
-	{#if graphState}
+	{#if mirror}
 		<!-- Secondary toolbar: net controls + execution buttons -->
 		<div class="flex items-center gap-6 px-6 py-3 bg-card border-b border-border flex-wrap">
 			<span class="px-3 py-1.5 rounded text-xs {connectionStatus === 'Connected' ? 'bg-status-success-bg text-status-success' : 'bg-status-warning-bg text-status-warning'}">
 				{connectionStatus}
 			</span>
+			{#if mirror.runtime}
+				<!-- Which runtime runs this net: the protocol is the same for both. -->
+				<span class="px-2 py-0.5 rounded-full text-xs font-mono bg-muted text-foreground-muted" data-runtime={mirror.runtime} title="The runtime this net runs on">{mirror.runtime}</span>
+			{/if}
 
 			{#if availableNets.length > 0}
 				<div class="flex items-center gap-2">
@@ -1588,8 +1544,8 @@
 					<!-- Armed / Paused on a cron net, Active / Idle on every other
 					     one. The two browser-driven states in between are the
 					     same either way. -->
-					<span class="px-4 py-2 rounded text-sm font-medium {isToggling ? 'bg-status-warning-bg text-status-warning' : executionOn ? 'bg-status-info-bg text-status-info' : isAutoStepping ? 'bg-status-warning-bg text-status-warning' : isStepping ? 'bg-status-warning-bg text-status-warning' : 'bg-muted text-foreground-muted'}">
-						{isToggling ? 'Working…' : executionOn ? verbs.onLabel : isAutoStepping ? 'Repeating' : isStepping ? 'Stepping...' : verbs.offLabel}
+					<span class="px-4 py-2 rounded text-sm font-medium {isToggling ? 'bg-status-warning-bg text-status-warning' : executionOn ? 'bg-status-info-bg text-status-info' : isAutoStepping ? 'bg-status-warning-bg text-status-warning' : stepBusy ? 'bg-status-warning-bg text-status-warning' : 'bg-muted text-foreground-muted'}">
+						{isToggling ? 'Working…' : executionOn ? verbs.onLabel : isAutoStepping ? 'Repeating' : stepBusy ? 'Stepping...' : verbs.offLabel}
 					</span>
 				</div>
 
@@ -1610,7 +1566,7 @@
 				{/if}
 
 				<div class="flex items-center gap-2">
-					<button class={btnDefault} onclick={handleStep} disabled={isRunning || isAutoStepping || isStepping || isResetting || isToggling || !selectedNetId} title="Fire a single transition manually.">Step</button>
+					<button class={btnDefault} onclick={handleStep} disabled={isRunning || isAutoStepping || stepBusy || isResetting || isToggling || !selectedNetId} title="Fire a single transition manually.">{#if stepBusy && !isAutoStepping}<span class="inline-flex items-center gap-2"><span class="inline-block w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" aria-hidden="true"></span>Stepping…</span>{:else}Step{/if}</button>
 					<button class={isAutoStepping ? btnDanger : btnDefault} onclick={handleAutoStep} disabled={isRunning || isResetting || isToggling || !selectedNetId}
 						title={isAutoStepping ? "Stop repeating steps." : `Repeatedly fires one transition at a time (with animation), like clicking Step over and over. Driven by this browser tab — closing or disconnecting it stops the run. To run the net independently of the browser, use ${verbs.activate}.`}
 					>{isAutoStepping ? 'Stop' : 'Repeat Step'}</button>
@@ -1744,8 +1700,9 @@
 					<select bind:value={injectPlaceName}
 						class="px-3 py-1.5 border border-border rounded bg-background text-foreground text-sm min-w-[180px]">
 						<option value="" disabled>Select a place…</option>
-						{#each graphState?.places ?? [] as place (place.id)}
-							<option value={place.name}>{place.name} · {place.type_name}</option>
+						<!-- Only places whose tokens have a JSON form can take one. -->
+						{#each injectablePlaces as place (place.name)}
+							<option value={place.name}>{place.name}{place.type_name ? ` · ${place.type_name}` : ''}</option>
 						{/each}
 					</select>
 				</label>
@@ -1759,7 +1716,9 @@
 					disabled={isInjecting || !injectPlaceName || !selectedNetId}>{isInjecting ? 'Injecting…' : 'Inject'}</button>
 			</div>
 			<p class="text-xs text-foreground-faint">
-				The worker validates the token against the place's declared type. For the
+				The net decodes the token into the place's type, strictly: a number
+				spelt as a string is refused. Only places whose tokens have a JSON form
+				are offered. For the
 				anomaly monitor, inject <span class="font-mono">{'{"deviation": 1.2}'}</span>
 				into <span class="font-mono">SyntheticRequests</span>, then Activate to run the
 				chain through to the alert.
@@ -1786,7 +1745,7 @@
 		</div>
 	{/if}
 
-	{#if graphState}
+	{#if mirror}
 		<main class="flex flex-1 overflow-hidden {isDraggingSidebar || isDraggingRightSidebar || isDraggingPanelDivider ? 'cursor-col-resize select-none' : ''}">
 			<!-- Left sidebar -->
 			{#if !sidebarCollapsed}
@@ -1809,7 +1768,7 @@
 							{#if !execLogCollapsed}
 								<div class="flex-1 overflow-hidden flex flex-col">
 									<svelte:boundary onerror={(error) => panelFailed('execution log', error)}>
-										<ExecutionLog entries={logEntries} {isStepping} {stepError} {subprocessLines} />
+										<ExecutionLog entries={logEntries} isStepping={stepBusy} {stepNotice} {stepError} {subprocessLines} />
 										{#snippet failed(error, reset)}
 											<PanelFailed name="execution log" {error} onReset={reset} />
 										{/snippet}
@@ -1847,8 +1806,8 @@
 								<div class="flex-1 overflow-hidden flex flex-col">
 									<TokenInspector
 										netId={selectedNetId}
-										tokens={inspectorTokens}
-										places={graphState.places}
+										generation={mirror.generation}
+										places={mirrorPlaces}
 										selectedTokenId={$selectedTokenId}
 										onTokenSelect={handleTokenSelect}
 									/>
@@ -1898,15 +1857,14 @@
 			<div class="flex-1 p-4 overflow-hidden flex">
 				<svelte:boundary onerror={(error) => panelFailed('graph', error)}>
 					<GraphPanel
-						{graphState}
+						graph={drawnNet}
 						layout={netLayout?.layout ?? null}
-						{tokens}
-						{animationStage}
-						{consumingTokens}
-						{producingTokens}
-						{transitionPosition}
-						{firingTransitionId}
-						{activeEdgeIds}
+						tokens={drawnTokens}
+						hiddenTokenIds={hiddenIds}
+						travelling={travellingCues}
+						activeEdges={activeEdgeEnds}
+						{firingTransitions}
+						{failingTransitions}
 						selectedTokenId={$selectedTokenId}
 						onTokenSelect={handleTokenSelect}
 						{selectedTransitionId}
@@ -1936,7 +1894,15 @@
 							<span class="flex-1">Transition</span>
 						</button>
 						<div class="flex-1 overflow-hidden flex flex-col">
-							<TransitionInspector transition={selectedTransition} />
+							<TransitionInspector
+								transition={selectedTransition}
+								state={selectedTransitionState}
+								topology={mirror.topology}
+								onEnable={(name) => handleToggleTransition(name, true)}
+								onDisable={(name) => handleToggleTransition(name, false)}
+								toggling={togglingTransition}
+								{toggleError}
+							/>
 						</div>
 					</div>
 				</aside>

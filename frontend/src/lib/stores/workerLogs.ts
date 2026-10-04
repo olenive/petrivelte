@@ -241,8 +241,8 @@ function formatRuntimeLine(evt: Record<string, any>): string | null {
 			if (!text.trim()) return null;
 			return `${ts}${label}${text}`;
 		}
-		if (evt.kind === 'step_error') {
-			return `${ts}${label}step error: ${data.error ?? ''}`;
+		if (evt.kind === 'failed') {
+			return `${ts}${label}${data.transition ?? 'transition'} failed: ${data.error ?? ''}`;
 		}
 		if (evt.kind === 'execution_stopped') {
 			return `${ts}${label}execution stopped: ${data.reason ?? ''}`;

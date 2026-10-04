@@ -74,7 +74,7 @@ export function runStateColour(state: string | null | undefined): string {
 
 const REASON_LABELS: Record<string, string> = {
 	// succeeded
-	no_enabled_transitions: 'no enabled transitions',
+	no_fireable_transitions: 'no fireable transitions',
 	// stopped
 	user_stop: 'stopped by user',
 	unloaded: 'net unloaded',

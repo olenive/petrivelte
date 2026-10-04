@@ -8,14 +8,13 @@ that seeds the page's cursor. A reconnect the page's store makes itself asks
 from that cursor, so a short outage is filled by replay.
 """
 
-import time
 from collections.abc import Iterator
 
 import pytest
 from playwright.sync_api import ConsoleMessage, Page
 
 import fake_cp
-from test_graph_pan import NET_ID, TRANSITIONS, _firing, _open, _seed
+from test_graph_pan import NET_ID, _entry, _open, _seed
 
 SKIP_REPLAY_AFTER = 10**12
 
@@ -68,29 +67,29 @@ def _worker_stream_urls(cp: fake_cp.FakeControlPlane) -> list[str]:
 
 
 def _state_fetches(cp: fake_cp.FakeControlPlane) -> int:
-    return sum(1 for line in cp.requests if line == f"GET /api/nets/{NET_ID}/execution/state")
+    return sum(1 for line in cp.requests
+               if line.startswith(f"GET /api/nets/{NET_ID}/execution/state?token_limit="))
 
 
-def _stamped(index: int, timestamp: float) -> dict:
-    firing = _firing(index % len(TRANSITIONS), index)
-    firing["log_entry"]["timestamp"] = timestamp
-    return firing
+def _history_reads(cp: fake_cp.FakeControlPlane) -> list[str]:
+    return [line for line in cp.requests if line.startswith(f"GET /api/nets/{NET_ID}/execution/history")]
 
 
 def test_first_open_skips_the_replay(page: Page, frontend_url: str, recorded: list[str],
                                      fresh_control_plane: fake_cp.FakeControlPlane) -> None:
     cp = fresh_control_plane
-    _seed(cp, running=True, tokens_at="Requests")
-    history = [_stamped(index, 1_790_000_000.0 + index)["log_entry"] for index in range(20)]
-    cp.execution_history = {NET_ID: history}
-    # A buffer of firings the history does not list: any of them on the page
-    # would be a replayed firing applied.
+    _seed(cp, running=True, tokens_at="Requests", marking_version=100,
+          history=[_entry(seq) for seq in range(1, 21)])
+    # A buffer of notifications that follow the state the page reads: any of
+    # them on the page would be a replayed notification applied, a token
+    # added to the drawing and the log read again.
     with cp.lock:
         first = cp.worker_seq + 1
         cp.worker_buffer = [
-            {"seq": seq, "scope": "net", "net_id": NET_ID, "kind": "transition_fired",
-             "ts": fake_cp.STAMP, "data": _stamped(seq, 1_791_000_000.0 + seq)}
-            for seq in range(first, first + 50)
+            {"seq": seq, "scope": "net", "net_id": NET_ID, "kind": "added", "ts": fake_cp.STAMP,
+             "data": {"place": "Window", "id": str(5000 + index), "label": "replayed",
+                      "marking_version": 101 + index, "running": True}}
+            for index, seq in enumerate(range(first, first + 50))
         ]
         cp.worker_seq = cp.worker_buffer[-1]["seq"]
     current_seq = cp.worker_seq
@@ -109,8 +108,10 @@ def test_first_open_skips_the_replay(page: Page, frontend_url: str, recorded: li
     assert marker["kind"] == "stream_gap"
     assert marker["data"] == {"reason": "restarted", "after": SKIP_REPLAY_AFTER,
                               "current_seq": current_seq}
-    assert page.locator(".log-entry").count() == len(history)
+    assert page.locator(".log-entry").count() == 20
+    assert page.locator('[data-token-id^="50"]').count() == 0
     assert _state_fetches(cp) == 1
+    assert len(_history_reads(cp)) == 1
     assert recorded == [], f"a first open triggered a resync: {recorded}"
 
 
@@ -122,19 +123,18 @@ def test_store_reconnect_resumes_from_the_last_live_event(
     _open(page, frontend_url)
     page.wait_for_function("() => window.__workerEvents.length > 0")
 
-    for index in range(3):
-        fake_cp.publish_worker(cp, kind="transition_fired",
-                               data=_stamped(index, time.time()), net_id=NET_ID)
+    first_live_seq = cp.worker_seq + 1
+    for _ in range(2):
+        assert fake_cp.fire(cp, NET_ID) is not None
     last_live_seq = cp.worker_seq
-    _wait_for_seqs(page, list(range(last_live_seq - 2, last_live_seq + 1)))
+    _wait_for_seqs(page, list(range(first_live_seq, last_live_seq + 1)))
 
     # The stream closes, and the browser's own retry is refused, so the
     # EventSource gives up and the page's store reconnects on its own.
     cp.refuse_worker_streams = 1
     fake_cp.drop_worker_streams(cp)
-    for index in range(3, 6):
-        fake_cp.publish_worker(cp, kind="transition_fired",
-                               data=_stamped(index, time.time()), net_id=NET_ID)
+    for _ in range(2):
+        assert fake_cp.fire(cp, NET_ID) is not None
     missed = list(range(last_live_seq + 1, cp.worker_seq + 1))
     _wait_for_seqs(page, missed)
 
@@ -148,5 +148,11 @@ def test_store_reconnect_resumes_from_the_last_live_event(
     assert [answer["answer"] for answer in cp.worker_stream_answers] == [
         "restarted", "refused", "replay"]
     assert cp.worker_stream_answers[-1]["seqs"] == missed
-    # Each missed event arrived once, after the three live ones.
-    assert _received_seqs(page)[1:] == list(range(last_live_seq - 2, cp.worker_seq + 1))
+    # Each missed event arrived once, after the live ones.
+    assert _received_seqs(page)[1:] == list(range(first_live_seq, cp.worker_seq + 1))
+    # The marking caught up with all four firings: three from Requests
+    # into Window, then one on into Scores.
+    page.wait_for_function(
+        "['Requests', 'Window', 'Scores'].map((name) => document.querySelector("
+        "`.place-text[data-place-id='${name}']`)?.dataset.count).join() === '0,2,1'",
+        timeout=10_000)

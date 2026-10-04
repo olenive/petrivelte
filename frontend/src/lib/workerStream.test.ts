@@ -7,7 +7,8 @@ import {
 	capTail,
 	liveAction,
 	openCursor,
-	prependLogEntry,
+	lastLogSeq,
+	mergeLogEntries,
 	statusLabel,
 	initialStreamStatus,
 } from './workerStream';
@@ -15,7 +16,7 @@ import type { ServerEvent } from './stores/serverEvents';
 
 describe('advanceCursor', () => {
 	it('moves forward on the ordinary path and reports no gap', () => {
-		expect(advanceCursor(10, { seq: 11, kind: 'transition_fired' }, false)).toEqual({ lastSeq: 11, gap: null });
+		expect(advanceCursor(10, { seq: 11, kind: 'distributed' }, false)).toEqual({ lastSeq: 11, gap: null });
 	});
 
 	it('treats a sequence that started over as a worker restart', () => {
@@ -60,7 +61,7 @@ describe('advanceCursor', () => {
 	});
 
 	it('treats live events on a skip connection like any other', () => {
-		expect(advanceCursor(2500, { seq: 2501, kind: 'transition_fired' }, true)).toEqual({ lastSeq: 2501, gap: null });
+		expect(advanceCursor(2500, { seq: 2501, kind: 'distributed' }, true)).toEqual({ lastSeq: 2501, gap: null });
 		expect(advanceCursor(2500, { seq: 4, kind: 'memory_stats' }, true)).toEqual({ lastSeq: 4, gap: 'restarted' });
 	});
 });
@@ -102,30 +103,43 @@ describe('caps', () => {
 	});
 });
 
-describe('prependLogEntry', () => {
-	const entry = (timestamp: number) => ({
-		timestamp,
+describe('mergeLogEntries', () => {
+	const entry = (seq: number) => ({
+		seq,
 		transition: 'score',
+		started_at: '2026-10-04T10:00:00Z',
 		duration_ms: 3,
-		inputs: {},
-		outputs: [],
+		outcome: 'fired' as const,
+		consumed: [['Window', String(seq)]] as [string, string][],
+		produced: [['Scores', String(seq + 100)]] as [string, string][],
 	});
 
-	it('puts a new firing at the head and keeps to the cap', () => {
-		expect(prependLogEntry([entry(2), entry(1)], entry(3), 2)).toEqual([entry(3), entry(2)]);
+	it('puts newer entries at the head, newest first, and keeps to the cap', () => {
+		expect(mergeLogEntries([entry(2), entry(1)], [entry(3), entry(4)], 3)).toEqual([
+			entry(4),
+			entry(3),
+			entry(2),
+		]);
 	});
 
-	it('leaves the log alone for a firing it already lists', () => {
-		// The history fetched on a resync already holds it, and the stream
-		// delivers it again afterwards.
+	it('leaves the log alone for entries it already lists', () => {
+		// A resync's whole read and an incremental read can both answer them.
 		const log = [entry(3), entry(2), entry(1)];
-		expect(prependLogEntry(log, entry(2), 500)).toBe(log);
+		expect(mergeLogEntries(log, [entry(2), entry(3)], 500)).toBe(log);
 	});
 
-	it('leaves the log alone for an entry without a timestamp', () => {
+	it('adds a repeated seq once', () => {
+		expect(mergeLogEntries([], [entry(1), entry(1)], 500)).toEqual([entry(1)]);
+	});
+
+	it('leaves the log alone for entries without a seq', () => {
 		const log = [entry(1)];
-		expect(prependLogEntry(log, {}, 500)).toBe(log);
-		expect(prependLogEntry(log, undefined, 500)).toBe(log);
+		expect(mergeLogEntries(log, [{}, undefined, null], 500)).toBe(log);
+	});
+
+	it('reads the cursor of the next incremental read', () => {
+		expect(lastLogSeq([])).toBe(0);
+		expect(lastLogSeq([entry(7), entry(5)])).toBe(7);
 	});
 });
 

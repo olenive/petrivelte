@@ -1,69 +1,61 @@
 <script lang="ts">
 	import { tick } from 'svelte';
-	import type { Token, Place } from '$lib/types';
-	import { getToken, type TokenView } from '$lib/api';
-	import { placeTokenCount } from '$lib/netHelpers';
+	import type { MarkingToken, TokenValue } from '$lib/types';
+	import type { MirrorPlace } from '$lib/netMirror';
+	import { getToken } from '$lib/api';
 
 	export let netId: string | null = null;
-	export let tokens: Token[] = [];
-	export let places: Place[] = [];
+	/** The net's generation: token ids are unique within one, so the cache
+	 *  of full views is keyed by it and the id together. */
+	export let generation: number = 0;
+	/** Every place, in topology order, with its true count and capped list. */
+	export let places: MirrorPlace[] = [];
 	export let selectedTokenId: string | null = null;
 	export let onTokenSelect: ((tokenId: string | null) => void) | null = null;
 
 	// Tab index: 0 = "All Tokens", 1+ = individual places
 	let selectedTabIndex = 0;
 
-	// Full-view cache: only fetched on selection. Keyed by token id.
-	// Cleared whenever the token set changes so we don't show stale data
-	// for an id whose underlying token was consumed and replaced.
-	let fullView: TokenView | null = null;
+	// Full views, fetched on selection, keyed by (generation, id). An id is
+	// never reused within a generation, so a cached view stays right for as
+	// long as the token lives; a new generation starts the cache over.
+	let fullViews = new Map<string, TokenValue>();
+	let cachedGeneration = generation;
 	let fullViewError: string | null = null;
 	let fullViewLoading = false;
-	let fullViewTokenId: string | null = null;
+	let fullViewKey: string | null = null;
 
-	interface PlaceWithTokens {
-		place: Place;
-		tokens: Token[];
-	}
+	const keyOf = (id: string) => `${generation}:${id}`;
 
-	$: tokensByPlace = places.map((place) => ({
-		place,
-		tokens: tokens.filter((t) => t.place_id === place.id)
-	})) as PlaceWithTokens[];
-
-	// `tokens` is the worker's capped per-place sample, so its length is not
-	// the marking size. Label counts from `token_count` and say plainly when
-	// there is more than we're showing — a silent truncation would hide
-	// exactly the runaway place you'd want to notice.
-	$: totalCount = places.reduce((sum, place) => sum + placeTokenCount(place), 0);
-
-	function hiddenCount(place: Place, shown: number): number {
-		return Math.max(0, placeTokenCount(place) - shown);
-	}
-
-	function placeTabLabel(place: Place, shown: number): string {
-		const total = placeTokenCount(place);
-		return total > shown ? `${shown} of ${total}` : `${total}`;
-	}
-
-	// Live token id set — invalidate full-view cache when the selected
-	// token disappears (consumed/produced) so we don't render stale JSON.
-	$: liveIds = new Set(tokens.map((t) => t.id));
-	$: if (fullViewTokenId && !liveIds.has(fullViewTokenId)) {
-		fullView = null;
+	$: if (generation !== cachedGeneration) {
+		cachedGeneration = generation;
+		fullViews = new Map();
+		fullViewKey = null;
 		fullViewError = null;
-		fullViewTokenId = null;
+		fullViewLoading = false;
+	}
+
+	$: totalCount = places.reduce((sum, place) => sum + place.count, 0);
+	$: listedCount = places.reduce((sum, place) => sum + place.tokens.length, 0);
+
+	function hiddenCount(place: MirrorPlace): number {
+		return Math.max(0, place.count - place.tokens.length);
+	}
+
+	function placeTabLabel(place: MirrorPlace): string {
+		return place.count > place.tokens.length ? `${place.tokens.length} of ${place.count}` : `${place.count}`;
+	}
+
+	function typeOf(token: MarkingToken, place: MirrorPlace): string {
+		return token.type_name ?? place.type_name ?? '';
 	}
 
 	// When selectedTokenId changes externally, find the containing place and switch tab
 	$: if (selectedTokenId) {
-		const token = tokens.find((t) => t.id === selectedTokenId);
-		if (token) {
-			const placeIndex = tokensByPlace.findIndex((p) => p.place.id === token.place_id);
-			if (placeIndex !== -1) {
-				// Switch to the place tab (index + 1 because 0 is "All Tokens")
-				selectedTabIndex = placeIndex + 1;
-			}
+		const placeIndex = places.findIndex((p) => p.tokens.some((t) => t.id === selectedTokenId));
+		if (placeIndex !== -1) {
+			// Switch to the place tab (index + 1 because 0 is "All Tokens")
+			selectedTabIndex = placeIndex + 1;
 			// Scroll to the token card after DOM updates
 			tick().then(() => {
 				const card = document.querySelector(`[data-token-card-id="${selectedTokenId}"]`);
@@ -74,30 +66,27 @@
 		}
 		void loadFullView(selectedTokenId);
 	} else {
-		fullView = null;
+		fullViewKey = null;
 		fullViewError = null;
-		fullViewTokenId = null;
 	}
 
 	async function loadFullView(tokenId: string) {
 		if (!netId) return;
-		if (fullViewTokenId === tokenId && (fullView || fullViewLoading)) return;
-		fullViewTokenId = tokenId;
-		fullView = null;
+		const key = keyOf(tokenId);
+		if (fullViewKey === key && (fullViews.has(key) || fullViewLoading)) return;
+		fullViewKey = key;
 		fullViewError = null;
+		if (fullViews.has(key)) return;
 		fullViewLoading = true;
 		try {
 			const view = await getToken(netId, tokenId);
-			// Skip stale responses if the user moved on
-			if (fullViewTokenId === tokenId) {
-				fullView = view;
-			}
+			fullViews = new Map(fullViews).set(key, view);
 		} catch (err) {
-			if (fullViewTokenId === tokenId) {
+			if (fullViewKey === key) {
 				fullViewError = err instanceof Error ? err.message : String(err);
 			}
 		} finally {
-			if (fullViewTokenId === tokenId) {
+			if (fullViewKey === key) {
 				fullViewLoading = false;
 			}
 		}
@@ -109,13 +98,43 @@
 		}
 	}
 
-	function formatFullView(view: TokenView): string {
+	function formatFullView(view: TokenValue): string {
 		if (view.kind === 'json') {
 			return JSON.stringify(view.value, null, 2);
 		}
 		return view.text;
 	}
+
+	$: shownView = fullViewKey ? fullViews.get(fullViewKey) ?? null : null;
 </script>
+
+{#snippet card(token: MarkingToken, place: MirrorPlace)}
+	<button
+		class="token-card"
+		class:selected={token.id === selectedTokenId}
+		data-token-card-id={token.id}
+		on:click={() => handleTokenCardClick(token.id)}
+	>
+		<div class="token-header">
+			<span class="token-id">#{token.id}</span>
+			<span class="token-type">{typeOf(token, place)}</span>
+		</div>
+		{#if token.id === selectedTokenId}
+			{#if fullViewLoading && !shownView}
+				<div class="muted">Loading…</div>
+			{:else if fullViewError}
+				<pre class="error">Failed to load full view: {fullViewError}</pre>
+				<pre>{token.label}</pre>
+			{:else if shownView && shownView.id === token.id}
+				<pre data-token-view={shownView.kind}>{formatFullView(shownView)}</pre>
+			{:else}
+				<pre>{token.label}</pre>
+			{/if}
+		{:else}
+			<pre>{token.label}</pre>
+		{/if}
+	</button>
+{/snippet}
 
 <div class="token-inspector">
 	<!-- Tab buttons -->
@@ -129,13 +148,13 @@
 			All ({totalCount})
 		</button>
 		<!-- Individual place tabs -->
-		{#each tokensByPlace as { place, tokens: placeTokens }, i}
+		{#each places as place, i (place.name)}
 			<button
 				class="tab"
 				class:active={selectedTabIndex === i + 1}
 				on:click={() => (selectedTabIndex = i + 1)}
 			>
-				{place.name} ({placeTabLabel(place, placeTokens.length)})
+				{place.name} ({placeTabLabel(place)})
 			</button>
 		{/each}
 	</div>
@@ -144,91 +163,45 @@
 	<div class="tab-content">
 		{#if selectedTabIndex === 0}
 			<!-- All Tokens tab content -->
-			{#if tokens.length > 0}
-				{#each tokensByPlace as { place, tokens: placeTokens }}
-					{#if placeTokens.length > 0}
+			{#if listedCount > 0}
+				{#each places as place (place.name)}
+					{#if place.tokens.length > 0}
 						<div class="place-section">
 							<div class="place-info">
 								<strong>{place.name}</strong>
-								<span class="type">{place.type_name}</span>
+								<span class="type">{place.type_name ?? ''}</span>
 							</div>
-							{#each placeTokens as token (token.id)}
-								<button
-									class="token-card"
-									class:selected={token.id === selectedTokenId}
-									data-token-card-id={token.id}
-									on:click={() => handleTokenCardClick(token.id)}
-								>
-									<div class="token-header">
-										<span class="token-id">{token.id}</span>
-										<span class="token-type">{token.type_name}</span>
-									</div>
-									{#if token.id === selectedTokenId}
-										{#if fullViewLoading}
-											<div class="muted">Loading…</div>
-										{:else if fullViewError}
-											<pre class="error">Failed to load full view: {fullViewError}</pre>
-											<pre>{token.preview}</pre>
-										{:else if fullView && fullView.id === token.id}
-											<pre>{formatFullView(fullView)}</pre>
-										{:else}
-											<pre>{token.preview}</pre>
-										{/if}
-									{:else}
-										<pre>{token.preview}</pre>
-									{/if}
-								</button>
+							{#each place.tokens as token (token.id)}
+								{@render card(token, place)}
 							{/each}
-							{#if hiddenCount(place, placeTokens.length) > 0}
+							{#if hiddenCount(place) > 0}
 								<div class="truncated">
-									{hiddenCount(place, placeTokens.length)} more not shown
+									{hiddenCount(place)} more not shown
 								</div>
 							{/if}
 						</div>
 					{/if}
 				{/each}
+			{:else if totalCount > 0}
+				<div class="empty">{totalCount} tokens, none listed</div>
 			{:else}
 				<div class="empty">No tokens in the graph</div>
 			{/if}
-		{:else if tokensByPlace[selectedTabIndex - 1]}
+		{:else if places[selectedTabIndex - 1]}
 			<!-- Individual place tab content -->
-			{@const { place, tokens: placeTokens } = tokensByPlace[selectedTabIndex - 1]}
+			{@const place = places[selectedTabIndex - 1]}
 			<div class="place-info">
 				<strong>{place.name}</strong>
-				<span class="type">{place.type_name}</span>
+				<span class="type">{place.type_name ?? ''}</span>
 			</div>
 
-			{#if placeTokens.length > 0}
-				{#each placeTokens as token (token.id)}
-					<button
-						class="token-card"
-						class:selected={token.id === selectedTokenId}
-						data-token-card-id={token.id}
-						on:click={() => handleTokenCardClick(token.id)}
-					>
-						<div class="token-header">
-							<span class="token-id">{token.id}</span>
-							<span class="token-type">{token.type_name}</span>
-						</div>
-						{#if token.id === selectedTokenId}
-							{#if fullViewLoading}
-								<div class="muted">Loading…</div>
-							{:else if fullViewError}
-								<pre class="error">Failed to load full view: {fullViewError}</pre>
-								<pre>{token.preview}</pre>
-							{:else if fullView && fullView.id === token.id}
-								<pre>{formatFullView(fullView)}</pre>
-							{:else}
-								<pre>{token.preview}</pre>
-							{/if}
-						{:else}
-							<pre>{token.preview}</pre>
-						{/if}
-					</button>
+			{#if place.tokens.length > 0}
+				{#each place.tokens as token (token.id)}
+					{@render card(token, place)}
 				{/each}
-				{#if hiddenCount(place, placeTokens.length) > 0}
+				{#if hiddenCount(place) > 0}
 					<div class="truncated">
-						{hiddenCount(place, placeTokens.length)} more not shown
+						{hiddenCount(place)} more not shown
 					</div>
 				{/if}
 			{:else}
@@ -376,8 +349,8 @@
 		color: var(--text-tertiary);
 	}
 
-	/* The worker sends a capped sample per place; say so rather than letting
-	   the list just stop. */
+	/* A state read lists each place's oldest tokens up to a cap; say so rather
+	   than letting the list just stop. */
 	.truncated {
 		padding: 0.5rem;
 		text-align: center;

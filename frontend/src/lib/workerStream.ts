@@ -59,7 +59,7 @@ export function statusLabel(status: StreamStatus): string {
 interface StreamEventLike {
 	seq: number;
 	kind: string;
-	data?: Record<string, unknown> | null;
+	data?: object | null;
 }
 
 /**
@@ -116,8 +116,9 @@ export function advanceCursor(
 	skippedReplay: boolean,
 ): { lastSeq: number; gap: string | null } {
 	if (event.kind === 'stream_gap') {
-		const reason = typeof event.data?.reason === 'string' ? event.data.reason : 'unknown';
-		const current = event.data?.current_seq;
+		const data = (event.data ?? {}) as Record<string, unknown>;
+		const reason = typeof data.reason === 'string' ? data.reason : 'unknown';
+		const current = data.current_seq;
 		const seeded = typeof current === 'number' ? current : null;
 		if (skippedReplay) return { lastSeq: seeded ?? lastSeq, gap: null };
 		return { lastSeq: seeded ?? (reason === 'restarted' ? 0 : lastSeq), gap: reason };
@@ -145,26 +146,36 @@ export function capTail<T>(list: T[], max: number): T[] {
 }
 
 /**
- * The newest-first execution log with one more firing at its head.
+ * The newest-first execution log with `newer` entries (oldest first, as the
+ * protocol's log answers, §8) added at its head.
  *
- * The same firing can reach the page twice: once in the history fetched on a
- * resync, and again as a ``transition_fired`` event that arrives after that
- * fetch answered. A reconnect does this routinely: the stream replays the
- * firings since its cursor while the resync the reconnect triggered fetches
- * a history that already lists them. The log keys its rows by timestamp, and a
- * repeated key stops Svelte updating the page at all, pan and zoom on the
- * graph included. So a firing already in the log is not added again, and nor
- * is an entry without a timestamp, which the worker sends as ``{}`` when it
- * has no entry for a firing.
+ * The same firing can reach the page twice: a resync fetches the whole log
+ * while an incremental read after the last known `seq` is still in flight.
+ * The log keys its rows by `seq`, and a repeated key stops Svelte updating
+ * the page at all, pan and zoom on the graph included. So an entry whose
+ * `seq` the log already lists is not added again, nor is one without a
+ * numeric `seq`.
  */
-export function prependLogEntry(
+export function mergeLogEntries(
 	entries: LogEntry[],
-	entry: Partial<LogEntry> | null | undefined,
+	newer: ReadonlyArray<Partial<LogEntry> | null | undefined>,
 	max: number,
 ): LogEntry[] {
-	if (typeof entry?.timestamp !== 'number') return entries;
-	if (entries.some((known) => known.timestamp === entry.timestamp)) return entries;
-	return capHead([entry as LogEntry, ...entries], max);
+	const known = new Set(entries.map((entry) => entry.seq));
+	const fresh: LogEntry[] = [];
+	for (const entry of newer) {
+		if (typeof entry?.seq !== 'number' || known.has(entry.seq)) continue;
+		known.add(entry.seq);
+		fresh.push(entry as LogEntry);
+	}
+	if (fresh.length === 0) return entries;
+	const merged = [...fresh.reverse(), ...entries].sort((a, b) => b.seq - a.seq);
+	return capHead(merged, max);
+}
+
+/** The highest `seq` in a log, or 0 for an empty one: the `after` of the next read. */
+export function lastLogSeq(entries: readonly LogEntry[]): number {
+	return entries.reduce((max, entry) => Math.max(max, entry.seq), 0);
 }
 
 export type LiveAction = 'reconnect' | 'resync' | 'clear' | 'running';

@@ -108,7 +108,7 @@ const _run_shape: RunRecord = {
 	trigger: 'schedule',
 	scheduled_for: '2026-09-05T02:00:00Z',
 	state: 'succeeded',
-	reason: 'no_enabled_transitions',
+	reason: 'no_fireable_transitions',
 	error: null,
 	step_count: 41,
 	created_at: '2026-09-05T02:00:01Z',

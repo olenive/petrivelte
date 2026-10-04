@@ -18,7 +18,7 @@
  * reopen itself triggers a resync.
  *
  * Each event has shape:
- *   { seq, scope: 'worker' | 'net', net_id, kind, ts, data }
+ *   { seq, scope: 'worker' | 'net', net_id, kind, ts, data, marking_version, running }
  *
  * Consumers subscribe and filter by kind (and net_id when relevant).
  *
@@ -33,6 +33,7 @@
 
 import { writable } from 'svelte/store';
 import { API_URL } from '$lib/api';
+import type { NetEvent } from '$lib/types';
 import { setWorkerMemory, type WorkerMemorySnapshot } from '$lib/stores/workerMemory';
 import {
 	advanceCursor,
@@ -42,14 +43,21 @@ import {
 	type StreamStatus,
 } from '$lib/workerStream';
 
-export interface WorkerEvent {
+/** The worker's envelope around each event. For a net's events, ``kind``
+ *  and ``data`` are a protocol notification's method and params, or one of
+ *  the host's own kinds (``NetEvent`` in ``$lib/types``). The envelope's
+ *  ``marking_version`` is the worker's latest on every net event, a log line
+ *  included; the version rule reads the one in ``data``, which a state
+ *  notification is stamped with. A kind this page does not know is passed
+ *  on and skipped by the consumers' switches. */
+export type WorkerEvent = {
 	seq: number;
 	scope: 'worker' | 'net';
 	net_id: string | null;
-	kind: string;
 	ts: string;
-	data: Record<string, any>;
-}
+	marking_version?: number | null;
+	running?: boolean | null;
+} & (NetEvent | { kind: 'worker_unavailable'; data: { reason: string } });
 
 const { subscribe, set } = writable<WorkerEvent | null>(null);
 
@@ -129,7 +137,7 @@ function connectSSE() {
 			// Memory snapshots feed a dedicated store; downstream consumers
 			// don't need to filter for kind=memory_stats themselves.
 			if (parsed.scope === 'worker' && parsed.kind === 'memory_stats' && workerId) {
-				setWorkerMemory(workerId, parsed.data as WorkerMemorySnapshot);
+				setWorkerMemory(workerId, parsed.data as unknown as WorkerMemorySnapshot);
 			}
 			set(parsed);
 		} catch {

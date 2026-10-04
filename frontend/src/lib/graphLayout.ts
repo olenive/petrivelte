@@ -1,19 +1,23 @@
 /**
- * The bridge between the page's graph state and `layout.ts`: the version 0
- * wire shape goes in, the server's `x` and `y` are ignored, and the places
- * and transitions come out at the positions the layout computes. Slice 3
- * replaces the wire shape; `layout.ts` stays as it is.
+ * The bridge between the protocol's topology (§5.1) and `layout.ts`: places,
+ * transitions and directed edges go in, with the position hints as pins when
+ * the topology has them, and the layout's placements come out. Read edges
+ * (`snapshot`, `mutate`) take part like any other: they are part of the net.
  */
-import type { GraphState } from '$lib/types';
+import type { Topology } from '$lib/types';
 import { computeLayout, topologyKey, type LayoutInput, type NetLayout } from '$lib/layout';
 
-/** The layout's neutral input, read off a graph state. Nodes are keyed by
- *  id, which is what the edges name. */
-export function layoutInputOf(state: GraphState): LayoutInput {
+/** The layout's neutral input, read off a topology. An `in` edge runs from
+ *  its place to its transition, an `out` edge the other way. */
+export function layoutInputOf(topology: Topology): LayoutInput {
+	const pinned = topology.hints?.positions;
 	return {
-		places: (state.places ?? []).map((p) => p.id),
-		transitions: (state.transitions ?? []).map((t) => t.id),
-		edges: (state.edges ?? []).map((e) => ({ from: e.source, to: e.target })),
+		places: (topology.places ?? []).map((p) => p.name),
+		transitions: (topology.transitions ?? []).map((t) => t.name),
+		edges: (topology.edges ?? []).map((e) =>
+			e.direction === 'out' ? { from: e.transition, to: e.place } : { from: e.place, to: e.transition },
+		),
+		...(pinned && Object.keys(pinned).length > 0 ? { pinned } : {}),
 	};
 }
 
@@ -24,24 +28,11 @@ export interface KeyedLayout {
 }
 
 /**
- * The layout for `state`: `previous` again if the topology is unchanged (a
- * marking update), a fresh one otherwise.
+ * The layout for `topology`: `previous` again if the topology is unchanged
+ * (a refetch of the same generation), a fresh one otherwise.
  */
-export function layoutFor(state: GraphState, previous: KeyedLayout | null): KeyedLayout {
-	const input = layoutInputOf(state);
+export function layoutFor(topology: Topology, previous: KeyedLayout | null): KeyedLayout {
+	const input = layoutInputOf(topology);
 	const key = topologyKey(input);
 	return previous && previous.key === key ? previous : { key, layout: computeLayout(input) };
-}
-
-/** `state` with every place and transition moved to where `layout` put it. */
-export function placeGraphState(state: GraphState, layout: NetLayout): GraphState {
-	const move = <N extends { id: string; x: number; y: number }>(node: N): N => {
-		const at = layout.placements.get(node.id);
-		return at ? { ...node, x: at.x, y: at.y } : node;
-	};
-	return {
-		...state,
-		places: (state.places ?? []).map(move),
-		transitions: (state.transitions ?? []).map(move),
-	};
 }
