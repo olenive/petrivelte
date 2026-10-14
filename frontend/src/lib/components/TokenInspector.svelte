@@ -1,17 +1,28 @@
 <script lang="ts">
 	import { tick } from 'svelte';
-	import type { MarkingToken, TokenValue } from '$lib/types';
+	import type { InnerNetRef, KeyValue, MarkingToken, NetAddress, TokenValue } from '$lib/types';
 	import type { MirrorPlace } from '$lib/netMirror';
 	import { getToken } from '$lib/api';
+	import { NO_FILTER, isActive, tokenMatches, valueText, type TokenFilter } from '$lib/tokenFilter';
 
 	export let netId: string | null = null;
 	/** The net's generation: token ids are unique within one, so the cache
 	 *  of full views is keyed by it and the id together. */
 	export let generation: number = 0;
+	/** The inner net shown, if one is: its token ids are its own, so they are
+	 *  read with its address and cached under it. */
+	export let address: NetAddress | undefined = undefined;
 	/** Every place, in topology order, with its true count and capped list. */
 	export let places: MirrorPlace[] = [];
 	export let selectedTokenId: string | null = null;
 	export let onTokenSelect: ((tokenId: string | null) => void) | null = null;
+	/** The view's token filter: the lists show only the tokens it lets through. */
+	export let filter: TokenFilter = NO_FILTER;
+	/** Open one of a token's nets; null where opening goes no further (an
+	 *  inner net's tokens: one level for now). */
+	export let onOpenNet: ((net: InnerNetRef) => void) | null = null;
+	/** Said under a token's nets where they cannot be opened. */
+	export let nestedNote: string | null = null;
 
 	// Tab index: 0 = "All Tokens", 1+ = individual places
 	let selectedTabIndex = 0;
@@ -25,7 +36,7 @@
 	let fullViewLoading = false;
 	let fullViewKey: string | null = null;
 
-	const keyOf = (id: string) => `${generation}:${id}`;
+	const keyOf = (id: string) => `${generation}:${address?.nested_id ?? ''}:${id}`;
 
 	$: if (generation !== cachedGeneration) {
 		cachedGeneration = generation;
@@ -37,9 +48,32 @@
 
 	$: totalCount = places.reduce((sum, place) => sum + place.count, 0);
 	$: listedCount = places.reduce((sum, place) => sum + place.tokens.length, 0);
+	$: filtering = isActive(filter);
 
 	function hiddenCount(place: MirrorPlace): number {
 		return Math.max(0, place.count - place.tokens.length);
+	}
+
+	/** The listed tokens of a place the filter lets through. */
+	function shown(place: MirrorPlace, current: TokenFilter): MarkingToken[] {
+		return isActive(current) ? place.tokens.filter((token) => tokenMatches(current, token)) : place.tokens;
+	}
+
+	function keyRows(token: MarkingToken): Array<[string, KeyValue]> {
+		return token.keys ? Object.entries(token.keys) : [];
+	}
+
+	function openNet(event: MouseEvent, net: InnerNetRef) {
+		event.stopPropagation();
+		onOpenNet?.(net);
+	}
+
+	function cardKey(event: KeyboardEvent, tokenId: string) {
+		if (event.target !== event.currentTarget) return;
+		if (event.key === 'Enter' || event.key === ' ') {
+			event.preventDefault();
+			handleTokenCardClick(tokenId);
+		}
 	}
 
 	function placeTabLabel(place: MirrorPlace): string {
@@ -79,7 +113,7 @@
 		if (fullViews.has(key)) return;
 		fullViewLoading = true;
 		try {
-			const view = await getToken(netId, tokenId);
+			const view = await getToken(netId, tokenId, address);
 			fullViews = new Map(fullViews).set(key, view);
 		} catch (err) {
 			if (fullViewKey === key) {
@@ -109,16 +143,49 @@
 </script>
 
 {#snippet card(token: MarkingToken, place: MirrorPlace)}
-	<button
+	<!-- A div, not a button: a token that holds nets carries Open buttons. -->
+	<div
 		class="token-card"
 		class:selected={token.id === selectedTokenId}
 		data-token-card-id={token.id}
+		role="button"
+		tabindex="0"
 		on:click={() => handleTokenCardClick(token.id)}
+		on:keydown={(event) => cardKey(event, token.id)}
 	>
 		<div class="token-header">
 			<span class="token-id">#{token.id}</span>
 			<span class="token-type">{typeOf(token, place)}</span>
 		</div>
+		{#if keyRows(token).length > 0}
+			<!-- The token's keys (protocol §13.1), one row each. -->
+			<div class="token-keys">
+				{#each keyRows(token) as [name, value] (name)}
+					<div class="key-row" data-key-name={name}>
+						<span class="key-name">{name}</span>
+						<span class="key-value">{valueText(value)}</span>
+					</div>
+				{/each}
+			</div>
+		{/if}
+		{#if token.nets && token.nets.length > 0}
+			<!-- The nets the token holds (protocol §12.2). -->
+			<div class="token-nets">
+				{#each token.nets as net (net.nested_id)}
+					<div class="net-row" data-net-id={net.nested_id}>
+						<span class="net-name">{net.name || '(the token itself)'}</span>
+						{#if net.template}<span class="net-template">{net.template}</span>{/if}
+						<span class="net-count" title="Tokens in all its places">{net.count}</span>
+						{#if onOpenNet}
+							<button type="button" class="net-open" data-open-net={net.nested_id} on:click={(event) => openNet(event, net)}>Open</button>
+						{/if}
+					</div>
+				{/each}
+				{#if !onOpenNet && nestedNote}
+					<div class="muted" data-nested-note>{nestedNote}</div>
+				{/if}
+			</div>
+		{/if}
 		{#if token.id === selectedTokenId}
 			{#if fullViewLoading && !shownView}
 				<div class="muted">Loading…</div>
@@ -133,7 +200,15 @@
 		{:else}
 			<pre>{token.label}</pre>
 		{/if}
-	</button>
+	</div>
+{/snippet}
+
+{#snippet filteredOut(place: MirrorPlace)}
+	{#if filtering && shown(place, filter).length < place.tokens.length}
+		<div class="truncated" data-filtered-out={place.name}>
+			{place.tokens.length - shown(place, filter).length} hidden by the filter
+		</div>
+	{/if}
 {/snippet}
 
 <div class="token-inspector">
@@ -171,9 +246,10 @@
 								<strong>{place.name}</strong>
 								<span class="type">{place.type_name ?? ''}</span>
 							</div>
-							{#each place.tokens as token (token.id)}
+							{#each shown(place, filter) as token (token.id)}
 								{@render card(token, place)}
 							{/each}
+							{@render filteredOut(place)}
 							{#if hiddenCount(place) > 0}
 								<div class="truncated">
 									{hiddenCount(place)} more not shown
@@ -196,9 +272,10 @@
 			</div>
 
 			{#if place.tokens.length > 0}
-				{#each place.tokens as token (token.id)}
+				{#each shown(place, filter) as token (token.id)}
 					{@render card(token, place)}
 				{/each}
+				{@render filteredOut(place)}
 				{#if hiddenCount(place) > 0}
 					<div class="truncated">
 						{hiddenCount(place)} more not shown
@@ -341,6 +418,63 @@
 		overflow-x: auto;
 		margin: 0;
 		color: var(--text-primary);
+	}
+
+	.token-keys,
+	.token-nets {
+		margin: 0.25rem 0;
+		font-size: 0.75em;
+	}
+
+	.key-row,
+	.net-row {
+		display: flex;
+		align-items: baseline;
+		gap: 0.5rem;
+		padding: 0.1rem 0;
+	}
+
+	.key-name {
+		min-width: 5rem;
+		color: var(--text-secondary);
+	}
+
+	.key-value {
+		font-family: monospace;
+		color: var(--text-primary);
+	}
+
+	.net-name {
+		font-weight: bold;
+		color: var(--text-primary);
+	}
+
+	.net-template {
+		color: var(--text-secondary);
+	}
+
+	.net-count {
+		padding: 0 0.4rem;
+		border-radius: 999px;
+		background: var(--token-badge-fill);
+		color: var(--token-badge-text);
+		font-weight: bold;
+	}
+
+	.net-open {
+		margin-left: auto;
+		padding: 0.1rem 0.5rem;
+		border: 1px solid var(--button-border);
+		border-radius: 4px;
+		background: var(--bg-secondary);
+		color: var(--button-text);
+		cursor: pointer;
+		font-size: 1em;
+	}
+
+	.net-open:hover {
+		background: var(--button-hover-bg);
+		color: var(--button-hover-text);
 	}
 
 	.empty {

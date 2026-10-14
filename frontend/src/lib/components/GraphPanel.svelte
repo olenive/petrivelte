@@ -29,6 +29,8 @@
 	export let failingTransitions: Set<string> = new Set();
 	export let selectedTokenId: string | null = null;
 	export let onTokenSelect: ((tokenId: string | null) => void) | null = null;
+	/** A double click on a token: open the net it holds. */
+	export let onTokenOpen: ((tokenId: string) => void) | null = null;
 	export let selectedTransitionId: string | null = null;
 	export let onTransitionSelect: ((transitionId: string | null) => void) | null = null;
 
@@ -240,6 +242,8 @@
 							animating={false}
 							isSelected={token.id === selectedTokenId}
 							onSelect={handleTokenSelect}
+							badge={token.badge}
+							onOpen={onTokenOpen}
 						/>
 					{/if}
 				{/each}
@@ -262,7 +266,27 @@
 			<!-- Place text layer (rendered after tokens so text appears on top) -->
 			<g class="place-texts">
 				{#each graph.places as place (place.name)}
-					<PlaceText name={place.name} x={place.x} y={place.y} type_name={place.type_name} count={place.count} />
+					<PlaceText name={place.name} x={place.x} y={place.y} type_name={place.type_name} count={place.count} matching={place.matching} />
+				{/each}
+			</g>
+
+			<!-- Badges of tokens that hold nets: the total count of their nets,
+			     at the token's top right, above the place labels. -->
+			<g class="token-badges" pointer-events="none">
+				{#each tokens as token (token.id)}
+					{#if token.badge !== null && !hiddenTokenIds.has(token.id)}
+						<g class="token-badge" data-token-badge={token.id}>
+							<circle cx={token.x + 8} cy={token.y - 8} r={7.5} fill="var(--token-badge-fill)" stroke="var(--place-fill)" stroke-width="1.5" />
+							<text
+								x={token.x + 8}
+								y={token.y - 8}
+								text-anchor="middle"
+								dominant-baseline="central"
+								font-size={token.badge.length > 2 ? 6 : 9}
+								font-weight="bold"
+								fill="var(--token-badge-text)">{token.badge}</text>
+						</g>
+					{/if}
 				{/each}
 			</g>
 

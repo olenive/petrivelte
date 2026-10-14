@@ -26,7 +26,7 @@ Deploy with `fly deploy` (app `petrify-frontend`; `PUBLIC_API_URL` is set in
 |---|---|
 | `/` | Setup checklist and quick start. |
 | `/wiring` | Graph of workers, nets, notebooks and their bindings. |
-| `/nets` | Net selector, graph, execution controls, inject, runs and schedule, logs, secrets, Diagnose. |
+| `/nets` | Net selector, graph, execution controls, inject, runs and schedule, logs, secrets, Diagnose; inner nets (open a badged token's net in place, breadcrumb and Up) and a token filter by keys. |
 | `/notebooks` | Notebook index grouped by worker, badges from `load_state` plus `/sync`. |
 | `/notebooks/[id]` | One notebook in an iframe, with load progress and health. |
 | `/workers` | Workers, their nets, occupancy, build chip, logs, lifecycle actions. |
@@ -50,6 +50,12 @@ Most modules are pure functions with a table of cases in a sibling test.
   `coerceParamValue`, which applies the server's declared `coerce` for a
   factory parameter and falls back to the annotation text (`int`, `float`,
   `bool`) for an older control plane.
+- The nets page's graph: `netMirror.ts` (the marking mirror and the
+  version rule), `innerNets.ts` (badges of tokens that hold nets, the inner
+  net shown, when it is gone, the breadcrumb, outer firings seen from
+  inside), `tokenFilter.ts` (the view-side token filter by keys),
+  `netView.ts` (what the panel draws), `firingPlayback.ts` (the firing
+  animation), `layout.ts` and `graphLayout.ts` (the layered layout).
 - `netAnomalies.ts`: words for the server's anomaly tags; unknown tags show
   as themselves.
 - `netInstances.ts`: `groupByDefinition` and `workerLabel`, answering which

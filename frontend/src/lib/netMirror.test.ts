@@ -352,3 +352,115 @@ describe('a capped place', () => {
 		expect(mirror.places.Receiving.count).toBe(8);
 	});
 });
+
+describe('keys and nets (protocol §12, §13)', () => {
+	/** Receiving declares keys and Sorting holds nets. */
+	function keyed(): NetState {
+		const base = state();
+		return {
+			...base,
+			topology: {
+				...base.topology,
+				places: [
+					{ name: 'Receiving', type_name: 'Parcel', serializable: true, key_names: ['zone', 'urgent'] },
+					{ name: 'Sorting', type_name: 'Crate', serializable: true, nested: true, passive: true },
+				],
+			},
+			marking: {
+				places: {
+					Receiving: {
+						count: 2,
+						tokens: [
+							{ id: '1', label: 'P1', keys: { zone: 'north', urgent: true } },
+							{ id: '2', label: 'P2', keys: { zone: 'south', urgent: false } },
+						],
+					},
+					Sorting: {
+						count: 1,
+						tokens: [{ id: '3', label: 'Crate', nets: [{ name: 'inside', nested_id: 'n7', path: 'parcel-distribution/Sorting/#3/inside', count: 4 }] }],
+					},
+				},
+			},
+		};
+	}
+
+	it('keeps each place declaration and each token keys and nets from a state read', () => {
+		const mirror = mirrorFromState(keyed());
+		expect(mirror.places.Receiving.key_names).toEqual(['zone', 'urgent']);
+		expect(mirror.places.Sorting).toMatchObject({ nested: true, passive: true });
+		expect(mirror.places.Receiving.tokens[0].keys).toEqual({ zone: 'north', urgent: true });
+		expect(mirror.places.Sorting.tokens[0].nets?.[0]).toMatchObject({ nested_id: 'n7', count: 4 });
+	});
+
+	it('reads keys from a produced fifth element, with null for no colour', () => {
+		const launched = applied(mirrorFromState(keyed()), {
+			kind: 'launched', data: { ...stamp(11), transition: 'Sort', consumed: [['Receiving', '1']] },
+		});
+		const landed = applied(launched.mirror, {
+			kind: 'distributed',
+			data: {
+				...stamp(12),
+				transition: 'Sort',
+				produced: [['Receiving', '9', 'P9', null, { zone: 'east', urgent: true }]],
+				duration_ms: 1,
+			},
+		});
+		const token = landed.mirror.places.Receiving.tokens.find((t) => t.id === '9');
+		expect(token).toEqual({ id: '9', label: 'P9', keys: { zone: 'east', urgent: true } });
+	});
+
+	it('takes keys from added and replaces them from mutated, keeping the token nets', () => {
+		const added = applied(mirrorFromState(keyed()), {
+			kind: 'added', data: { ...stamp(11), place: 'Receiving', id: '8', label: 'P8', color: '#00ff00', keys: { zone: 'west', urgent: false } },
+		});
+		expect(added.mirror.places.Receiving.tokens.find((t) => t.id === '8')).toEqual({
+			id: '8', label: 'P8', color: '#00ff00', keys: { zone: 'west', urgent: false },
+		});
+		const mutated = applied(added.mirror, {
+			kind: 'mutated', data: { ...stamp(12), place: 'Receiving', id: '1', keys: { zone: 'north', urgent: false } },
+		});
+		expect(mutated.mirror.places.Receiving.tokens[0]).toEqual({ id: '1', label: 'P1', keys: { zone: 'north', urgent: false } });
+		const relabelled = applied(mutated.mirror, {
+			kind: 'mutated', data: { ...stamp(13), place: 'Sorting', id: '3', label: 'Crate (full)' },
+		});
+		expect(relabelled.mirror.places.Sorting.tokens[0].nets?.[0].nested_id).toBe('n7');
+	});
+
+	it('moves only the count and the version for hidden', () => {
+		const mirror = mirrorFromState(keyed());
+		const hiddenAdded = applied(mirror, { kind: 'hidden', data: { ...stamp(11), kind: 'added', place: 'Receiving' } });
+		expect(hiddenAdded.mirror.marking_version).toBe(11);
+		expect(hiddenAdded.mirror.places.Receiving.count).toBe(3);
+		expect(ids(hiddenAdded.mirror, 'Receiving')).toEqual(['1', '2']);
+		expect(hiddenAdded.change).toEqual({ kind: 'hidden', place: 'Receiving', what: 'added' });
+		expect(hiddenAdded.short).toEqual([]);
+		const hiddenMutated = applied(hiddenAdded.mirror, { kind: 'hidden', data: { ...stamp(12), kind: 'mutated', place: 'Receiving' } });
+		expect(hiddenMutated.mirror.places.Receiving).toEqual(hiddenAdded.mirror.places.Receiving);
+		const hiddenRemoved = applied(hiddenMutated.mirror, { kind: 'hidden', data: { ...stamp(13), kind: 'removed', place: 'Receiving' } });
+		expect(hiddenRemoved.mirror.places.Receiving.count).toBe(2);
+		// The mirrors it came from are left as they were.
+		expect(mirror.places.Receiving.count).toBe(2);
+	});
+
+	it('keeps the version rule for hidden, and refetches for a place it does not have', () => {
+		const mirror = mirrorFromState(keyed());
+		expect(applyEvent(mirror, { kind: 'hidden', data: { ...stamp(13), kind: 'added', place: 'Receiving' } })).toEqual({
+			outcome: 'gap', expected: 11, got: 13,
+		});
+		expect(applyEvent(mirror, { kind: 'hidden', data: { ...stamp(11), kind: 'added', place: 'Nowhere' } }).outcome).toBe('refetch');
+	});
+
+	it('does not apply nested: it moves the inner net version, never this one', () => {
+		const mirror = mirrorFromState(keyed());
+		const outcome = applyEvent(mirror, {
+			kind: 'nested',
+			data: {
+				...stamp(11),
+				path: 'parcel-distribution/Sorting/#3/inside',
+				nested_id: 'n7',
+				event: { method: 'added', params: { place: 'Door', id: '1', label: 'x', ...stamp(2) } },
+			},
+		});
+		expect(outcome).toEqual({ outcome: 'ignored' });
+	});
+});

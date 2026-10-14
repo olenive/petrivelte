@@ -37,19 +37,35 @@ relies on.
 
 ## Net execution proxy
 
-Execution state, history, step, start, stop, reset, inject, tokens, enable
-and disable go to `/api/nets/{id}/...` and the CP forwards them to the net's
-worker. Since 2026-10-04 bodies and answers are the net protocol's, version 1
-(`PROTOCOL.md` in the petritype library); the shapes live in `src/lib/types.ts`:
+Execution state, history, step, start, stop, reset, inject, tokens, enable,
+disable, query and distinct go to `/api/nets/{id}/...` and the CP forwards
+them to the net's worker. Since 2026-10-04 bodies and answers are the net
+protocol's, version 1 (`PROTOCOL.md` in the petritype library); the shapes
+live in `src/lib/types.ts`:
 
 | Call | Answer |
 |---|---|
 | `GET .../execution/state?token_limit=` | The protocol state: `topology.{places, transitions, edges, hints?}`, `transitions[name].{enabled, fireable, in_flight, priority?}`, `marking.places[name].{count, tokens}` (the page reads sizes from `count`; `tokens` is capped at `token_limit`, 200), `generation`, `marking_version`, `running`, `runtime`, `progress`. |
 | `GET .../execution/history?after=&limit=` | `{entries}`, oldest first, each `{seq, transition, started_at, duration_ms, outcome, consumed, produced}` with consumed and produced as `[place, id]` pairs. The page reads it whole on a resync and `after` its newest `seq` once a firing lands. |
-| `GET .../tokens/{id}` | `{id, place, type_name, kind: "json", value}`, or `kind: "text"` with `text` for a place with no JSON form. |
+| `GET .../tokens/{id}` | `{id, place, type_name, kind: "json", value}`, or `kind: "text"` with `text` for a place with no JSON form; `keys` and `nets` when the token has them. |
 | `POST .../inject {place, token}` | `{status, id, marking_version}`; watchers see `added`. The page offers only places with `serializable: true`. |
+| `POST .../query {filter?, token_limit?, path?, nested_id?}` | `{marking_version, count, matches: [{place, token, json?}]}` (`queryNet`; the page itself does not call it). |
+| `GET .../distinct?key=&places=&places=&path=&nested_id=` | `{marking_version, key, values}` (`distinctValues`); the filter bar's values for a key, falling back on the tokens the page holds when the route refuses. |
 | `POST .../execution/step` | `{fired, transition?, failed?, marking_version, running}` once the firing has landed. |
 | `POST .../transitions/{name}/enable\|disable` | `{marking_version}`; watchers see `toggled` if it changed. |
+
+Since 2026-10-12 the reads take an inner net's address (protocol §12.3):
+`?nested_id=` or `?path=` on `GET .../execution/state`,
+`.../execution/history`, `.../tokens/{id}` and `.../places/{place}/tokens`,
+and `nested_id` or `path` in the body of `POST .../inject`, whose answer then
+carries the inner net's `path`, `nested_id` and its own `marking_version`.
+The page names inner nets by `nested_id` only. Both is 422
+`invalid_params`; an inner net that is gone is 404 `unknown_net`, which
+closes the page's view of it. `step`, `start`, `stop`, `reset`, `enable` and
+`disable` take no address. A state may carry `topology.places[].nested`,
+`passive` and `key_names`, and a token `keys` and `nets` (§5.3). The
+relay's per-client projection (`POST .../filter`, `?client=`) is not used by
+the page: its token filter is its own.
 
 Every refusal arrives as `{"detail": <sentence>, "reason": <tag>}`, parsed
 into `NetProxyError` (`status`, `reason`, message = detail). The CP refuses on
@@ -91,12 +107,17 @@ apart from the one Marimo opens inside the notebook iframe.
   `{seq, scope, net_id, kind, ts, data, marking_version, running}`. A net's
   kinds are the protocol notification methods with `data` their params:
   `launched`, `distributed`, `fired`, `failed`, `added`, `removed`,
-  `mutated`, `toggled`, `param_changed` (each moves `marking_version` by
-  exactly one and carries it in `data`), `reloaded` (refetch), `fireable`,
-  `idle`, `execution_stopped {reason: no_fireable_transitions |
-  transition_failed | subprocess_exited, error_type?, message?}`,
-  `heartbeat`, `load_progress`; plus the host's own `subprocess_output`,
-  `memory_stats` (every 5 s), `log` and `stream_gap`. `transition_fired`,
+  `mutated`, `hidden`, `toggled`, `param_changed` (each moves
+  `marking_version` by exactly one and carries it in `data`), `reloaded`
+  (refetch), `fireable`, `idle`, `execution_stopped {reason:
+  no_fireable_transitions | transition_failed | subprocess_exited,
+  error_type?, message?}`, `heartbeat`, `load_progress`, and, since
+  2026-10-12, `nested {path, nested_id, event: {method, params}}`, an inner
+  net's notification whole inside `event` with the inner net's own version,
+  the envelope's and the wrapper's version the outer net's, which it does
+  not move. `hidden {kind, place}` reaches only a client under the relay's
+  projection, which this page never sets. Plus the host's own
+  `subprocess_output`, `memory_stats` (every 5 s), `log` and `stream_gap`. `transition_fired`,
   `step_*`, `graph_state` and `net_reset` are gone. The envelope's
   `marking_version` is the worker's latest on every net event, log lines
   included; the page's version rule reads the one in `data`. `after=0` replays the whole
@@ -120,7 +141,11 @@ apart from the one Marimo opens inside the notebook iframe.
     every token, animation and cached token view. Firings are animated from
     the events (`firingPlayback.ts`): stage one on `launched`, stage two on
     `distributed` once stage one is over, and a one-piece `fired` plays both
-    in turn.
+    in turn. A `nested` line moves the badge of the token holding its net
+    and, while the page shows that net, is applied to the inner net's own
+    mirror (`innerNets.ts`); the page reads that net with
+    `GET .../execution/state?nested_id=` when it opens it, on an inner gap,
+    and when an outer firing that took its token lands.
   - The workers page (`connectRuntimeLogs(id, { replay: false })` in
     `stores/workerLogs.ts`) opens a live tail for every ready worker, for
     new log lines and the `memory_stats` frames its gauges read. Until a

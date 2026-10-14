@@ -98,6 +98,10 @@ def fresh_control_plane(control_plane: fake_cp.FakeControlPlane) -> Iterator[fak
     control_plane.execution_state = {}
     control_plane.execution_history = {}
     control_plane.initial_state = {}
+    control_plane.inner_nets = {}
+    control_plane.initial_inner = {}
+    control_plane.boarding = {}
+    control_plane.one_piece_firings = False
     control_plane.slow_steps = 0
     control_plane.slow_step_s = 1.0
     control_plane.worker_buffer = []

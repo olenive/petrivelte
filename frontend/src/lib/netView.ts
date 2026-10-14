@@ -2,6 +2,11 @@
  * What the graph panel draws, read off the marking mirror and the layout:
  * places with their true counts, transitions with their state, edges by
  * their endpoints, and the token dots of each place's first slots.
+ *
+ * Under a token filter (`tokenFilter.ts`) a token that does not match is
+ * not drawn and its slot stays empty, so the drawn tokens keep the slots the
+ * firing animation travels from and to; each place then reads `matching of
+ * count`. A token that holds nets carries a badge with their total count.
  */
 
 import type { NetLayout } from '$lib/layout';
@@ -9,6 +14,8 @@ import type { Mirror } from '$lib/netMirror';
 import type { Point, TopologyEdge, TransitionState } from '$lib/types';
 import { TOKEN_DOT_MAX, tokenSlotOffset } from '$lib/netHelpers';
 import { edgeEnds } from '$lib/firingPlayback';
+import { badgeCount, badgeText } from '$lib/innerNets';
+import { NO_FILTER, filterCounts, isActive, matchingText, tokenMatches, type TokenFilter } from '$lib/tokenFilter';
 
 export interface DrawnPlace {
 	name: string;
@@ -16,6 +23,8 @@ export interface DrawnPlace {
 	x: number;
 	y: number;
 	count: number;
+	/** Under a token filter, `2 of 5` (`2+ of 300` for a lower bound); else null. */
+	matching: string | null;
 }
 
 /** How a transition is drawn: switched off (grey, dashed), firing now,
@@ -56,6 +65,8 @@ export interface DrawnToken {
 	x: number;
 	y: number;
 	color: string;
+	/** For a token that holds nets, their total count as the badge reads it. */
+	badge: string | null;
 }
 
 export interface DrawnNet {
@@ -100,11 +111,21 @@ export function tokenPoint(layout: NetLayout, place: string, slot: number | null
 	return { x: centre.x + dx, y: centre.y + dy };
 }
 
-export function drawNet(mirror: Mirror, layout: NetLayout): DrawnNet {
+export function drawNet(mirror: Mirror, layout: NetLayout, filter: TokenFilter = NO_FILTER): DrawnNet {
+	const counts = isActive(filter) ? filterCounts(mirror, filter).places : null;
 	const places = mirror.topology.places.flatMap((place) => {
 		const p = at(layout, place.name);
+		const counted = counts?.[place.name];
 		return p
-			? [{ name: place.name, type_name: place.type_name ?? '', ...p, count: mirror.places[place.name]?.count ?? 0 }]
+			? [
+					{
+						name: place.name,
+						type_name: place.type_name ?? '',
+						...p,
+						count: mirror.places[place.name]?.count ?? 0,
+						matching: counted ? matchingText(counted) : null,
+					},
+				]
 			: [];
 	});
 	const transitions = mirror.topology.transitions.flatMap((transition) => {
@@ -146,12 +167,26 @@ export function drawNet(mirror: Mirror, layout: NetLayout): DrawnNet {
 }
 
 /** The dots: each place's first `TOKEN_DOT_MAX` listed tokens, in their
- *  fixed slots. Beyond that the place's counter carries the number. */
-export function drawTokens(mirror: Mirror, layout: NetLayout): DrawnToken[] {
+ *  fixed slots, leaving out those the filter hides. Beyond that the place's
+ *  counter carries the number. */
+export function drawTokens(mirror: Mirror, layout: NetLayout, filter: TokenFilter = NO_FILTER): DrawnToken[] {
+	const filtering = isActive(filter);
 	return mirror.topology.places.flatMap((place) =>
 		(mirror.places[place.name]?.tokens ?? []).slice(0, TOKEN_DOT_MAX).flatMap((token, slot) => {
+			if (filtering && !tokenMatches(filter, token)) return [];
 			const p = tokenPoint(layout, place.name, slot);
-			return p ? [{ id: token.id, place: place.name, ...p, color: token.color ?? DEFAULT_TOKEN_COLOR }] : [];
+			const count = badgeCount(token);
+			return p
+				? [
+						{
+							id: token.id,
+							place: place.name,
+							...p,
+							color: token.color ?? DEFAULT_TOKEN_COLOR,
+							badge: count === null ? null : badgeText(count),
+						},
+					]
+				: [];
 		}),
 	);
 }

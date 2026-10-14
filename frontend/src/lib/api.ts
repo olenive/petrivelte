@@ -9,7 +9,18 @@ import { API_URL as resolvedApiUrl } from '$lib/config/network';
 import { newIdempotencyKey, withIdempotency } from '$lib/idempotency';
 import { markRequestStart } from '$lib/stores/slowRequests';
 import { reportOutcome } from '$lib/stores/backendHealth';
-import type { InjectResult, LogEntry, NetState, StepResult, TokenValue } from '$lib/types';
+import type {
+	DistinctResult,
+	Filter,
+	InjectResult,
+	KeyValue,
+	LogEntry,
+	NetAddress,
+	NetState,
+	QueryResult,
+	StepResult,
+	TokenValue,
+} from '$lib/types';
 
 export const API_URL = resolvedApiUrl;
 
@@ -812,10 +823,10 @@ export type NetProxyReason = ControlPlaneReason | ProtocolReason | 'timeout';
 
 /**
  * A refusal from the net execution proxy (execution, history, tokens,
- * inject, enable and disable). ``message`` is the server's ``detail``,
- * written for a person; ``reason`` is the tag a caller branches on, one of
- * ``NetProxyReason`` from this control plane, any string from a newer one,
- * and null when the body carried none.
+ * inject, enable and disable, query and distinct). ``message`` is the
+ * server's ``detail``, written for a person; ``reason`` is the tag a caller
+ * branches on, one of ``NetProxyReason`` from this control plane, any
+ * string from a newer one, and null when the body carried none.
  */
 export class NetProxyError extends Error {
 	readonly status: number;
@@ -862,31 +873,54 @@ export function isStillInProgress(error: unknown): boolean {
 	return error instanceof NetProxyError && error.status === 504 && error.reason === 'timeout';
 }
 
-function query(params: Record<string, string | number | undefined>): string {
+/** A query string; an array value repeats its key, an undefined one is left out. */
+function query(params: Record<string, string | number | readonly string[] | undefined>): string {
 	const search = new URLSearchParams();
 	for (const [key, value] of Object.entries(params)) {
-		if (value !== undefined) search.set(key, String(value));
+		if (value === undefined) continue;
+		if (Array.isArray(value)) for (const each of value) search.append(key, each);
+		else search.set(key, String(value));
 	}
 	const text = search.toString();
 	return text ? `?${text}` : '';
 }
 
+/** An inner net's address as request fields (protocol §12.1): only the
+ *  ones given, so the outer net's reads stay as they were. */
+function addressFields(address: NetAddress | undefined): NetAddress {
+	return {
+		...(address?.path !== undefined ? { path: address.path } : {}),
+		...(address?.nested_id !== undefined ? { nested_id: address.nested_id } : {}),
+	};
+}
+
 /** The net's whole state (protocol §5), each place's token list capped at
- *  ``tokenLimit``. */
-export async function getExecutionState(netId: string, tokenLimit?: number): Promise<NetState> {
-	const res = await get(`/api/nets/${netId}/execution/state${query({ token_limit: tokenLimit })}`);
+ *  ``tokenLimit``; with an ``address``, the state of that inner net
+ *  (§12.3), which a 404 ``unknown_net`` says is gone. */
+export async function getExecutionState(
+	netId: string,
+	tokenLimit?: number,
+	address?: NetAddress,
+): Promise<NetState> {
+	const res = await get(
+		`/api/nets/${netId}/execution/state${query({ token_limit: tokenLimit, ...addressFields(address) })}`,
+	);
 	if (!res.ok) throw await netProxyError(res, 'Failed to get execution state');
 	return res.json();
 }
 
 /** The net's log of firings (protocol §8), oldest first: the entries with a
- *  ``seq`` above ``after``, at most ``limit`` of them. Empty for a net that
- *  is not loaded; other refusals throw ``NetProxyError``. */
+ *  ``seq`` above ``after``, at most ``limit`` of them; with an ``address``,
+ *  only those of that inner net and the nets inside it. Empty for a net
+ *  that is not loaded; other refusals throw ``NetProxyError``. */
 export async function getExecutionHistory(
 	netId: string,
-	options: { after?: number; limit?: number } = {},
+	options: { after?: number; limit?: number } & NetAddress = {},
 ): Promise<LogEntry[]> {
-	const res = await get(`/api/nets/${netId}/execution/history${query(options)}`);
+	const { after, limit, ...address } = options;
+	const res = await get(
+		`/api/nets/${netId}/execution/history${query({ after, limit, ...addressFields(address) })}`,
+	);
 	if (!res.ok) {
 		// Not loaded means no history to show; any other refusal is news.
 		const error = await netProxyError(res, 'Failed to get execution history');
@@ -950,14 +984,18 @@ export async function executionReset(netId: string): Promise<void> {
 // is refused (422 `invalid_token`, or `not_serializable` for a place with no
 // JSON form) before it reaches the net. Each call mints its own idempotency
 // key: a network-layer retry dedupes to one token, two clicks inject two.
+//
+// With an ``address`` the token goes into that inner net's place (protocol
+// §12.3); watchers see it as ``nested`` around ``added``.
 export async function executionInject(
 	netId: string,
 	place: string,
 	token: unknown,
+	address?: NetAddress,
 ): Promise<InjectResult> {
 	const res = await post(
 		`/api/nets/${netId}/inject`,
-		{ place, token },
+		{ place, token, ...addressFields(address) },
 		withIdempotency(newIdempotencyKey()),
 	);
 	if (!res.ok) throw await netProxyError(res, 'Failed to inject token');
@@ -989,11 +1027,54 @@ export function disableTransition(netId: string, transition: string) {
 }
 
 /** One live token whole (protocol §6.5): JSON when its place is
- *  serializable, the runtime's full text otherwise. */
-export async function getToken(netId: string, tokenId: string): Promise<TokenValue> {
-	const res = await get(`/api/nets/${netId}/tokens/${encodeURIComponent(tokenId)}`);
+ *  serializable, the runtime's full text otherwise. An inner net's token
+ *  ids are its own, so a token of an inner net is read with its address. */
+export async function getToken(netId: string, tokenId: string, address?: NetAddress): Promise<TokenValue> {
+	const res = await get(
+		`/api/nets/${netId}/tokens/${encodeURIComponent(tokenId)}${query({ ...addressFields(address) })}`,
+	);
 	if (!res.ok) throw await netProxyError(res, 'Failed to get token');
 	return res.json();
+}
+
+/**
+ * The tokens matching ``filter`` (protocol §13.3), in place order then token
+ * order: ``count`` of them, the first ``tokenLimit`` listed. A read, though
+ * it is a POST: the filter is a body. Without a filter every token matches.
+ */
+export async function queryNet(
+	netId: string,
+	options: { filter?: Filter; tokenLimit?: number } = {},
+	address?: NetAddress,
+): Promise<QueryResult> {
+	const body = {
+		...(options.filter !== undefined ? { filter: options.filter } : {}),
+		...(options.tokenLimit !== undefined ? { token_limit: options.tokenLimit } : {}),
+		...addressFields(address),
+	};
+	const res = await post(`/api/nets/${netId}/query`, body);
+	if (!res.ok) throw await netProxyError(res, 'Failed to query the net');
+	return res.json();
+}
+
+/**
+ * The distinct values of key ``key`` over the net's tokens, or over
+ * ``places`` (protocol §13.3), in order of first appearance. A key no place
+ * declares gives none. A control plane without the route refuses, and the
+ * caller falls back on the values of the tokens it holds.
+ */
+export async function distinctValues(
+	netId: string,
+	key: string,
+	options: { places?: readonly string[] } = {},
+	address?: NetAddress,
+): Promise<KeyValue[]> {
+	const res = await get(
+		`/api/nets/${netId}/distinct${query({ key, places: options.places, ...addressFields(address) })}`,
+	);
+	if (!res.ok) throw await netProxyError(res, 'Failed to read the distinct values');
+	const body = (await res.json()) as DistinctResult;
+	return Array.isArray(body?.values) ? body.values : [];
 }
 
 // -- workers --

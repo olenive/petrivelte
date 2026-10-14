@@ -178,3 +178,13 @@ describe('changes without cues', () => {
 		expect(playChange(change, ctx(0)).cues).toEqual([]);
 	});
 });
+
+describe('a keyed token', () => {
+	it('travels with its keys, so a token filter can hide its cue', () => {
+		const keyed: Moved = { place: 'Receiving', id: '1', token: { id: '1', label: 'P', keys: { zone: 'north' } }, slot: 0 };
+		const change: Change = { kind: 'launched', transition: 'Sort', consumed: [keyed, moved('Receiving', '2', 1)] };
+		const [first, second] = tokens(playChange(change, ctx(1000)).cues);
+		expect(first.keys).toEqual({ zone: 'north' });
+		expect(second.keys).toBeUndefined();
+	});
+});

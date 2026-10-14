@@ -24,7 +24,7 @@
  */
 
 import type { Change, Moved } from '$lib/netMirror';
-import type { Point } from '$lib/types';
+import type { Keys, Point } from '$lib/types';
 
 export interface TokenCue {
 	kind: 'token';
@@ -42,6 +42,9 @@ export interface TokenCue {
 	transition: string;
 	/** The edge it travels along, as `edgeEnds` spells it. */
 	edge: string;
+	/** The token's keys as the mirror knew them, so a token filter can hide
+	 *  the cue of a token it hides. */
+	keys?: Keys;
 }
 
 export interface FlashCue {
@@ -108,6 +111,7 @@ function travel(
 				hides: !leaving,
 				transition,
 				edge: edgeEnds(direction, token.place, transition),
+				...(token.token?.keys ? { keys: token.token.keys } : {}),
 			},
 		];
 	});

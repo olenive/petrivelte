@@ -7,11 +7,13 @@
 	export let type_name: string;
 	/** The place's true count (protocol §5.3), not its capped token list. */
 	export let count: number = 0;
+	/** Under a token filter, `2 of 5`: how many of its tokens are drawn. */
+	export let matching: string | null = null;
 
-	$: showCount = placeShowsCounter(count);
+	$: showCount = matching === null && placeShowsCounter(count);
 </script>
 
-<g class="place-text" data-place-id={name} data-count={count}>
+<g class="place-text" data-place-id={name} data-count={count} data-matching={matching ?? undefined}>
 	<!-- Scrim, drawn first so everything below sits on top of it. Veils the
 	     dots toward the centre so the labels and count read cleanly, while the
 	     outer dots stay visible through its transparent edge — no hard boundary
@@ -38,6 +40,15 @@
 	{#if showCount}
 		<text x={x} y={y + 14} text-anchor="middle" font-size="15" font-weight="bold" fill="var(--place-text)">
 			{count}
+		</text>
+	{/if}
+	<!-- Under a token filter: how many of the place's tokens match. -->
+	{#if matching !== null}
+		<text x={x} y={y + 44} text-anchor="middle" font-size="11" font-weight="bold" stroke="var(--graph-bg)" stroke-width="3" fill="none">
+			{matching}
+		</text>
+		<text x={x} y={y + 44} text-anchor="middle" font-size="11" font-weight="bold" fill="var(--place-text)">
+			{matching}
 		</text>
 	{/if}
 </g>

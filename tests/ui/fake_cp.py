@@ -30,6 +30,28 @@ set. Refusals carry `{detail, reason}` with the protocol's code. A test can
 also move the net without the page asking, with `fire`, `inject` and
 `reset`.
 
+Inner nets and keys (PROTOCOL §12, §13), as the server's 2026-10-12 relay
+passes them: a token may hold inner nets (`seed_inner`), each with its own
+protocol state and version, listed on the token as `nets` with a path
+computed from where the token stands. The reads take `path` or `nested_id`
+as query parameters (`execution/state`, `execution/history`,
+`tokens/{id}`, `places/{place}/tokens`), `inject` takes them in its body;
+both is 422 `invalid_params`, a net that is gone 404 `unknown_net`. An
+inner net's events go out as `nested {path, nested_id, event: {method,
+params}}` stamped with the outer version, the inner event carrying its own.
+A step fires the outer net first and, when nothing there is fireable, the
+first inner net that has a fireable transition. An outer firing that takes a
+token holding nets moves them to the token it produces in a nested place,
+and drops them otherwise. `boarding` makes a transition reach inside, as the
+transit net's Board does: its taken token goes into the inner net held by
+the first token of a place, as `nested` around `added`, then the holder is
+`mutated`. With `one_piece_firings` set, every firing is reported in one
+piece as the Rust runner's example binary reports it: no `launched`, the
+firing's inner lines and `mutated`s first, then `fired {consumed, produced}`.
+Places may declare `key_names` and tokens carry `keys`; produced
+entries carry them as a fifth element. `POST .../query` and `GET
+.../distinct` answer the protocol's results.
+
 Every request is recorded in `requests`, so a test can see what the page
 asked for, including anything this fake does not know about. Those unknown
 paths get a 200 with `{}` and are also listed in `unknown_paths`.
@@ -67,6 +89,16 @@ class FakeControlPlane:
     execution_history: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     # What a reset rebuilds, by net; `seed_net` records it.
     initial_state: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Each net's inner nets by nested id: `{name, template, holder, state}`,
+    # `holder` the id of the outer token holding it. `seed_inner` fills it
+    # and `initial_inner` keeps what a reset rebuilds.
+    inner_nets: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
+    initial_inner: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
+    # Per net, transitions that reach inside: name to (holder place, inner place).
+    boarding: dict[str, dict[str, tuple[str, str]]] = field(default_factory=dict)
+    # Report firings in one piece (`fired`, after the firing's other lines)
+    # rather than as `launched` then `distributed`.
+    one_piece_firings: bool = False
     # How many of the next steps outlast the control plane: answered with a
     # 504 `timeout` while the firing is launched, then distributed
     # `slow_step_s` later on the stream.
@@ -236,6 +268,94 @@ def seed_net(cp: "FakeControlPlane", net_id: str, state: dict[str, Any],
     cp.execution_state[net_id] = state
     cp.initial_state[net_id] = copy.deepcopy(state)
     cp.execution_history[net_id] = list(history or [])
+    cp.inner_nets[net_id] = {}
+    cp.initial_inner[net_id] = {}
+
+
+def seed_inner(cp: "FakeControlPlane", net_id: str, holder: str, *, name: str,
+               state: dict[str, Any], template: str | None = None) -> str:
+    """Give outer token `holder` an inner net with protocol state `state`
+    (built with `net_state`); its nested id, minted here."""
+    nets = cp.inner_nets.setdefault(net_id, {})
+    nested_id = f"n{sum(len(each) for each in cp.inner_nets.values()) + 1}"
+    nets[nested_id] = {"name": name, "template": template, "holder": holder, "state": state}
+    cp.initial_inner.setdefault(net_id, {})[nested_id] = copy.deepcopy(nets[nested_id])
+    return nested_id
+
+
+def _place_of(state: dict[str, Any], token_id: str) -> str | None:
+    return next((place for place, held in state["marking"]["places"].items()
+                 if any(token["id"] == token_id for token in held["tokens"])), None)
+
+
+def inner_path(cp: "FakeControlPlane", net_id: str, nested_id: str) -> str:
+    """The path of an inner net as the marking stands (§12.1)."""
+    record = cp.inner_nets[net_id][nested_id]
+    outer = cp.execution_state[net_id]
+    place = _place_of(outer, record["holder"]) if record["holder"] else None
+    if place is None:
+        return record.get("last_path", "")
+    record["last_path"] = f"{outer['net']}/{place}/#{record['holder']}/{record['name']}"
+    return record["last_path"]
+
+
+def _count(state: dict[str, Any]) -> int:
+    return sum(held["count"] for held in state["marking"]["places"].values())
+
+
+def _nets_of(cp: "FakeControlPlane", net_id: str, token_id: str) -> list[dict[str, Any]]:
+    """The `nets` entry of an outer token (§12.2), empty for one holding none."""
+    entries = []
+    for nested_id, record in cp.inner_nets.get(net_id, {}).items():
+        if record["holder"] == token_id:
+            entry = {"name": record["name"], "nested_id": nested_id,
+                     "path": inner_path(cp, net_id, nested_id), "count": _count(record["state"])}
+            if record["template"]:
+                entry["template"] = record["template"]
+            entries.append(entry)
+    return entries
+
+
+def _with_nets(cp: "FakeControlPlane", net_id: str, token: dict[str, Any]) -> dict[str, Any]:
+    nets = _nets_of(cp, net_id, token["id"])
+    return {**token, "nets": nets} if nets else token
+
+
+def _resolve(cp: "FakeControlPlane", net_id: str, path: str | None,
+             nested_id: str | None) -> str | None:
+    """The nested id an address names, or None for the outer net."""
+    if path is not None and nested_id is not None:
+        raise Refusal(422, "invalid_params", "give path or nested_id, not both")
+    nets = cp.inner_nets.get(net_id, {})
+    if nested_id is not None:
+        if nested_id not in nets:
+            raise Refusal(404, "unknown_net", f"no inner net with nested id {nested_id!r}")
+        return nested_id
+    if path is not None:
+        found = next((each for each in nets if inner_path(cp, net_id, each) == path), None)
+        if found is None:
+            raise Refusal(404, "unknown_net", f"no inner net at {path!r}")
+        return found
+    return None
+
+
+def _target(cp: "FakeControlPlane", net_id: str, nested_id: str | None) -> dict[str, Any]:
+    """The protocol state a call acts on: the outer net's or an inner net's."""
+    return cp.execution_state[net_id] if nested_id is None else cp.inner_nets[net_id][nested_id]["state"]
+
+
+def _key_names(state: dict[str, Any], place: str) -> list[str] | None:
+    meta = next((p for p in state["topology"]["places"] if p["name"] == place), {})
+    return meta.get("key_names")
+
+
+def _keys_for(state: dict[str, Any], place: str, value: Any) -> dict[str, Any] | None:
+    """The keys a keyed place derives: here, the value's fields of those names."""
+    names = _key_names(state, place)
+    if names is None:
+        return None
+    source = value if isinstance(value, dict) else {}
+    return {name: source[name] for name in names if name in source}
 
 
 def _inputs(state: dict[str, Any], transition: str) -> list[str]:
@@ -254,8 +374,11 @@ def _can_fire(state: dict[str, Any], transition: str) -> bool:
     live = state["transitions"][transition]
     places = state["marking"]["places"]
     inputs = _inputs(state, transition)
+    # A mutate edge hands over a token, so its place must hold one too.
+    held = [e["place"] for e in state["topology"]["edges"]
+            if e["transition"] == transition and e["direction"] == "in" and e.get("kind") == "mutate"]
     return (live["enabled"] and not live["in_flight"] and bool(inputs)
-            and all(places[p]["count"] > 0 for p in inputs))
+            and all(places[p]["count"] > 0 for p in inputs + held))
 
 
 def _refresh_fireable(state: dict[str, Any]) -> bool:
@@ -277,27 +400,37 @@ def _next_id(state: dict[str, Any]) -> str:
 
 
 def _notify(cp: "FakeControlPlane", net_id: str, kind: str, params: dict[str, Any],
-            *, moves_version: bool) -> None:
-    """Publish one notification, stamped as a runner stamps it (§7)."""
-    state = cp.execution_state[net_id]
+            *, moves_version: bool, nested_id: str | None = None) -> None:
+    """Publish one notification, stamped as a runner stamps it (§7). For an
+    inner net it goes out wrapped in `nested` (§12.4): the inner version
+    inside, the outer one on the wrapper."""
+    outer = cp.execution_state[net_id]
+    state = _target(cp, net_id, nested_id)
     if moves_version:
         state["marking_version"] += 1
-    publish_worker(cp, kind=kind, net_id=net_id, data={
-        **params, "marking_version": state["marking_version"], "running": state["running"]})
+    stamped = {**params, "marking_version": state["marking_version"], "running": outer["running"]}
+    if nested_id is None:
+        publish_worker(cp, kind=kind, net_id=net_id, data=stamped)
+        return
+    publish_worker(cp, kind="nested", net_id=net_id, data={
+        "path": inner_path(cp, net_id, nested_id), "nested_id": nested_id,
+        "event": {"method": kind, "params": stamped},
+        "marking_version": outer["marking_version"], "running": outer["running"]})
 
 
-def _notify_fireable(cp: "FakeControlPlane", net_id: str) -> None:
-    state = cp.execution_state[net_id]
+def _notify_fireable(cp: "FakeControlPlane", net_id: str, nested_id: str | None = None) -> None:
+    state = _target(cp, net_id, nested_id)
     if _refresh_fireable(state):
         _notify(cp, net_id, "fireable", {"transitions": [
             name for name, live in state["transitions"].items() if live["fireable"]]},
-            moves_version=False)
+            moves_version=False, nested_id=nested_id)
 
 
-def launch(cp: "FakeControlPlane", net_id: str, transition: str | None = None) -> dict[str, Any] | None:
+def launch(cp: "FakeControlPlane", net_id: str, transition: str | None = None,
+           nested_id: str | None = None) -> dict[str, Any] | None:
     """Take a firing's inputs and publish `launched`, or None if nothing can fire."""
     with cp.lock:
-        state = cp.execution_state[net_id]
+        state = _target(cp, net_id, nested_id)
         if transition is None:
             transition = next((name for name in state["transitions"] if _can_fire(state, name)), None)
         if transition is None or not _can_fire(state, transition):
@@ -310,46 +443,118 @@ def launch(cp: "FakeControlPlane", net_id: str, transition: str | None = None) -
             consumed.append((place, token))
         state["transitions"][transition]["in_flight"] = True
         _refresh_fireable(state)
-        _notify(cp, net_id, "launched", {
-            "transition": transition,
-            "consumed": [[place, token["id"]] for place, token in consumed]}, moves_version=True)
-        return {"transition": transition, "consumed": consumed, "started_at": STAMP}
+        if not cp.one_piece_firings:
+            _notify(cp, net_id, "launched", {
+                "transition": transition,
+                "consumed": [[place, token["id"]] for place, token in consumed]},
+                moves_version=True, nested_id=nested_id)
+        return {"transition": transition, "consumed": consumed, "started_at": STAMP,
+                "nested_id": nested_id}
+
+
+def _board(cp: "FakeControlPlane", net_id: str, transition: str,
+           consumed: list[tuple[str, dict[str, Any]]]) -> None:
+    """A transition reaching inside, as the transit net's Board does: each
+    taken token goes into the inner net held by the first token of the
+    holder place (`nested` around `added`), then the holder is `mutated`."""
+    holder_place, inner_place = cp.boarding.get(net_id, {}).get(transition, (None, None))
+    if holder_place is None:
+        return
+    outer = cp.execution_state[net_id]
+    holder = next(iter(outer["marking"]["places"][holder_place]["tokens"]), None)
+    nested_id = next((each for each, record in cp.inner_nets.get(net_id, {}).items()
+                      if holder is not None and record["holder"] == holder["id"]), None)
+    if nested_id is None:
+        return
+    state = cp.inner_nets[net_id][nested_id]["state"]
+    for _, token in consumed:
+        record = {"id": _next_id(state), "label": token["label"]}
+        state["marking"]["places"][inner_place]["tokens"].append(record)
+        state["marking"]["places"][inner_place]["count"] += 1
+        _notify(cp, net_id, "added", {"place": inner_place, **record}, moves_version=True,
+                nested_id=nested_id)
+    _notify(cp, net_id, "mutated", {"place": holder_place, "id": holder["id"], "label": holder["label"]},
+            moves_version=True)
+
+
+def _wire(state: dict[str, Any], place: str, token: dict[str, Any]) -> list[Any]:
+    """A produced entry (§7.1): colour fourth, keys fifth for a keyed place."""
+    if _key_names(state, place) is not None:
+        return [place, token["id"], token["label"], token.get("color"), token.get("keys", {})]
+    return [place, token["id"], token["label"], *([token["color"]] if token.get("color") else [])]
 
 
 def land(cp: "FakeControlPlane", net_id: str, launched: dict[str, Any],
          duration_ms: float = 12.5) -> list[list[str]]:
     """Place a launched firing's outputs, publish `distributed`, log it."""
     with cp.lock:
-        state = cp.execution_state[net_id]
+        nested_id = launched.get("nested_id")
+        state = _target(cp, net_id, nested_id)
         transition = launched["transition"]
         consumed = launched["consumed"]
         places = state["marking"]["places"]
+        if nested_id is None:
+            _board(cp, net_id, transition, consumed)
         produced = []
         for place in _outputs(state, transition):
             source = consumed[0][1] if consumed else {"label": transition}
             token = {"id": _next_id(state), "label": source["label"]}
             if source.get("color"):
                 token["color"] = source["color"]
+            names = _key_names(state, place)
+            if names is not None:
+                token["keys"] = {name: value for name, value in (source.get("keys") or {}).items()
+                                 if name in names}
             places[place]["tokens"].append(token)
             places[place]["count"] += 1
             produced.append((place, token))
+        if nested_id is None:
+            _carry_inner_nets(cp, net_id, consumed, produced)
         state["transitions"][transition]["in_flight"] = False
         progress = state["progress"]
         progress["step_count"] += 1
         progress["last_fired"] = transition
         progress["fired_counts"][transition] = progress["fired_counts"].get(transition, 0) + 1
-        wire = [[place, token["id"], token["label"], *([token["color"]] if token.get("color") else [])]
-                for place, token in produced]
-        _notify(cp, net_id, "distributed", {"transition": transition, "produced": wire,
-                                            "duration_ms": duration_ms}, moves_version=True)
+        wire = [_wire(state, place, token) for place, token in produced]
+        if cp.one_piece_firings:
+            _notify(cp, net_id, "fired", {
+                "transition": transition, "consumed": [[place, token["id"]] for place, token in consumed],
+                "produced": wire, "duration_ms": duration_ms}, moves_version=True, nested_id=nested_id)
+        else:
+            _notify(cp, net_id, "distributed", {"transition": transition, "produced": wire,
+                                                "duration_ms": duration_ms},
+                    moves_version=True, nested_id=nested_id)
         history = cp.execution_history.setdefault(net_id, [])
-        history.append({
+        entry = {
             "seq": (history[-1]["seq"] if history else 0) + 1, "transition": transition,
             "started_at": launched["started_at"], "duration_ms": duration_ms, "outcome": "fired",
             "consumed": [[place, token["id"]] for place, token in consumed],
-            "produced": [[place, token["id"]] for place, token in produced]})
-        _notify_fireable(cp, net_id)
+            "produced": [[place, token["id"]] for place, token in produced]}
+        if nested_id is not None:
+            entry["path"] = inner_path(cp, net_id, nested_id)
+            entry["nested_id"] = nested_id
+        history.append(entry)
+        if nested_id is None:
+            _notify_fireable(cp, net_id)
+        else:
+            _notify_fireable(cp, net_id, nested_id)
         return wire
+
+
+def _carry_inner_nets(cp: "FakeControlPlane", net_id: str, consumed: list[tuple[str, dict[str, Any]]],
+                      produced: list[tuple[str, dict[str, Any]]]) -> None:
+    """The inner nets of a taken token: to the token produced in a nested
+    place, keeping their nested ids (§12.6), or gone with the token."""
+    nested_places = {p["name"] for p in cp.execution_state[net_id]["topology"]["places"] if p.get("nested")}
+    keeper = next((token for place, token in produced if place in nested_places), None)
+    taken = {token["id"] for _, token in consumed}
+    nets = cp.inner_nets.get(net_id, {})
+    for nested_id in list(nets):
+        if nets[nested_id]["holder"] in taken:
+            if keeper is None:
+                del nets[nested_id]
+            else:
+                nets[nested_id]["holder"] = keeper["id"]
 
 
 def fire(cp: "FakeControlPlane", net_id: str, transition: str | None = None) -> str | None:
@@ -362,16 +567,58 @@ def fire(cp: "FakeControlPlane", net_id: str, transition: str | None = None) -> 
     return launched["transition"]
 
 
-def inject(cp: "FakeControlPlane", net_id: str, place: str, token: Any) -> str:
+def fire_inner(cp: "FakeControlPlane", net_id: str, nested_id: str,
+               transition: str | None = None) -> str | None:
+    """One whole firing inside an inner net, each piece wrapped in `nested`."""
+    launched = launch(cp, net_id, transition, nested_id)
+    if launched is None:
+        return None
+    land(cp, net_id, launched)
+    return launched["transition"]
+
+
+def step_deep(cp: "FakeControlPlane", net_id: str) -> tuple[str, str | None] | None:
+    """What a step fires (§12.3): the outer net's first fireable transition,
+    else the first inner net's that has one. The transition and the nested
+    id it fired in (None for the outer net), or None."""
+    fired = fire(cp, net_id)
+    if fired is not None:
+        return fired, None
+    for nested_id in list(cp.inner_nets.get(net_id, {})):
+        fired = fire_inner(cp, net_id, nested_id)
+        if fired is not None:
+            return fired, nested_id
+    return None
+
+
+def inject(cp: "FakeControlPlane", net_id: str, place: str, token: Any,
+           nested_id: str | None = None) -> str:
     """Append a token from outside and publish `added`; its id."""
     with cp.lock:
-        state = cp.execution_state[net_id]
-        record = {"id": _next_id(state), "label": json.dumps(token)}
+        state = _target(cp, net_id, nested_id)
+        record: dict[str, Any] = {"id": _next_id(state), "label": json.dumps(token)}
+        keys = _keys_for(state, place, token)
+        if keys is not None:
+            record["keys"] = keys
         state["marking"]["places"][place]["tokens"].append(record)
         state["marking"]["places"][place]["count"] += 1
-        _notify(cp, net_id, "added", {"place": place, **record}, moves_version=True)
-        _notify_fireable(cp, net_id)
+        _notify(cp, net_id, "added", {"place": place, **record}, moves_version=True, nested_id=nested_id)
+        _notify_fireable(cp, net_id, nested_id)
         return record["id"]
+
+
+def remove(cp: "FakeControlPlane", net_id: str, place: str, token_id: str) -> None:
+    """Remove a token from outside (§7.1 `removed`); its inner nets go with it."""
+    with cp.lock:
+        state = cp.execution_state[net_id]
+        held = state["marking"]["places"][place]
+        held["tokens"] = [token for token in held["tokens"] if token["id"] != token_id]
+        held["count"] -= 1
+        nets = cp.inner_nets.get(net_id, {})
+        for nested_id in [each for each, record in nets.items() if record["holder"] == token_id]:
+            del nets[nested_id]
+        _notify(cp, net_id, "removed", {"place": place, "id": token_id}, moves_version=True)
+        _notify_fireable(cp, net_id)
 
 
 def reset(cp: "FakeControlPlane", net_id: str) -> None:
@@ -384,6 +631,7 @@ def reset(cp: "FakeControlPlane", net_id: str) -> None:
         state["running"] = False
         cp.execution_state[net_id] = state
         cp.execution_history[net_id] = []
+        cp.inner_nets[net_id] = copy.deepcopy(cp.initial_inner.get(net_id, {}))
         _notify(cp, net_id, "reloaded", {"generation": state["generation"], "reason": "reset"},
                 moves_version=False)
 
@@ -416,6 +664,77 @@ def served_state(state: dict[str, Any], token_limit: int) -> dict[str, Any]:
     return answer
 
 
+def _served(cp: "FakeControlPlane", net_id: str, nested_id: str | None, token_limit: int) -> dict[str, Any]:
+    """`get_state` of the outer net, its tokens carrying their `nets`, or of
+    an inner net, carrying its address (§12.3)."""
+    if nested_id is None:
+        answer = served_state(cp.execution_state[net_id], token_limit)
+        for held in answer["marking"]["places"].values():
+            held["tokens"] = [_with_nets(cp, net_id, token) for token in held["tokens"]]
+        return answer
+    record = cp.inner_nets[net_id][nested_id]
+    answer = served_state(record["state"], token_limit)
+    answer.update({"net": record["name"], "path": inner_path(cp, net_id, nested_id),
+                   "nested_id": nested_id})
+    if record["template"]:
+        answer["template"] = record["template"]
+    return answer
+
+
+def _address_of(cp: "FakeControlPlane", net_id: str, nested_id: str | None) -> dict[str, Any]:
+    return {} if nested_id is None else {"path": inner_path(cp, net_id, nested_id), "nested_id": nested_id}
+
+
+def _token_matches(state: dict[str, Any], place: str, token: dict[str, Any], filt: dict[str, Any]) -> bool:
+    """§13.2: AND across clauses, OR within, by JSON type and value."""
+    if filt.get("places") is not None and place not in filt["places"]:
+        return False
+    if filt.get("prefix") and not place.startswith(filt["prefix"]):
+        return False
+    keys = token.get("keys") or {}
+    for clause in filt.get("clauses") or []:
+        if "param" in clause or clause.get("key") not in keys:
+            return False
+        value = keys[clause["key"]]
+        if not any(type(value) is type(each) and value == each for each in clause.get("values", [])):
+            return False
+    return True
+
+
+def _query(cp: "FakeControlPlane", net_id: str, nested_id: str | None, body: dict[str, Any]) -> dict[str, Any]:
+    state = _target(cp, net_id, nested_id)
+    filt = body.get("filter") or {}
+    serializable = {p["name"]: p["serializable"] for p in state["topology"]["places"]}
+    matches = []
+    for place, held in state["marking"]["places"].items():
+        for token in held["tokens"]:
+            if _token_matches(state, place, token, filt):
+                match: dict[str, Any] = {"place": place, "token": token}
+                if serializable[place]:
+                    try:
+                        match["json"] = json.loads(token["label"])
+                    except ValueError:
+                        match["json"] = token["label"]
+                matches.append(match)
+    limit = body.get("token_limit") or 200
+    return {"marking_version": state["marking_version"], "count": len(matches),
+            "matches": matches[:limit], **_address_of(cp, net_id, nested_id)}
+
+
+def _distinct(cp: "FakeControlPlane", net_id: str, nested_id: str | None, key: str,
+              places: list[str]) -> dict[str, Any]:
+    state = _target(cp, net_id, nested_id)
+    values: list[Any] = []
+    for place, held in state["marking"]["places"].items():
+        if places and place not in places:
+            continue
+        for token in held["tokens"]:
+            value = (token.get("keys") or {}).get(key)
+            if value is not None and not any(type(value) is type(v) and value == v for v in values):
+                values.append(value)
+    return {"marking_version": state["marking_version"], "key": key, "values": values}
+
+
 class Refusal(Exception):
     """A protocol refusal: `{detail, reason}` with an HTTP status."""
 
@@ -438,6 +757,8 @@ def _token_value(state: dict[str, Any], token_id: str) -> dict[str, Any]:
         for token in held["tokens"]:
             if token["id"] == token_id:
                 common = {"id": token_id, "place": place, "type_name": types[place]}
+                if token.get("keys") is not None:
+                    common["keys"] = token["keys"]
                 if serializable[place]:
                     try:
                         return {**common, "kind": "json", "value": json.loads(token["label"])}
@@ -449,12 +770,16 @@ def _token_value(state: dict[str, Any], token_id: str) -> dict[str, Any]:
 
 def _write_answer(cp: "FakeControlPlane", method: str, path: str, body: Any) -> Any:
     """What the execution proxy answers a write, or None for a path it does not know."""
-    match = re.fullmatch(r"/api/nets/([^/]+)/(execution/(step|reset|start|stop)|inject"
+    match = re.fullmatch(r"/api/nets/([^/]+)/(execution/(step|reset|start|stop)|inject|query"
                          r"|transitions/([^/]+)/(enable|disable))", path)
     if not match or method != "POST":
         return None
     net_id = match.group(1)
     state = _net_or_refuse(cp, net_id)
+    if match.group(2) == "query":
+        with cp.lock:
+            body = body or {}
+            return _query(cp, net_id, _resolve(cp, net_id, body.get("path"), body.get("nested_id")), body)
     action = match.group(3) or ("inject" if match.group(2) == "inject" else match.group(5))
     if action == "step":
         if cp.slow_steps > 0:
@@ -465,13 +790,14 @@ def _write_answer(cp: "FakeControlPlane", method: str, path: str, body: Any) -> 
                 timer.daemon = True
                 timer.start()
             raise Refusal(504, "timeout", "The step is still running; it lands on the stream")
-        fired = fire(cp, net_id)
+        fired = step_deep(cp, net_id)
         state = cp.execution_state[net_id]
         result: dict[str, Any] = {"fired": fired is not None,
                                   "marking_version": state["marking_version"],
                                   "running": state["running"]}
         if fired is not None:
-            result["transition"] = fired
+            result["transition"] = fired[0]
+            result.update(_address_of(cp, net_id, fired[1]) if fired[1] in cp.inner_nets.get(net_id, {}) else {})
         return result
     if action == "reset":
         reset(cp, net_id)
@@ -483,15 +809,19 @@ def _write_answer(cp: "FakeControlPlane", method: str, path: str, body: Any) -> 
         return {"status": "started" if action == "start" else "stopped",
                 "marking_version": state["marking_version"], "running": state["running"]}
     if action == "inject":
-        place = (body or {}).get("place")
-        known = {p["name"]: p for p in state["topology"]["places"]}
-        if place not in known:
-            raise Refusal(404, "unknown_place", f"no place named {place!r}")
-        if not known[place]["serializable"]:
-            raise Refusal(422, "not_serializable", f"{place} has no JSON form")
-        token_id = inject(cp, net_id, place, body.get("token"))
-        return {"status": "injected", "id": token_id,
-                "marking_version": cp.execution_state[net_id]["marking_version"]}
+        body = body or {}
+        with cp.lock:
+            nested_id = _resolve(cp, net_id, body.get("path"), body.get("nested_id"))
+            target = _target(cp, net_id, nested_id)
+            place = body.get("place")
+            known = {p["name"]: p for p in target["topology"]["places"]}
+            if place not in known:
+                raise Refusal(404, "unknown_place", f"no place named {place!r}")
+            if not known[place]["serializable"]:
+                raise Refusal(422, "not_serializable", f"{place} has no JSON form")
+            token_id = inject(cp, net_id, place, body.get("token"), nested_id)
+            return {"status": "injected", "id": token_id, "marking_version": target["marking_version"],
+                    **_address_of(cp, net_id, nested_id)}
     transition = unquote(match.group(4))
     if transition not in state["transitions"]:
         raise Refusal(404, "unknown_transition", f"no transition named {transition!r}")
@@ -538,23 +868,65 @@ def _json_answer(cp: FakeControlPlane, path: str, query: str) -> Any:
     if re.fullmatch(r"/api/workers/[^/]+/logs/history", path):
         return []
     params = parse_qs(query)
+
+    def one(name: str) -> str | None:
+        return params[name][0] if name in params else None
+
     match = re.fullmatch(r"/api/nets/([^/]+)/execution/state", path)
     if match:
         with cp.lock:
-            state = _net_or_refuse(cp, match.group(1))
-            return served_state(state, int(params.get("token_limit", ["200"])[0]))
+            net_id = match.group(1)
+            _net_or_refuse(cp, net_id)
+            nested_id = _resolve(cp, net_id, one("path"), one("nested_id"))
+            return _served(cp, net_id, nested_id, int(one("token_limit") or "200"))
     match = re.fullmatch(r"/api/nets/([^/]+)/execution/history", path)
     if match:
-        _net_or_refuse(cp, match.group(1))
+        net_id = match.group(1)
+        _net_or_refuse(cp, net_id)
         after = int(params.get("after", ["0"])[0])
         limit = int(params.get("limit", ["1000"])[0])
         with cp.lock:
-            entries = [e for e in cp.execution_history.get(match.group(1), []) if e["seq"] > after]
+            nested_id = _resolve(cp, net_id, one("path"), one("nested_id"))
+            entries = [e for e in cp.execution_history.get(net_id, []) if e["seq"] > after
+                       and (nested_id is None or e.get("nested_id") == nested_id)]
         return {"entries": entries[:limit]}
     match = re.fullmatch(r"/api/nets/([^/]+)/tokens/([^/]+)", path)
     if match:
         with cp.lock:
-            return _token_value(_net_or_refuse(cp, match.group(1)), match.group(2))
+            net_id = match.group(1)
+            _net_or_refuse(cp, net_id)
+            nested_id = _resolve(cp, net_id, one("path"), one("nested_id"))
+            value = _token_value(_target(cp, net_id, nested_id), unquote(match.group(2)))
+            if nested_id is None:
+                nets = _nets_of(cp, net_id, value["id"])
+                if nets:
+                    value["nets"] = nets
+            return {**value, **_address_of(cp, net_id, nested_id)}
+    match = re.fullmatch(r"/api/nets/([^/]+)/places/([^/]+)/tokens", path)
+    if match:
+        with cp.lock:
+            net_id = match.group(1)
+            _net_or_refuse(cp, net_id)
+            nested_id = _resolve(cp, net_id, one("path"), one("nested_id"))
+            state = _target(cp, net_id, nested_id)
+            place = unquote(match.group(2))
+            if place not in state["marking"]["places"]:
+                raise Refusal(404, "unknown_place", f"no place named {place!r}")
+            held = state["marking"]["places"][place]
+            offset, limit = int(one("offset") or "0"), int(one("limit") or "200")
+            tokens = held["tokens"][offset:offset + limit]
+            if nested_id is None:
+                tokens = [_with_nets(cp, net_id, token) for token in tokens]
+            return {"place": place, "marking_version": state["marking_version"], "count": held["count"],
+                    "offset": offset, "limit": limit, "tokens": tokens,
+                    "has_more": offset + limit < len(held["tokens"]), **_address_of(cp, net_id, nested_id)}
+    match = re.fullmatch(r"/api/nets/([^/]+)/distinct", path)
+    if match:
+        with cp.lock:
+            net_id = match.group(1)
+            _net_or_refuse(cp, net_id)
+            nested_id = _resolve(cp, net_id, one("path"), one("nested_id"))
+            return _distinct(cp, net_id, nested_id, one("key") or "", params.get("places", []))
     if re.fullmatch(r"/api/nets/[^/]+/logs/history", path):
         return []
     cp.unknown_paths.append(path + (f"?{query}" if query else ""))

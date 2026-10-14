@@ -69,6 +69,10 @@
 		<div class="log-entry" class:failed={entry.outcome === 'failed'} data-seq={entry.seq} data-outcome={entry.outcome}>
 			<span class="timestamp">{formatTime(entry.started_at)}</span>
 			<span class="transition">{entry.transition}</span>
+			{#if entry.path}
+				<!-- A firing inside an inner net, where that net was then. -->
+				<span class="inner-path" data-entry-path={entry.path}>in {entry.path}</span>
+			{/if}
 			{#if entry.outcome === 'failed'}
 				<span class="outcome">failed{entry.restored ? ', restored' : ''}</span>
 			{/if}
@@ -136,6 +140,11 @@
 		font-weight: bold;
 		color: var(--button-border);
 		margin: 0 0.5rem;
+	}
+
+	.inner-path {
+		color: var(--text-secondary);
+		margin-right: 0.5rem;
 	}
 
 	.duration {

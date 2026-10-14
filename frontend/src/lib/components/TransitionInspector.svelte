@@ -11,6 +11,8 @@
 	/** An enable or disable request is in flight. */
 	export let toggling: boolean = false;
 	export let toggleError: string | null = null;
+	/** A quiet line under the state, such as why there are no switches. */
+	export let note: string | null = null;
 
 	$: rows = detailRows(transition?.detail);
 	$: arcs = transition ? transitionArcs(topology, transition.name) : { inputs: [], outputs: [] };
@@ -50,6 +52,9 @@
 			{/if}
 			{#if toggleError}
 				<div class="error">{toggleError}</div>
+			{/if}
+			{#if note}
+				<div class="muted" data-transition-note>{note}</div>
 			{/if}
 		</div>
 

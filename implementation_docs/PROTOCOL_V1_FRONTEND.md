@@ -160,3 +160,120 @@ Two slices, each approved before it starts, each with tests (2026-10-04):
    version 0 types and handlers removed.
 
 (Slice 2 of the programme is the server's, landed 2026-10-04.)
+
+## Inner nets and keys in the page (2026-10-12)
+
+**Status:** Implemented 2026-10-12 on branch `nested-and-keys`, against the
+relay petritype-server builds the same day (its
+`dev-docs/RUNTIMES_AND_PROTOCOL.md`, "Nested nets, keys and the projection
+through the relay, 12 October 2026"). Protocol §12 (nested nets) and §13
+(keys, queries, filters). The Bevy viewer does the same things in its
+DESIGN §3.5 and §3.6, and the two are meant to feel alike.
+
+### What the wire gives the page
+
+- `topology.places[]` may say `nested`, `passive` and `key_names`; a token
+  entry may carry `keys` and `nets: [{name, nested_id, path, template?,
+  count}]`. `added` and `mutated` carry `keys`; a produced entry carries
+  them as its fifth element, its fourth then `null` for a token without a
+  colour. Produced entries, `added` and `mutated` never carry `nets`.
+- The reads take an address: `?path=` or `?nested_id=` on
+  `GET .../execution/state`, `.../execution/history`, `.../tokens/{id}` and
+  `.../places/{place}/tokens`, and `path` or `nested_id` in the body of
+  `POST .../inject`. Both is 422 `invalid_params`; a net that is gone 404
+  `unknown_net`. `POST .../query {filter?, token_limit?, path?, nested_id?}`
+  and `GET .../distinct?key=&places=&path=&nested_id=` answer the protocol's
+  results. `step`, `start`, `stop`, `reset`, `enable` and `disable` take no
+  address: they act on the outer net.
+- The worker stream carries `nested {path, nested_id, event: {method,
+  params}, marking_version, running}` and `hidden {kind, place}` as kinds.
+  The wrapper's version is the outer net's, which it does not move; the
+  inner event carries the inner net's.
+
+### Decisions
+
+- **One view and a breadcrumb, not a side panel.** Opening a token's net
+  (the **Open** control in the token inspector, or a double click on a
+  badged token) swaps the graph panel to that net: its own layout, its own
+  mirror, its own firing animation. Above the panel a breadcrumb names
+  where it is (`transit > Depot/#17/cabin`) and **Up** goes back to the
+  outer net, which was kept live underneath, so nothing is fetched. Chosen
+  over the Bevy viewer's side panel and windows because the page has one
+  canvas and two side bars already, and one net at a time keeps the
+  inspectors, inject and the filter unambiguous about which net they mean.
+  One level deep for now: a badged token inside an inner net shows its
+  badge, and its inspector says deeper levels come later.
+- **The controls stay outer-level.** Step, Repeat Step, start, stop, reset,
+  enable and disable keep driving the outer net while an inner net is
+  shown, as in the Bevy viewer; the protocol gives inner nets no switches
+  of their own over the wire (§12.3). The transition inspector shows an
+  inner transition's state without switches and says why. Inject is the
+  exception: it is offered for the inner net's serializable places and goes
+  in by the address.
+- **Inner nets are named by `nested_id`**, never by path: a path changes
+  every time the holding token moves (it gets a new id), a nested id does
+  not.
+- **The inner mirror is fed apart.** `nested` lines are not applied to the
+  outer mirror and never count as a gap there. A line of the net shown is
+  unwrapped and applied to the inner mirror under the inner net's own
+  version rule (a gap or an inner `reloaded` re-reads the inner net). A line
+  of any other net only moves the badge of the token holding that net: the
+  badge is a hint (§12.3), moved by the line (`added` +1, `removed` −1,
+  `launched` −consumed, `distributed` +produced, `fired` both, a restoring
+  `failed` +consumed) without moving the outer version, and replaced by the
+  next state read. A token a firing or an `added` puts into a nested place
+  carries no `nets`, so the page re-reads the outer state (at most every two
+  seconds) to badge it.
+- **When the inner net goes.** An outer `removed` of the holding token, an
+  outer `reloaded`, and a 404 `unknown_net` on a read of the inner net close
+  it, and the panel falls back to the outer net with a one-line notice
+  saying why. An outer firing that takes the holding token is not taken to
+  mean the net is gone: the common move puts the token back with a new id
+  and the net keeps its nested id (§12.6). The page asks after the net when
+  that firing lands; the answer says where it is now (the breadcrumb
+  follows) or, as `unknown_net`, that it was consumed (`Inner net gone: its
+  token was consumed by Scrap.`). The holding token is known by its id,
+  read from the latest path, since a token put back carries no `nets` until
+  the next state read.
+- **Outer firings seen from inside.** An inner `added`, `removed`,
+  `mutated`, `param_changed` or `hidden` that is not one of the inner net's
+  own firings is an outer firing reaching inside. Both firing shapes are
+  read: Python writes the inner lines between `launched` and `distributed`,
+  so a line with a firing under way is that firing's; the Rust runner's
+  example binary reports a firing in one piece, the inner lines and its
+  `mutated`s first and `fired` last, so a line with no firing under way
+  waits (`TOUCH_CLAIM_MS`, 400 ms) for the next outer `launched` or `fired`
+  to claim it. One no firing claims in that time, or that a landing, an
+  `added`, a `removed` or a `toggled` overtakes, came from outside (an
+  inject). The page names it above the panel for three seconds (`outer:
+  Alight Central`, or `from outside: not an outer firing`).
+- **Filtering is the view's own.** A filter bar above the graph offers the
+  key names the shown net's places declare; picking a key lists its values
+  (from `distinct` when the server answers it, else from the tokens the page
+  holds), and values toggle on and off: OR within a key, AND across keys,
+  compared by JSON type and value. A hidden token is not drawn (its slot
+  stays empty, so the animation still finds the others), its cue does not
+  travel, the token inspector lists only matching tokens and says how many
+  it hides, each place reads `matching of count` (`2+ of 300` when the place
+  holds more than the page lists), and a banner says `showing N of M
+  tokens` with **Clear**. The execution log is not filtered. Nothing is
+  sent to the server: the relay's projection (`POST .../filter`,
+  `?client=`) is for a client that must not see the hidden tokens at all,
+  and on this page a filter is a way of looking, not a permission; the view
+  side also keeps every count exact. `queryNet` is in the client for a page
+  that wants the matching tokens' data; this one does not call it.
+- **Keys** show in the token inspector as rows, one per key.
+
+### Tests
+
+Vitest: `innerNets.test.ts` (the badge, routing by `nested_id`, the inner
+version rule, closing, the holder by path, the breadcrumb, outer firings
+seen from inside), `tokenFilter.test.ts`, and additions to
+`netMirror.test.ts` (keys and nets kept, `hidden`, `nested` not applied),
+`netView.test.ts` (badges, the filter's drawing), `firingPlayback.test.ts`
+and `api.nets.test.ts` (addresses, `queryNet`, `distinctValues`). The
+browser suite's `test_inner_nets_and_keys.py` descends by the inspector and
+by a double click, steps the outer net while the inner net animates, falls
+back when the token is consumed and when it is removed, and filters a keyed
+net. The fake control plane (`tests/ui/fake_cp.py`) grew the addressed
+routes, `query`, `distinct`, inner nets and the `nested` stream.

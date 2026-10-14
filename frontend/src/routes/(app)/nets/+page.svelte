@@ -21,7 +21,7 @@
 		getExecutionState, executionStep, executionStart, executionStop, executionReset, executionInject,
 		enableTransition, disableTransition,
 		listNetSecrets, setNetSecrets, getNetLogHistory, getExecutionHistory, runNetNow,
-		diagnoseNet, isNotLoaded, isStillInProgress, type NetDiagnosis,
+		diagnoseNet, isNotLoaded, isStillInProgress, distinctValues, type NetDiagnosis,
 		type Net, type Worker, type NetParam, type SecretMetadata,
 	} from '$lib/api';
 	import GraphPanel from '$lib/components/GraphPanel.svelte';
@@ -39,18 +39,56 @@
 	import { groupByDefinition } from '$lib/netInstances';
 	import { TOKEN_STAGE_MS, FIRING_ANIMATION_MS } from '$lib/tokenAnimation';
 	import { diagnoseActivityLine, diagnoseClasses, diagnoseStateLabel } from '$lib/netDiagnose';
-	import type { LogEntry, NetEvent, NetState, StepResult } from '$lib/types';
+	import type { InnerNetRef, KeyValue, LogEntry, NetAddress, NetEvent, NetState, StepResult } from '$lib/types';
 	import { layoutFor, type KeyedLayout } from '$lib/graphLayout';
 	import {
 		DEFAULT_TOKEN_LIMIT,
 		anyInFlight,
 		applyEvent,
+		listedTokens,
 		mirrorFromState,
 		shouldAdopt,
 		totalCount,
 		type Change,
 		type Mirror,
 	} from '$lib/netMirror';
+	import {
+		NO_TOUCH,
+		OUTER_NOTE_MS,
+		TOUCH_CLAIM_MS,
+		adoptInnerState,
+		afterOuterChange,
+		breadcrumb,
+		holderOf,
+		moveBadge,
+		needsNetsRead,
+		openView,
+		readFailedNotice,
+		reloadedNotice,
+		routeNested,
+		settleTouches,
+		trackInner,
+		trackOuter,
+		unwrapNested,
+		type InnerView,
+		type NestedLine,
+		type TouchTracker,
+	} from '$lib/innerNets';
+	import {
+		NO_FILTER,
+		bannerText,
+		clausesOf,
+		filterCounts,
+		isActive,
+		isOn,
+		keyNames,
+		matchesKeys,
+		mergeValues,
+		mirrorValues,
+		toggleValue,
+		valueText,
+		type TokenFilter,
+	} from '$lib/tokenFilter';
 	import {
 		activeEdges,
 		busyTransitions,
@@ -76,17 +114,71 @@
 	let logEntries = $state<LogEntry[]>([]);
 	let connectionStatus = $state('Connecting...');
 
+	// -- inner nets (protocol §12): one shown at a time, in place of the outer net --
+
+	// The inner net the page shows, or is opening: its own mirror, fed by
+	// its own state reads and by the `nested` lines of that net, under its
+	// own version (`innerNets.ts`). The outer mirror stays live underneath,
+	// and the page's controls keep driving the outer net, as in the Bevy
+	// viewer. One level deep for now.
+	let inner = $state.raw<InnerView | null>(null);
+	let innerLayout = $state.raw<KeyedLayout | null>(null);
+	// Why the panel fell back to the outer net, or why a descend went nowhere.
+	let viewNotice = $state<string | null>(null);
+	// An outer firing that reached into the inner net shown, named for a moment.
+	let outerNote = $state<string | null>(null);
+	let outerNoteTimer: ReturnType<typeof setTimeout> | null = null;
+	let touch: TouchTracker = NO_TOUCH;
+	// An inner touch with no outer firing under way waits a moment for a
+	// one-piece `fired` to claim it, then counts as from outside.
+	let touchTimer: ReturnType<typeof setTimeout> | null = null;
+
+	// The net drawn: the inner one once its state is in, else the outer one.
+	// The graph, the inspectors, the filter and inject work on it.
+	let innerShown = $derived(!!inner?.mirror);
+	let shownMirror = $derived(inner?.mirror ?? mirror);
+	let shownLayout = $derived(inner?.mirror ? innerLayout : netLayout);
+	let shownAddress = $derived<NetAddress | undefined>(inner?.mirror ? { nested_id: inner.nested_id } : undefined);
+	let crumb = $derived(inner && mirror ? breadcrumb(mirror.net, inner.path, inner.name) : null);
+
+	// -- the token filter (protocol §13), the view's own --
+
+	// Per key, the values switched on; the graph draws only the tokens it
+	// lets through and each place reads `matching of count`. Nothing is
+	// sent to the server, and the execution log is not filtered.
+	let tokenFilter = $state.raw<TokenFilter>(NO_FILTER);
+	// The key whose values the bar offers.
+	let filterKey = $state('');
+	// `distinct` answers, by view and key; null where the server has none.
+	// Dropped with the net they were about.
+	let distinctAnswers = $state.raw<Record<string, KeyValue[] | null>>({});
+	let viewKey = $derived(shownMirror ? `${shownMirror.generation}|${inner?.mirror ? inner.nested_id : ''}` : '');
+	let filterKeys = $derived(shownMirror ? keyNames(shownMirror.topology.places) : []);
+	let filterActive = $derived(isActive(tokenFilter));
+	let filterTally = $derived(shownMirror && filterActive ? filterCounts(shownMirror, tokenFilter) : null);
+	let filterValues = $derived(
+		shownMirror && filterKey
+			? mergeValues(
+					distinctAnswers[`${viewKey}|${filterKey}`] ?? null,
+					mirrorValues(shownMirror, filterKey),
+					tokenFilter[filterKey] ?? [],
+				)
+			: [],
+	);
+
 	// Sizes come from each place's `count`, never from its capped list.
-	let totalTokenCount = $derived(totalCount(mirror));
+	let totalTokenCount = $derived(totalCount(shownMirror));
 	// Every place in topology order, for the token inspector.
 	let mirrorPlaces = $derived(
-		mirror ? mirror.topology.places.flatMap((p) => (mirror!.places[p.name] ? [mirror!.places[p.name]] : [])) : [],
+		shownMirror
+			? shownMirror.topology.places.flatMap((p) => (shownMirror!.places[p.name] ? [shownMirror!.places[p.name]] : []))
+			: [],
 	);
 	// What the graph panel draws.
-	let drawnNet = $derived(mirror && netLayout ? drawNet(mirror, netLayout.layout) : null);
-	let drawnTokens = $derived(mirror && netLayout ? drawTokens(mirror, netLayout.layout) : []);
+	let drawnNet = $derived(shownMirror && shownLayout ? drawNet(shownMirror, shownLayout.layout, tokenFilter) : null);
+	let drawnTokens = $derived(shownMirror && shownLayout ? drawTokens(shownMirror, shownLayout.layout, tokenFilter) : []);
 	// Places the inject form offers: only those whose tokens have a JSON form.
-	let injectablePlaces = $derived((mirror?.topology.places ?? []).filter((p) => p.serializable));
+	let injectablePlaces = $derived((shownMirror?.topology.places ?? []).filter((p) => p.serializable));
 
 	// Animation: cues played from the changes the mirror applied
 	// (`firingPlayback.ts`), against a clock this page moves when a cue
@@ -97,7 +189,12 @@
 	let stageOneEnds: Record<string, number> = {};
 	let cueSerial = 0;
 	let cueTimer: ReturnType<typeof setTimeout> | null = null;
-	let travellingCues = $derived(travelling(cues, clock));
+	// A token the filter hides does not travel either.
+	let travellingCues = $derived(
+		filterActive
+			? travelling(cues, clock).filter((cue) => matchesKeys(tokenFilter, cue.keys))
+			: travelling(cues, clock),
+	);
 	let hiddenIds = $derived(hiddenTokenIds(cues, clock));
 	let activeEdgeEnds = $derived(activeEdges(cues, clock));
 	let firingTransitions = $derived(busyTransitions(cues, clock));
@@ -124,8 +221,9 @@
 		stageOneEnds = {};
 	}
 
+	// Animate a change of the net drawn.
 	function play(change: Change) {
-		const layout = netLayout?.layout;
+		const layout = shownLayout?.layout;
 		if (!layout) return;
 		const now = performance.now();
 		const played = playChange(change, {
@@ -406,17 +504,168 @@
 	}
 
 	let selectedTransition = $derived(
-		selectedTransitionId && mirror
-			? mirror.topology.transitions.find(t => t.name === selectedTransitionId) ?? null
+		selectedTransitionId && shownMirror
+			? shownMirror.topology.transitions.find(t => t.name === selectedTransitionId) ?? null
 			: null
 	);
 	let selectedTransitionState = $derived(
-		selectedTransitionId && mirror ? mirror.transitions[selectedTransitionId] ?? null : null
+		selectedTransitionId && shownMirror ? shownMirror.transitions[selectedTransitionId] ?? null : null
 	);
 
+	// -- descending into a token's net, and back --
+
+	function clearOuterNote() {
+		if (outerNoteTimer) clearTimeout(outerNoteTimer);
+		outerNoteTimer = null;
+		outerNote = null;
+		if (touchTimer) clearTimeout(touchTimer);
+		touchTimer = null;
+	}
+
+	// Follow a tracker step: show its note, and if a touch now waits for a
+	// firing to claim it, settle it when the window runs out.
+	function noteTouch(tracked: { tracker: TouchTracker; note: string | null }) {
+		touch = tracked.tracker;
+		if (tracked.note && inner?.mirror) showOuterNote(tracked.note);
+		if (touch.pendingAt === null || touchTimer) return;
+		touchTimer = setTimeout(() => {
+			touchTimer = null;
+			noteTouch(settleTouches(touch, performance.now()));
+		}, TOUCH_CLAIM_MS + 20);
+	}
+
+	function showOuterNote(note: string) {
+		if (outerNoteTimer) clearTimeout(outerNoteTimer);
+		outerNote = note;
+		outerNoteTimer = setTimeout(() => {
+			outerNote = null;
+			outerNoteTimer = null;
+		}, OUTER_NOTE_MS);
+	}
+
+	function resetFilter() {
+		tokenFilter = NO_FILTER;
+		filterKey = '';
+	}
+
+	// The net drawn changed: what was travelling, selected or filtered
+	// belonged to the other one.
+	function switchedView() {
+		clearPlayback();
+		$selectedTokenId = null;
+		selectedTransitionId = null;
+		resetFilter();
+		injectPlaceName = '';
+	}
+
+	// Show one of a token's nets: its state is read, and the panel swaps to
+	// it once the answer is in.
+	function openInner(net: InnerNetRef) {
+		const netId = selectedNetId;
+		if (!netId || !mirror) return;
+		viewNotice = null;
+		if (inner?.nested_id === net.nested_id) return;
+		closeInner(null);
+		inner = openView(net, holderOf(mirror, net.nested_id)?.token.id ?? null);
+		innerLayout = null;
+		touch = NO_TOUCH;
+		refreshInnerState(netId, null);
+	}
+
+	// Stop showing the inner net; `notice` says why, when it went by itself.
+	function closeInner(notice: string | null) {
+		if (notice !== null) viewNotice = notice;
+		if (!inner) return;
+		const wasShown = !!inner.mirror;
+		inner = null;
+		innerLayout = null;
+		innerFetch = null;
+		touch = NO_TOUCH;
+		clearOuterNote();
+		if (refillTimers.inner) {
+			clearTimeout(refillTimers.inner);
+			refillTimers.inner = null;
+		}
+		if (wasShown) switchedView();
+	}
+
+	function ascend() {
+		viewNotice = null;
+		closeInner(null);
+	}
+
+	// A double click on a token opens the first net it holds.
+	function handleTokenOpen(tokenId: string) {
+		const token = shownMirror ? listedTokens(shownMirror).find((entry) => entry.token.id === tokenId)?.token : null;
+		if (!token?.nets?.length) return;
+		if (innerShown) {
+			viewNotice = 'Descending goes one level down for now.';
+			return;
+		}
+		openInner(token.nets[0]);
+	}
+
+	// One read of the inner net at a time; one asked for meanwhile is one
+	// more after it. `takenBy` names the outer firing that took the token
+	// holding the net, when the read asks whether the net survived it.
+	let innerFetch: { nestedId: string; again: boolean; takenBy: string | null } | null = null;
+
+	async function refreshInnerState(netId: string, takenBy: string | null) {
+		const view = inner;
+		if (!view) return;
+		if (innerFetch && innerFetch.nestedId === view.nested_id) {
+			innerFetch.again = true;
+			innerFetch.takenBy = innerFetch.takenBy ?? takenBy;
+			return;
+		}
+		const entry = { nestedId: view.nested_id, again: false, takenBy };
+		innerFetch = entry;
+		const current = () => selectedNetId === netId && inner?.nested_id === entry.nestedId && innerFetch === entry;
+		try {
+			do {
+				entry.again = false;
+				const asked = entry.takenBy;
+				entry.takenBy = null;
+				let state: NetState;
+				try {
+					state = await getExecutionState(netId, DEFAULT_TOKEN_LIMIT, { nested_id: entry.nestedId });
+				} catch (error) {
+					// A 404 `unknown_net` is the net gone; any other refusal
+					// closes the view too, saying why.
+					if (current()) closeInner(readFailedNotice(error, asked ?? entry.takenBy));
+					return;
+				}
+				if (!current() || !inner) return;
+				const wasShown = !!inner.mirror;
+				inner = adoptInnerState(inner, state, DEFAULT_TOKEN_LIMIT);
+				if (inner.mirror) innerLayout = layoutFor(inner.mirror.topology, innerLayout);
+				if (!wasShown && inner.mirror) switchedView();
+			} while (entry.again && current());
+		} finally {
+			if (innerFetch === entry) innerFetch = null;
+		}
+	}
+
+	// Ask the server for the values of a key when it is picked; the values
+	// of the tokens the page holds stand in where it cannot say.
+	async function pickFilterKey(key: string) {
+		filterKey = key;
+		const netId = selectedNetId;
+		if (!netId || !key) return;
+		const at = `${viewKey}|${key}`;
+		try {
+			const values = await distinctValues(netId, key, {}, shownAddress);
+			distinctAnswers = { ...distinctAnswers, [at]: values };
+		} catch (error) {
+			console.info('[nets page] no distinct values from the server; using the tokens held:', error);
+			distinctAnswers = { ...distinctAnswers, [at]: null };
+		}
+	}
+
+	// Switches act on the outer net only (protocol §12.3).
 	async function handleToggleTransition(name: string, enable: boolean) {
 		const netId = selectedNetId;
-		if (!netId || togglingTransition) return;
+		if (!netId || togglingTransition || innerShown) return;
 		togglingTransition = true;
 		toggleError = null;
 		try {
@@ -500,6 +749,7 @@
 		if (liveReadError?.netId === netId) liveReadError = null;
 		await Promise.all([
 			refreshGraphState(netId),
+			inner ? refreshInnerState(netId, null) : Promise.resolve(),
 			refreshHistory(netId, true),
 			// Seeded from the worker's rotating file so it survives
 			// subprocess and worker restarts.
@@ -514,6 +764,10 @@
 
 	// Forget the drawn net, its animation and its selection.
 	function dropMirror() {
+		closeInner(null);
+		viewNotice = null;
+		distinctAnswers = {};
+		resetFilter();
 		mirror = null;
 		clearPlayback();
 		stepAwaitingStream = false;
@@ -538,6 +792,8 @@
 		const previous = mirror;
 		const newGeneration = !previous || previous.generation !== state.generation;
 		if (newGeneration) {
+			// A new generation drops every inner net with the marking (§12.6).
+			if (previous) closeInner(inner ? reloadedNotice('reset') : null);
 			clearPlayback();
 			$selectedTokenId = null;
 		}
@@ -599,14 +855,26 @@
 
 	// A place whose drawn dots fell short of its count (its listed tokens
 	// were consumed, and what lies beyond the cap is not known here) is
-	// refilled by a state read, at most every two seconds.
-	let refillTimer: ReturnType<typeof setTimeout> | null = null;
-	function scheduleRefill() {
-		if (refillTimer) return;
-		refillTimer = setTimeout(() => {
-			refillTimer = null;
-			if (selectedNetId) refreshGraphState(selectedNetId);
+	// refilled by a state read, at most every two seconds; so is a token put
+	// into a place whose tokens may hold nets, whose `nets` only a read
+	// gives. The outer net and the inner net shown are refilled apart.
+	const refillTimers: Record<'outer' | 'inner', ReturnType<typeof setTimeout> | null> = { outer: null, inner: null };
+	function scheduleRefill(which: 'outer' | 'inner') {
+		if (refillTimers[which]) return;
+		refillTimers[which] = setTimeout(() => {
+			refillTimers[which] = null;
+			if (!selectedNetId) return;
+			if (which === 'outer') refreshGraphState(selectedNetId);
+			else refreshInnerState(selectedNetId, null);
 		}, 2000);
+	}
+
+	// Whether an applied change left a drawn place with fewer dots than it should have.
+	function drawnShort(next: Mirror, short: string[]): boolean {
+		return short.some((name) => {
+			const place = next.places[name];
+			return place.tokens.length < Math.min(place.count, TOKEN_DOT_MAX);
+		});
 	}
 
 	// The execution log: the whole log on a resync, then only what follows
@@ -876,11 +1144,16 @@
 			return;
 		}
 		isInjecting = true;
+		// Into the inner net shown, by its address (protocol §12.3).
+		const address = shownAddress;
+		const innerName = inner?.name;
 		try {
-			const result = await executionInject(selectedNetId, injectPlaceName, token);
-			// The token itself arrives on the stream as `added`, for every
-			// watcher alike.
-			injectNotice = `Injected token #${result.id} into ${injectPlaceName}.`;
+			const result = await executionInject(selectedNetId, injectPlaceName, token, address);
+			// The token itself arrives on the stream as `added` (inside
+			// `nested` for an inner net), for every watcher alike.
+			injectNotice = address
+				? `Injected token #${result.id} into ${injectPlaceName} in ${innerName || 'the inner net'}.`
+				: `Injected token #${result.id} into ${injectPlaceName}.`;
 		} catch (error) {
 			injectError = error instanceof Error ? error.message : 'Inject failed.';
 		} finally {
@@ -1325,6 +1598,14 @@
 		// Every protocol notification says whether the net is running.
 		if (typeof event.data?.running === 'boolean' && !isToggling) isRunning = event.data.running;
 
+		// An inner net's event moves no version of the outer net (§12.4).
+		if (event.kind === 'nested') {
+			handleNested(netId, event);
+			return;
+		}
+		// Which outer firing is under way, to name it when it reaches inside.
+		noteTouch(trackOuter(touch, event, performance.now()));
+
 		if (event.kind === 'execution_stopped') {
 			isRunning = false;
 			// Loud, legible stop: show error stops only. A normal end-of-run
@@ -1339,6 +1620,9 @@
 			}
 		}
 
+		// A reset or a load drops every inner net (§12.6).
+		if (event.kind === 'reloaded' && inner) closeInner(reloadedNotice(event.data?.reason));
+
 		if (!mirror) {
 			// Nothing to apply to: a read is under way or due.
 			if (event.kind === 'reloaded') refreshGraphState(netId);
@@ -1348,12 +1632,11 @@
 		switch (applied.outcome) {
 			case 'applied': {
 				mirror = applied.mirror;
-				play(applied.change);
-				const layoutShort = applied.short.some((name) => {
-					const place = applied.mirror.places[name];
-					return place.tokens.length < Math.min(place.count, TOKEN_DOT_MAX);
-				});
-				if (layoutShort) scheduleRefill();
+				if (!inner?.mirror) play(applied.change);
+				if (drawnShort(applied.mirror, applied.short) || needsNetsRead(applied.mirror, applied.change)) {
+					scheduleRefill('outer');
+				}
+				if (inner) followInner(netId, applied.change);
 				landed(netId, applied.change);
 				break;
 			}
@@ -1368,6 +1651,66 @@
 			case 'stale':
 			case 'ignored':
 				break;
+		}
+	}
+
+	// What an outer change means for the inner net shown: its token removed
+	// closes it; its token taken by a firing gets it asked after when that
+	// firing lands, since the common move puts it back (§12.6).
+	function followInner(netId: string, change: Change) {
+		if (!inner) return;
+		const fate = afterOuterChange(inner, change);
+		if (fate.fate === 'gone') {
+			closeInner(fate.notice);
+			return;
+		}
+		inner = fate.view;
+		if (fate.fate === 'ask') refreshInnerState(netId, fate.takenBy);
+	}
+
+	// A `nested` line: it moves the badge of the token holding its net, and
+	// when the page shows that net it is applied there under the inner net's
+	// own version, animated, and checked for an outer firing reaching in.
+	function handleNested(netId: string, event: NetEvent) {
+		const line = unwrapNested(event);
+		if (!line) return;
+		if (mirror) mirror = moveBadge(mirror, line);
+		const kind = line.event.kind;
+		if (kind === 'distributed' || kind === 'fired' || kind === 'failed') landedInside(netId, line);
+		// An inner net replaced wholesale: its holder's badge is read again.
+		if (kind === 'reloaded' && mirror && holderOf(mirror, line.nested_id)) scheduleRefill('outer');
+		const routed = routeNested(inner, line);
+		if (!routed) return;
+		inner = routed.view;
+		if (!inner.mirror) return;
+		noteTouch(trackInner(touch, line.event, performance.now()));
+		const outcome = routed.outcome;
+		switch (outcome.outcome) {
+			case 'applied':
+				play(outcome.change);
+				if (drawnShort(outcome.mirror, outcome.short)) scheduleRefill('inner');
+				break;
+			case 'gap':
+			case 'refetch':
+				refreshInnerState(netId, null);
+				break;
+		}
+	}
+
+	// A firing inside an inner net landed: the log, which holds every net's
+	// firings, has a new entry, and a step that outlasted the control
+	// plane's bound may have been this one.
+	function landedInside(netId: string, line: NestedLine) {
+		if (stepAwaitingStream && !anyInFlight(mirror)) {
+			stepAwaitingStream = false;
+			stepNotice = null;
+		}
+		refreshHistory(netId, false);
+		if (line.event.kind === 'failed') {
+			const where = line.path || 'an inner net';
+			stepError = `${line.event.data.transition} failed in ${where}: ${line.event.data.error}`;
+		} else {
+			stepError = null;
 		}
 	}
 
@@ -1396,10 +1739,11 @@
 			clearInterval(runningPollTimer);
 			runningPollTimer = null;
 		}
-		if (refillTimer) {
-			clearTimeout(refillTimer);
-			refillTimer = null;
+		for (const which of ['outer', 'inner'] as const) {
+			if (refillTimers[which]) clearTimeout(refillTimers[which]!);
+			refillTimers[which] = null;
 		}
+		clearOuterNote();
 		clearPlayback();
 	});
 
@@ -1715,6 +2059,9 @@
 				<button class={btnDefault} onclick={handleInject}
 					disabled={isInjecting || !injectPlaceName || !selectedNetId}>{isInjecting ? 'Injecting…' : 'Inject'}</button>
 			</div>
+			{#if innerShown && crumb}
+				<p class="text-xs" style="color: var(--status-text-info)" data-inject-inner>Into the inner net shown: {crumb}.</p>
+			{/if}
 			<p class="text-xs text-foreground-faint">
 				The net decodes the token into the place's type, strictly: a number
 				spelt as a string is refused. Only places whose tokens have a JSON form
@@ -1806,10 +2153,14 @@
 								<div class="flex-1 overflow-hidden flex flex-col">
 									<TokenInspector
 										netId={selectedNetId}
-										generation={mirror.generation}
+										generation={shownMirror?.generation ?? 0}
+										address={shownAddress}
 										places={mirrorPlaces}
 										selectedTokenId={$selectedTokenId}
 										onTokenSelect={handleTokenSelect}
+										filter={tokenFilter}
+										onOpenNet={innerShown ? null : openInner}
+										nestedNote={innerShown ? 'Deeper levels come later: the page goes one level down for now.' : null}
 									/>
 								</div>
 							{/if}
@@ -1854,26 +2205,97 @@
 			{/if}
 
 			<!-- Graph Panel -->
-			<div class="flex-1 p-4 overflow-hidden flex">
-				<svelte:boundary onerror={(error) => panelFailed('graph', error)}>
-					<GraphPanel
-						graph={drawnNet}
-						layout={netLayout?.layout ?? null}
-						tokens={drawnTokens}
-						hiddenTokenIds={hiddenIds}
-						travelling={travellingCues}
-						activeEdges={activeEdgeEnds}
-						{firingTransitions}
-						{failingTransitions}
-						selectedTokenId={$selectedTokenId}
-						onTokenSelect={handleTokenSelect}
-						{selectedTransitionId}
-						onTransitionSelect={handleTransitionSelect}
-					/>
-					{#snippet failed(error, reset)}
-						<PanelFailed name="graph" {error} onReset={reset} />
-					{/snippet}
-				</svelte:boundary>
+			<div class="flex-1 p-4 overflow-hidden flex flex-col gap-2 min-w-0">
+				{#if inner}
+					<!-- The inner net shown in place of the outer one: where it
+					     is, kept current as its token moves, and the way back. -->
+					<div class="flex items-center gap-3 text-sm flex-wrap" data-inner-bar>
+						<button class={btnSmall} onclick={ascend} title="Back to the outer net">Up</button>
+						<span class="font-mono text-foreground" data-breadcrumb>{crumb}</span>
+						{#if !inner.mirror}
+							<span class="text-xs text-foreground-faint">opening…</span>
+						{/if}
+						<span class="text-xs text-foreground-faint">Step, start, stop, reset and the switches drive the outer net.</span>
+					</div>
+				{/if}
+				<!-- The colours below read the theme's variables directly: the
+				     Tailwind colour tokens resolve at :root, where the theme's
+				     variables (set on body) are not defined. -->
+				{#if outerNote}
+					<!-- An outer firing that reached into the inner net shown. -->
+					<div class="text-xs font-mono font-bold" style="color: var(--status-text-info)" data-outer-note>{outerNote}</div>
+				{/if}
+				{#if viewNotice}
+					<div class="flex items-center gap-2 text-xs px-3 py-1 rounded"
+						style="background: var(--status-bg-warning); color: var(--status-text-warning)" data-view-notice>
+						<span>{viewNotice}</span>
+						<button type="button" class="bg-transparent border-0 cursor-pointer text-foreground-faint hover:text-foreground"
+							onclick={() => (viewNotice = null)} title="Dismiss">✕</button>
+					</div>
+				{/if}
+				{#if filterKeys.length > 0}
+					<!-- The token filter: AND across keys, OR within one, on this view only. -->
+					<div class="flex items-center gap-2 flex-wrap text-xs" data-filter-bar>
+						<label class="flex items-center gap-1 text-foreground-muted">
+							Filter by
+							<select value={filterKey} onchange={(e) => pickFilterKey((e.target as HTMLSelectElement).value)}
+								data-filter-key
+								class="px-2 py-1 border border-border rounded bg-card text-foreground text-xs cursor-pointer">
+								<option value="">key…</option>
+								{#each filterKeys as key (key)}
+									<option value={key}>{key}</option>
+								{/each}
+							</select>
+						</label>
+						{#each filterValues as value (JSON.stringify(value))}
+							{@const on = isOn(tokenFilter, filterKey, value)}
+							<button type="button" aria-pressed={on} data-filter-value={valueText(value)}
+								onclick={() => (tokenFilter = toggleValue(tokenFilter, filterKey, value))}
+								class="px-2 py-0.5 rounded border cursor-pointer"
+								style={on
+									? 'background: var(--button-border); border-color: var(--button-border); color: var(--button-hover-text)'
+									: 'background: var(--bg-secondary); border-color: var(--border-color); color: var(--text-primary)'}
+							>{valueText(value)}</button>
+						{/each}
+						{#each clausesOf(tokenFilter).filter((clause) => clause.key !== filterKey) as clause (clause.key)}
+							<span class="px-2 py-0.5 rounded" style="background: var(--bg-tertiary); color: var(--text-secondary)"
+								data-filter-clause={clause.key}>
+								{clause.key} in {clause.values.map(valueText).join(', ')}
+							</span>
+						{/each}
+					</div>
+				{/if}
+				{#if filterTally}
+					<!-- Hidden is not absent: say how much the filter hides. -->
+					<div class="flex items-center gap-2 px-3 py-1 rounded text-xs"
+						style="background: var(--status-bg-warning); color: var(--status-text-warning)" data-filter-banner>
+						<span data-filter-banner-text>{bannerText(filterTally)}</span>
+						<button type="button" class="underline cursor-pointer bg-transparent border-0 text-xs"
+							style="color: inherit" onclick={() => (tokenFilter = NO_FILTER)}>Clear</button>
+					</div>
+				{/if}
+				<div class="flex-1 overflow-hidden flex min-h-0">
+					<svelte:boundary onerror={(error) => panelFailed('graph', error)}>
+						<GraphPanel
+							graph={drawnNet}
+							layout={shownLayout?.layout ?? null}
+							tokens={drawnTokens}
+							hiddenTokenIds={hiddenIds}
+							travelling={travellingCues}
+							activeEdges={activeEdgeEnds}
+							{firingTransitions}
+							{failingTransitions}
+							selectedTokenId={$selectedTokenId}
+							onTokenSelect={handleTokenSelect}
+							onTokenOpen={handleTokenOpen}
+							{selectedTransitionId}
+							onTransitionSelect={handleTransitionSelect}
+						/>
+						{#snippet failed(error, reset)}
+							<PanelFailed name="graph" {error} onReset={reset} />
+						{/snippet}
+					</svelte:boundary>
+				</div>
 			</div>
 
 			<!-- Right sidebar: Transition Inspector -->
@@ -1897,11 +2319,12 @@
 							<TransitionInspector
 								transition={selectedTransition}
 								state={selectedTransitionState}
-								topology={mirror.topology}
-								onEnable={(name) => handleToggleTransition(name, true)}
-								onDisable={(name) => handleToggleTransition(name, false)}
+								topology={shownMirror?.topology ?? null}
+								onEnable={innerShown ? null : (name) => handleToggleTransition(name, true)}
+								onDisable={innerShown ? null : (name) => handleToggleTransition(name, false)}
 								toggling={togglingTransition}
 								{toggleError}
+								note={innerShown ? 'Switches act on the outer net only; an inner net sets its own.' : null}
 							/>
 						</div>
 					</div>

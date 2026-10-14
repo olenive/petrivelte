@@ -59,6 +59,64 @@ describe('netView', () => {
 		]);
 		expect(drawTokens(mirror, layout)).toHaveLength(20);
 	});
+
+	it('draws no matching count and no badge while there is nothing to say', () => {
+		expect(drawNet(mirror, layout).places.every((p) => p.matching === null)).toBe(true);
+		expect(drawTokens(mirror, layout).every((t) => t.badge === null)).toBe(true);
+	});
+});
+
+describe('netView with keys and inner nets', () => {
+	const keyed: NetState = {
+		...state,
+		topology: {
+			...state.topology,
+			places: [
+				{ name: 'In', type_name: 'Animal', serializable: true, key_names: ['class'] },
+				{ name: 'Cfg', type_name: 'Cfg', serializable: false },
+				{ name: 'Out', type_name: 'Bus', serializable: true, nested: true },
+			],
+		},
+		marking: {
+			places: {
+				In: {
+					count: 4,
+					tokens: [
+						{ id: '1', label: 'Hen', keys: { class: 'Bird' } },
+						{ id: '2', label: 'Dog', keys: { class: 'Mammal' } },
+						{ id: '3', label: 'Owl', keys: { class: 'Bird' } },
+					],
+				},
+				Out: {
+					count: 2,
+					tokens: [
+						{ id: '4', label: 'Bus', nets: [{ name: 'cabin', nested_id: 'n1', path: 'n/Out/#4/cabin', count: 3 }] },
+						{ id: '5', label: 'Van', nets: [{ name: 'cabin', nested_id: 'n2', path: 'n/Out/#5/cabin', count: 140 }] },
+					],
+				},
+			},
+		},
+	};
+	const mirror = mirrorFromState(keyed);
+	const { layout } = layoutFor(mirror.topology, null);
+
+	it('badges a token that holds nets with their total count', () => {
+		const badges = Object.fromEntries(drawTokens(mirror, layout).map((t) => [t.id, t.badge]));
+		expect(badges).toEqual({ '1': null, '2': null, '3': null, '4': '3', '5': '99+' });
+	});
+
+	it('leaves out the tokens the filter hides, keeping the slots of the rest', () => {
+		const all = drawTokens(mirror, layout);
+		const birds = drawTokens(mirror, layout, { class: ['Bird'] });
+		expect(birds.map((t) => t.id)).toEqual(['1', '3']);
+		// The owl stays in its own slot, where the animation finds it.
+		expect(birds[1]).toMatchObject({ x: all[2].x, y: all[2].y });
+	});
+
+	it('reads matching of count on every place under a filter', () => {
+		const places = Object.fromEntries(drawNet(mirror, layout, { class: ['Bird'] }).places.map((p) => [p.name, p.matching]));
+		expect(places).toEqual({ In: '2+ of 4', Cfg: '0 of 0', Out: '0 of 2' });
+	});
 });
 
 describe('transitionDetail', () => {

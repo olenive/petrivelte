@@ -23,9 +23,20 @@
  * behaviour: `fireable` moves no version, `failed` with `restored` puts the
  * tokens back at the front of their places, a launched firing's tokens are
  * kept by transition so a restore brings back their labels.
+ *
+ * Keys and nets (protocol §12, §13). A token keeps the `keys` and `nets` its
+ * last entry carried: a produced entry's fifth element, an `added` and a
+ * `mutated` bring keys as they stand after the change; `nets` come only with
+ * full entries (a state read), so a token a firing put down has none until
+ * the next read. `hidden` (a projection's stand-in for a token it hides)
+ * moves the version and, for `added` and `removed`, the place's count, and
+ * nothing else. `nested` is not this mirror's: an inner net's events move
+ * the inner net's own version, never the outer one, and are routed to an
+ * inner mirror by `innerNets.ts`.
  */
 
 import type {
+	Keys,
 	MarkingToken,
 	NetEvent,
 	NetState,
@@ -45,6 +56,12 @@ export interface MirrorPlace {
 	name: string;
 	type_name?: string;
 	serializable: boolean;
+	/** Its tokens may hold nets (§12.2). */
+	nested?: boolean;
+	/** Its inner nets are stepped only by an outer body. */
+	passive?: boolean;
+	/** The keys it derives from its tokens, in declaration order (§13.1). */
+	key_names?: string[];
 	/** The true number of tokens. */
 	count: number;
 	/** The tokens the mirror knows, oldest first; at most `tokenLimit`. */
@@ -93,6 +110,7 @@ export type Change =
 	| { kind: 'added'; token: Moved }
 	| { kind: 'removed'; token: Moved }
 	| { kind: 'mutated'; place: string; id: string }
+	| { kind: 'hidden'; place: string; what: 'added' | 'removed' | 'mutated' }
 	| { kind: 'toggled'; transition: string; enabled: boolean }
 	| { kind: 'param_changed' }
 	| { kind: 'fireable' }
@@ -128,6 +146,9 @@ export function mirrorFromState(state: NetState, tokenLimit = DEFAULT_TOKEN_LIMI
 					name: place.name,
 					type_name: place.type_name,
 					serializable: place.serializable === true,
+					...(place.nested === true ? { nested: true } : {}),
+					...(place.passive === true ? { passive: true } : {}),
+					...(Array.isArray(place.key_names) ? { key_names: place.key_names } : {}),
 					count: held?.count ?? held?.tokens?.length ?? 0,
 					tokens: held?.tokens ?? [],
 				},
@@ -197,6 +218,10 @@ export function applyEvent(mirror: Mirror, event: NetEvent): ApplyOutcome {
 				change: { kind: 'stopped' },
 				short: [],
 			};
+		case 'nested':
+			// An inner net's event: it moves no version of this net and is
+			// never a gap here (§7.2, §12.3). `innerNets.ts` routes it.
+			return { outcome: 'ignored' };
 		default:
 			return { outcome: 'ignored' };
 	}
@@ -245,6 +270,7 @@ function unknownName(mirror: Mirror, event: StateEvent): string | null {
 		case 'added':
 		case 'removed':
 		case 'mutated':
+		case 'hidden':
 			places.push(event.data.place);
 			break;
 		case 'toggled':
@@ -281,6 +307,7 @@ class Draft {
 	private transitions: Record<string, TransitionState>;
 	private airborne: Record<string, Airborne[]>;
 	private progress: Progress;
+	private readonly copied = new Set<string>();
 	readonly touched = new Set<string>();
 
 	constructor(private readonly base: Mirror) {
@@ -291,10 +318,22 @@ class Draft {
 	}
 
 	place(name: string): MirrorPlace {
-		if (!this.touched.has(name)) {
+		this.touched.add(name);
+		return this.copy(name);
+	}
+
+	/** Move a place's count alone, as `hidden` does: the list is not
+	 *  touched, so the place is not reported short for it. */
+	recount(name: string, delta: number) {
+		const place = this.copy(name);
+		place.count = Math.max(0, place.count + delta);
+	}
+
+	private copy(name: string): MirrorPlace {
+		if (!this.copied.has(name)) {
 			const place = this.places[name];
 			this.places[name] = { ...place, tokens: [...place.tokens] };
-			this.touched.add(name);
+			this.copied.add(name);
 		}
 		return this.places[name];
 	}
@@ -380,11 +419,26 @@ function slotted(draft: Draft, tokens: Array<{ place: string; id: string; token:
 	});
 }
 
+/** A token as a notification describes it: a colour when one is given (a
+ *  produced entry writes `null` for none when keys follow), keys when the
+ *  place declares them. */
+function described(id: string, label: string, color: unknown, keys: unknown): MarkingToken {
+	return {
+		id,
+		label,
+		...(typeof color === 'string' && color ? { color } : {}),
+		...(isKeys(keys) ? { keys } : {}),
+	};
+}
+
+/** Keys as the wire may carry them: an object of strings, numbers and
+ *  booleans. Anything else is read as no keys. */
+function isKeys(value: unknown): value is Keys {
+	return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
 function producedTokens(list: ProducedToken[]): Array<{ place: string; token: MarkingToken }> {
-	return list.map(([place, id, label, color]) => ({
-		place,
-		token: color ? { id, label, color } : { id, label },
-	}));
+	return list.map(([place, id, label, color, keys]) => ({ place, token: described(id, label, color, keys) }));
 }
 
 function putAll(draft: Draft, list: ProducedToken[]): Moved[] {
@@ -468,8 +522,8 @@ function translate(draft: Draft, event: StateEvent): Change {
 			return { kind: 'failed', transition, error: String(error ?? ''), restored: restored === true, consumed };
 		}
 		case 'added': {
-			const { place, id, label, color } = event.data;
-			const token: MarkingToken = color ? { id, label, color } : { id, label };
+			const { place, id, label, color, keys } = event.data;
+			const token = described(id, label, color, keys);
 			putBack(draft, place, token);
 			const [moved] = slotted(draft, [{ place, id, token }]);
 			return { kind: 'added', token: moved };
@@ -479,12 +533,22 @@ function translate(draft: Draft, event: StateEvent): Change {
 			return { kind: 'removed', token: moved };
 		}
 		case 'mutated': {
-			const { place, id, label } = event.data;
-			if (typeof label === 'string') {
+			const { place, id, label, keys } = event.data;
+			const patch: Partial<MarkingToken> = {
+				...(typeof label === 'string' ? { label } : {}),
+				...(isKeys(keys) ? { keys } : {}),
+			};
+			if (Object.keys(patch).length > 0) {
 				const record = draft.place(place);
-				record.tokens = record.tokens.map((token) => (token.id === id ? { ...token, label } : token));
+				record.tokens = record.tokens.map((token) => (token.id === id ? { ...token, ...patch } : token));
 			}
 			return { kind: 'mutated', place, id };
+		}
+		case 'hidden': {
+			const { place, kind } = event.data;
+			if (kind === 'added') draft.recount(place, 1);
+			if (kind === 'removed') draft.recount(place, -1);
+			return { kind: 'hidden', place, what: kind };
 		}
 		case 'toggled': {
 			const { transition, enabled } = event.data;

@@ -103,6 +103,9 @@ body.light-theme {
 	--button-hover-text: white;
 	--token-selection-color: #0066cc;
 	--token-selection-glow: rgba(0, 102, 204, 0.5);
+	/* The badge of a token that holds nets: the total count of its nets. */
+	--token-badge-fill: #fd7e14;
+	--token-badge-text: #ffffff;
 	--status-ready: #28a745;
 	--status-stopped: #6c757d;
 	--status-error: #dc3545;
@@ -151,6 +154,8 @@ body.dark-theme {
 	--button-hover-text: #0f0f0f;
 	--token-selection-color: #4d9fff;
 	--token-selection-glow: rgba(77, 159, 255, 0.6);
+	--token-badge-fill: #fd7e14;
+	--token-badge-text: #0f0f0f;
 	--status-ready: #28a745;
 	--status-stopped: #6c757d;
 	--status-error: #dc3545;

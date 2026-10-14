@@ -9,6 +9,11 @@
 	export let animating = false;
 	export let isSelected = false;
 	export let onSelect: ((id: string) => void) | null = null;
+	/** For a token that holds nets: their total count, as its badge reads it
+	 *  (the graph panel draws the badge, above the place labels). */
+	export let badge: string | null = null;
+	/** A double click: open the net the token holds. */
+	export let onOpen: ((id: string) => void) | null = null;
 
 	const tweenedX = tweened(x, { duration: 500, easing: cubicInOut });
 	const tweenedY = tweened(y, { duration: 500, easing: cubicInOut });
@@ -27,6 +32,11 @@
 			onSelect(id);
 		}
 	}
+
+	function handleDoubleClick(event: MouseEvent) {
+		event.stopPropagation();
+		onOpen?.(id);
+	}
 </script>
 
 <circle
@@ -40,7 +50,9 @@
 	class:animating
 	class:selected={isSelected}
 	data-token-id={id}
+	data-holds-nets={badge !== null ? 'true' : undefined}
 	on:click={handleClick}
+	on:dblclick={handleDoubleClick}
 	role="button"
 	tabindex="0"
 	on:keydown={(e) => e.key === 'Enter' && handleClick(e as unknown as MouseEvent)}
