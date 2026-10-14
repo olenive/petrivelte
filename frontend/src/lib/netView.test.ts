@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { NetState } from './types';
+import type { EdgeKind, NetState, TopologyEdge } from './types';
 import { mirrorFromState } from './netMirror';
 import { layoutFor } from './graphLayout';
-import { drawNet, drawTokens, edgeStroke, transitionLook } from './netView';
+import { drawNet, drawTokens, edgeHead, edgeStroke, transitionLook } from './netView';
 import { detailRows, transitionArcs } from './transitionDetail';
 
 const state: NetState = {
@@ -40,7 +40,33 @@ describe('netView', () => {
 		const { edges } = drawNet(mirror, layout);
 		expect(new Set(edges.map((e) => e.key)).size).toBe(5);
 		expect(edges.map((e) => e.stroke)).toEqual(['solid', 'dashed', 'dotted', 'solid', 'solid']);
+		expect(edges.every((e) => e.head === 'filled')).toBe(true);
 		expect(edges[3]).toMatchObject({ fromShape: 'transition', toShape: 'place', direction: 'out' });
+	});
+
+	it('strokes and heads each input kind, the two that accept an empty place hollow, and an unknown kind plain', () => {
+		const input = (kind?: string): TopologyEdge => ({ place: 'a', transition: 'b', direction: 'in', kind });
+		const look = (kind?: string) => [edgeStroke(input(kind)), edgeHead(input(kind))];
+		const kinds: EdgeKind[] = ['take', 'take_all', 'snapshot', 'mutate', 'take_where', 'mutate_where', 'drain', 'survey'];
+		expect(Object.fromEntries(kinds.map((kind) => [kind, look(kind)]))).toEqual({
+			take: ['solid', 'filled'],
+			take_all: ['solid', 'filled'],
+			snapshot: ['dashed', 'filled'],
+			mutate: ['dotted', 'filled'],
+			take_where: ['solid', 'filled'],
+			// A mutate edge with a filter, a read edge as mutate is.
+			mutate_where: ['dotted', 'filled'],
+			// A drain consumes as take_all does, a survey reads as snapshot
+			// does; the hollow head is what tells them apart.
+			drain: ['solid', 'hollow'],
+			survey: ['dashed', 'hollow'],
+		});
+		// A kind the page does not know, or none, draws as a plain edge (§5.1).
+		expect(look('drain_where')).toEqual(['solid', 'filled']);
+		expect(look(undefined)).toEqual(['solid', 'filled']);
+		// Only an input edge has a kind to draw by.
+		const output: TopologyEdge = { place: 'a', transition: 'b', direction: 'out', kind: 'survey' };
+		expect([edgeStroke(output), edgeHead(output)]).toEqual(['solid', 'filled']);
 	});
 
 	it('styles transitions from their state', () => {
@@ -119,6 +145,51 @@ describe('netView with keys and inner nets', () => {
 	});
 });
 
+// The shop of protocol §11: Price Order surveys Promotions, Close Day drains it.
+const shop: NetState = {
+	...state,
+	net: 'shop',
+	topology: {
+		places: ['Orders', 'Promotions', 'Day End', 'Priced', 'Discounts Applied', 'Expired'].map((name) => ({
+			name,
+			type_name: 'str',
+			serializable: true,
+		})),
+		transitions: [{ name: 'Price Order' }, { name: 'Close Day' }],
+		edges: [
+			{ place: 'Orders', transition: 'Price Order', direction: 'in', kind: 'take' },
+			{ place: 'Promotions', transition: 'Price Order', direction: 'in', kind: 'survey' },
+			{ place: 'Priced', transition: 'Price Order', direction: 'out', slot: 0 },
+			{ place: 'Discounts Applied', transition: 'Price Order', direction: 'out', slot: 1 },
+			{ place: 'Day End', transition: 'Close Day', direction: 'in', kind: 'take' },
+			{ place: 'Promotions', transition: 'Close Day', direction: 'in', kind: 'drain' },
+			{ place: 'Expired', transition: 'Close Day', direction: 'out' },
+		],
+	},
+	transitions: {
+		'Price Order': { enabled: true, fireable: false, in_flight: false },
+		'Close Day': { enabled: true, fireable: false, in_flight: false },
+	},
+	marking: { places: {} },
+};
+
+describe('netView with edges on empty places', () => {
+	const mirror = mirrorFromState(shop);
+	const { layout } = layoutFor(mirror.topology, null);
+
+	it('draws the survey dashed and the drain solid, both with a hollow head', () => {
+		expect(drawNet(mirror, layout).edges.map((e) => [e.key, e.stroke, e.head])).toEqual([
+			['in|Orders|Price Order|take|', 'solid', 'filled'],
+			['in|Promotions|Price Order|survey|', 'dashed', 'hollow'],
+			['out|Priced|Price Order||0', 'solid', 'filled'],
+			['out|Discounts Applied|Price Order||1', 'solid', 'filled'],
+			['in|Day End|Close Day|take|', 'solid', 'filled'],
+			['in|Promotions|Close Day|drain|', 'solid', 'hollow'],
+			['out|Expired|Close Day||', 'solid', 'filled'],
+		]);
+	});
+});
+
 describe('transitionDetail', () => {
 	it('shows detail as rows, strings plainly and the rest as JSON', () => {
 		expect(detailRows({ function_name: 'go', params: ['u32', 'Parcel'], detachable: true })).toEqual([
@@ -141,5 +212,16 @@ describe('transitionDetail', () => {
 				{ place: 'Out', note: 'slot 1' },
 			],
 		});
+	});
+
+	it('says in a phrase what a drain and a survey do', () => {
+		expect(transitionArcs(shop.topology, 'Price Order').inputs).toEqual([
+			{ place: 'Orders', note: '' },
+			{ place: 'Promotions', note: 'survey: copies every token, zero or more' },
+		]);
+		expect(transitionArcs(shop.topology, 'Close Day').inputs).toEqual([
+			{ place: 'Day End', note: '' },
+			{ place: 'Promotions', note: 'drain: takes every token, zero or more' },
+		]);
 	});
 });

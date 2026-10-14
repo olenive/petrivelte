@@ -40,9 +40,17 @@ export interface DrawnTransition {
 	look: TransitionLook;
 }
 
-/** An edge's stroke: read edges are drawn dashed (`snapshot`) and dotted
- *  (`mutate`), as the Bevy and Graphviz renderers draw them. */
+/** An edge's stroke: read edges are drawn dashed (`snapshot`, `survey`) and
+ *  dotted (`mutate`, `mutate_where`), as the Bevy and Graphviz renderers
+ *  draw `snapshot` and `mutate`; a `mutate_where` is a mutate edge with a
+ *  filter, so it is dotted too. */
 export type EdgeStroke = 'solid' | 'dashed' | 'dotted';
+
+/** An edge's arrowhead: hollow for an input edge that accepts an empty
+ *  place (`drain`, `survey`), so that it reads apart from `take_all` and
+ *  `snapshot`, as the Bevy and Graphviz renderers draw it; filled for the
+ *  rest. Chosen apart from the stroke. */
+export type EdgeHead = 'filled' | 'hollow';
 
 export interface DrawnEdge {
 	/** Unique per edge: its endpoints, direction, kind and slot. */
@@ -51,6 +59,7 @@ export interface DrawnEdge {
 	ends: string;
 	direction: 'in' | 'out';
 	stroke: EdgeStroke;
+	head: EdgeHead;
 	from: Point;
 	to: Point;
 	fromShape: 'place' | 'transition';
@@ -83,9 +92,15 @@ export function edgeKey(edge: TopologyEdge): string {
 
 export function edgeStroke(edge: TopologyEdge): EdgeStroke {
 	if (edge.direction !== 'in') return 'solid';
-	if (edge.kind === 'snapshot') return 'dashed';
-	if (edge.kind === 'mutate') return 'dotted';
+	if (edge.kind === 'snapshot' || edge.kind === 'survey') return 'dashed';
+	if (edge.kind === 'mutate' || edge.kind === 'mutate_where') return 'dotted';
 	return 'solid';
+}
+
+export function edgeHead(edge: TopologyEdge): EdgeHead {
+	if (edge.direction !== 'in') return 'filled';
+	if (edge.kind === 'drain' || edge.kind === 'survey') return 'hollow';
+	return 'filled';
 }
 
 export function transitionLook(state: TransitionState | undefined): TransitionLook {
@@ -155,6 +170,7 @@ export function drawNet(mirror: Mirror, layout: NetLayout, filter: TokenFilter =
 				ends: edgeEnds(edge.direction, edge.place, edge.transition),
 				direction: edge.direction,
 				stroke: edgeStroke(edge),
+				head: edgeHead(edge),
 				from: inward ? place : transition,
 				to: inward ? transition : place,
 				fromShape: inward ? ('place' as const) : ('transition' as const),

@@ -277,3 +277,87 @@ by a double click, steps the outer net while the inner net animates, falls
 back when the token is consumed and when it is removed, and filters a keyed
 net. The fake control plane (`tests/ui/fake_cp.py`) grew the addressed
 routes, `query`, `distinct`, inner nets and the `nested` stream.
+
+## Edges on empty places in the page (2026-10-14)
+
+**Status:** Implemented 2026-10-14 on branch `drain-survey-edges`. Protocol
+§5.1 (the `drain` and `survey` kinds) and §11 (the `shop` net). The design
+is petritype-rs `dev-docs/EDGES_ON_EMPTY_PLACES.md`, whose R7 and D5 the
+Bevy viewer built the same day.
+
+### What the wire gives the page
+
+An input edge's `kind` may now be `drain` or `survey`. Both read every token
+of their place, zero or more, and never hold the transition back: a drain
+takes the tokens, and a survey hands the body a copy of them. A drain's
+`consumed` may list nothing from its place. Nothing else on the wire
+changes. The page reads `fireable` rather than judging it, so only the
+types and the drawing change.
+
+### Decisions
+
+- **The stroke of the nearest old kind.** A survey is a read edge and is
+  drawn dashed, as `snapshot` is. A drain consumes and is drawn solid, as
+  `take_all` is. The Bevy viewer colours a read edge, but this page draws
+  every input edge in one colour and tells read edges apart by their
+  dashes, so the dash is how the page says "read" (`edgeStroke` in
+  `netView.ts`).
+- **A hollow arrowhead** (D5) marks an input edge whose kind accepts an
+  empty place. It is chosen apart from the stroke, by `edgeHead` beside
+  `edgeStroke`, and drawn with the marker `arrowhead-input-hollow` beside
+  the others in `GraphPanel.svelte`. Its outline is the input edge's colour.
+  Its inside is the graph's background (`--graph-bg`), not left empty: an
+  SVG marker sits over the end of its line, so an empty head would show the
+  line running through it to the tip. The Bevy viewer avoids that by
+  stopping the line at the head's base. Here, filling with the background
+  hides the line without changing the edge's geometry, and both themes
+  define `--graph-bg`. The outline is inset by half its stroke, so its tip
+  sits where a filled head's tip does. Markers do not inherit the edge's
+  dashes, so a dashed survey still has a whole head.
+- **The inspector names what they do.** The transition inspector's input
+  rows give the two kinds a phrase: `drain: takes every token, zero or
+  more` and `survey: copies every token, zero or more`. The other kinds go
+  by their names, as before. The page has no legend and no edge tooltips,
+  so that row is the one place where it lists kinds. It shows when the
+  transition carries no `detail`.
+- **`mutate_where` is dotted now**, as `mutate` is. It is a mutate edge with
+  a filter, so it is a read edge too. Until this slice it was drawn solid,
+  because the stroke rule only knew `mutate`. `take_where` stays solid, as a
+  take does.
+- A kind the page does not know still draws as a plain edge, solid with a
+  filled head.
+
+### Tests
+
+Vitest, in `netView.test.ts`:
+- the stroke and the head of each of the eight kinds, `mutate_where`
+  dotted;
+- an unknown kind, and an edge with no kind, drawn plain;
+- an output edge never hollow;
+- the shop drawn through `drawNet`;
+- the inspector's two phrases.
+
+The fake control plane's firing rule (`tests/ui/fake_cp.py`) now knows the
+two kinds. A survey edge takes nothing and does not hold its transition
+back, and its place's tokens are handed over as copies. A drain edge takes
+every token of its place, zero or more, and does not hold its transition
+back either. `bodies` lets a test give a transition a body of its own,
+from what each input handed over to the tokens it produces.
+
+The browser suite's
+`test_net_protocol.py::test_the_shop_draws_drain_and_survey_edges_and_prices_orders`
+seeds the shop's topology, empty as §11 seeds it, and gives `Price Order`
+the shop's body. It checks:
+- each edge's stroke, head and `marker-end`;
+- the hollow head's fill against the graph's background, and its outline
+  against the filled input head;
+- the inspector's row for `Close Day`.
+
+It then drives the first two firings of the design's §2 script, with the
+fake's `inject` and the page's **Step**:
+- An order alone makes `Price Order` fireable, though `Promotions` is
+  empty. It fires: the log reads `Orders #1 → Priced #2`, and nothing
+  goes into `Discounts Applied`.
+- Two promotions make nothing fireable. A second order is priced with both:
+  the log lists only the order as consumed, `Promotions` keeps its two
+  tokens, and the token inspector shows the two discounts, oldest first.

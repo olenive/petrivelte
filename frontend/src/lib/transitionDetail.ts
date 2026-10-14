@@ -20,9 +20,20 @@ function plain(value: unknown): string {
 
 export interface Arc {
 	place: string;
-	/** `take`, `take_all`, `snapshot` or `mutate` for an input; the slot for
-	 *  an output of a transition with several. */
+	/** An input's kind unless it is a plain `take`, with a short phrase for
+	 *  the kinds that accept an empty place; the slot for an output of a
+	 *  transition with several. */
 	note: string;
+}
+
+/** An input edge's note: the kind by name, and for `drain` and `survey`,
+ *  which read every token of their place and never hold the transition
+ *  back (§5.1), what they do with them. */
+function inputNote(kind: string | undefined): string {
+	if (!kind || kind === 'take') return '';
+	if (kind === 'drain') return 'drain: takes every token, zero or more';
+	if (kind === 'survey') return 'survey: copies every token, zero or more';
+	return kind;
 }
 
 /** A transition's input and output places, in topology order. */
@@ -31,7 +42,7 @@ export function transitionArcs(topology: Topology | null, transition: string): {
 	return {
 		inputs: edges
 			.filter((edge) => edge.direction === 'in')
-			.map((edge) => ({ place: edge.place, note: edge.kind && edge.kind !== 'take' ? edge.kind : '' })),
+			.map((edge) => ({ place: edge.place, note: inputNote(edge.kind) })),
 		outputs: edges
 			.filter((edge) => edge.direction === 'out')
 			.map((edge) => ({ place: edge.place, note: edge.slot !== undefined ? `slot ${edge.slot}` : '' })),

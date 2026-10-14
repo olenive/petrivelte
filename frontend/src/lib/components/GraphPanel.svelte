@@ -182,6 +182,22 @@
 			>
 				<path d="M0,0 L0,12 L12,6 z" class="arrowhead-input-path" />
 			</marker>
+			<!-- The hollow head of an input edge that accepts an empty place
+			     (`drain`, `survey`): an outline in the edge's colour, filled with
+			     the graph's background so the line does not show through, and
+			     inset by half its stroke so its tip sits where a filled head's
+			     does. Markers do not inherit the edge's dashes. -->
+			<marker
+				id="arrowhead-input-hollow"
+				viewBox="0 0 12 12"
+				markerWidth="8"
+				markerHeight="8"
+				refX="12"
+				refY="6"
+				orient="auto"
+			>
+				<path d="M0.75,0.75 L0.75,11.25 L11.25,6 z" class="arrowhead-input-hollow-path" />
+			</marker>
 			<marker
 				id="arrowhead-output"
 				viewBox="0 0 12 12"
@@ -216,6 +232,7 @@
 						toShape={edge.toShape}
 						direction={edge.direction}
 						stroke={edge.stroke}
+						head={edge.head}
 						isActive={activeEdges.has(edge.ends)}
 						isBack={edge.back}
 						config={layout?.config}
@@ -359,6 +376,14 @@
 
 	:global(.arrowhead-input-path) {
 		fill: var(--edge-input);
+	}
+
+	:global(.arrowhead-input-hollow-path) {
+		fill: var(--graph-bg);
+		stroke: var(--edge-input);
+		stroke-width: 1.5;
+		stroke-linejoin: round;
+		stroke-dasharray: none;
 	}
 
 	:global(.arrowhead-output-path) {

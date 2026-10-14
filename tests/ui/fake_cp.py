@@ -30,6 +30,15 @@ set. Refusals carry `{detail, reason}` with the protocol's code. A test can
 also move the net without the page asking, with `fire`, `inject` and
 `reset`.
 
+A firing takes the front token of each input place except a read edge's
+(`snapshot`, `mutate`, `survey`), and from a `drain` edge every token, zero
+or more (§5.1). It needs a token in every input place except a snapshot's,
+a drain's and a survey's: the last two never hold a transition back. It
+puts one token in each output place, labelled as the first token it took,
+unless `bodies` gives the transition a body: a function from what each
+input handed over (the tokens taken, or a survey's copy of every token) to
+the tokens produced.
+
 Inner nets and keys (PROTOCOL §12, §13), as the server's 2026-10-12 relay
 passes them: a token may hold inner nets (`seed_inner`), each with its own
 protocol state and version, listed on the token as `nets` with a path
@@ -63,6 +72,7 @@ import queue
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -96,6 +106,11 @@ class FakeControlPlane:
     initial_inner: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
     # Per net, transitions that reach inside: name to (holder place, inner place).
     boarding: dict[str, dict[str, tuple[str, str]]] = field(default_factory=dict)
+    # Per net, outer transitions with a body of their own: name to a function
+    # from what each input place handed over (`launch`) to the tokens the
+    # firing produces, as (place, label) in order.
+    bodies: dict[str, dict[str, Callable[[dict[str, list[dict[str, Any]]]], list[tuple[str, str]]]]] = (
+        field(default_factory=dict))
     # Report firings in one piece (`fired`, after the firing's other lines)
     # rather than as `launched` then `distributed`.
     one_piece_firings: bool = False
@@ -358,11 +373,18 @@ def _keys_for(state: dict[str, Any], place: str, value: Any) -> dict[str, Any] |
     return {name: source[name] for name in names if name in source}
 
 
+def _input_edges(state: dict[str, Any], transition: str) -> list[tuple[str, str | None]]:
+    """A transition's input places with their edges' kinds, in topology order."""
+    return [(e["place"], e.get("kind")) for e in state["topology"]["edges"]
+            if e["transition"] == transition and e["direction"] == "in"]
+
+
 def _inputs(state: dict[str, Any], transition: str) -> list[str]:
-    """The places a firing takes from: input edges that are not read edges."""
-    return [e["place"] for e in state["topology"]["edges"]
-            if e["transition"] == transition and e["direction"] == "in"
-            and e.get("kind") not in ("snapshot", "mutate")]
+    """The places a firing takes from: input edges that are not read edges.
+    A drain edge takes every token of its place, zero or more; the others
+    take the front one."""
+    return [place for place, kind in _input_edges(state, transition)
+            if kind not in ("snapshot", "mutate", "survey")]
 
 
 def _outputs(state: dict[str, Any], transition: str) -> list[str]:
@@ -373,12 +395,13 @@ def _outputs(state: dict[str, Any], transition: str) -> list[str]:
 def _can_fire(state: dict[str, Any], transition: str) -> bool:
     live = state["transitions"][transition]
     places = state["marking"]["places"]
-    inputs = _inputs(state, transition)
-    # A mutate edge hands over a token, so its place must hold one too.
-    held = [e["place"] for e in state["topology"]["edges"]
-            if e["transition"] == transition and e["direction"] == "in" and e.get("kind") == "mutate"]
-    return (live["enabled"] and not live["in_flight"] and bool(inputs)
-            and all(places[p]["count"] > 0 for p in inputs + held))
+    # A take needs a token in its place, and so does a mutate edge, which
+    # hands one over; a drain or a survey edge never holds the transition
+    # back (§5.2). A snapshot's place is not asked, as it never was here.
+    needed = [place for place, kind in _input_edges(state, transition)
+              if kind not in ("snapshot", "drain", "survey")]
+    return (live["enabled"] and not live["in_flight"] and bool(_inputs(state, transition))
+            and all(places[p]["count"] > 0 for p in needed))
 
 
 def _refresh_fireable(state: dict[str, Any]) -> bool:
@@ -436,11 +459,20 @@ def launch(cp: "FakeControlPlane", net_id: str, transition: str | None = None,
         if transition is None or not _can_fire(state, transition):
             return None
         places = state["marking"]["places"]
+        kinds = dict(_input_edges(state, transition))
         consumed = []
         for place in _inputs(state, transition):
-            token = places[place]["tokens"].pop(0)
-            places[place]["count"] -= 1
-            consumed.append((place, token))
+            held = places[place]
+            taken = list(held["tokens"]) if kinds[place] == "drain" else held["tokens"][:1]
+            del held["tokens"][:len(taken)]
+            held["count"] -= len(taken)
+            consumed.extend((place, token) for token in taken)
+        # What each input hands a body (`bodies`): the tokens taken from its
+        # place, or for a survey a copy of every token there, zero or more.
+        handed = {place: [token for source, token in consumed if source == place]
+                  for place in _inputs(state, transition)}
+        handed.update({place: copy.deepcopy(places[place]["tokens"])
+                       for place, kind in kinds.items() if kind == "survey"})
         state["transitions"][transition]["in_flight"] = True
         _refresh_fireable(state)
         if not cp.one_piece_firings:
@@ -448,7 +480,7 @@ def launch(cp: "FakeControlPlane", net_id: str, transition: str | None = None,
                 "transition": transition,
                 "consumed": [[place, token["id"]] for place, token in consumed]},
                 moves_version=True, nested_id=nested_id)
-        return {"transition": transition, "consumed": consumed, "started_at": STAMP,
+        return {"transition": transition, "consumed": consumed, "handed": handed, "started_at": STAMP,
                 "nested_id": nested_id}
 
 
@@ -484,6 +516,21 @@ def _wire(state: dict[str, Any], place: str, token: dict[str, Any]) -> list[Any]
     return [place, token["id"], token["label"], *([token["color"]] if token.get("color") else [])]
 
 
+def _produce(cp: "FakeControlPlane", net_id: str, state: dict[str, Any],
+             launched: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """What a firing puts out, as (place, the token it takes its label,
+    colour and keys from): the body's tokens for an outer transition that
+    has one (`bodies`), else one token in each output place copying the
+    first token taken."""
+    transition = launched["transition"]
+    body = cp.bodies.get(net_id, {}).get(transition) if launched.get("nested_id") is None else None
+    if body is not None:
+        return [(place, {"label": label}) for place, label in body(launched["handed"])]
+    consumed = launched["consumed"]
+    source = consumed[0][1] if consumed else {"label": transition}
+    return [(place, source) for place in _outputs(state, transition)]
+
+
 def land(cp: "FakeControlPlane", net_id: str, launched: dict[str, Any],
          duration_ms: float = 12.5) -> list[list[str]]:
     """Place a launched firing's outputs, publish `distributed`, log it."""
@@ -496,8 +543,7 @@ def land(cp: "FakeControlPlane", net_id: str, launched: dict[str, Any],
         if nested_id is None:
             _board(cp, net_id, transition, consumed)
         produced = []
-        for place in _outputs(state, transition):
-            source = consumed[0][1] if consumed else {"label": transition}
+        for place, source in _produce(cp, net_id, state, launched):
             token = {"id": _next_id(state), "label": source["label"]}
             if source.get("color"):
                 token["color"] = source["color"]

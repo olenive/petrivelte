@@ -40,8 +40,19 @@ export interface TopologyTransition {
 	detail?: Record<string, unknown>;
 }
 
-/** An input edge's kind. A reader meeting another value draws a plain edge. */
-export type EdgeKind = 'take' | 'take_all' | 'snapshot' | 'mutate' | 'take_where' | 'mutate_where';
+/** An input edge's kind. A reader meeting another value draws a plain edge.
+ *  `drain` and `survey` (since 2026-10-14) read every token of their place,
+ *  zero or more, the first consuming them and the second copying them, and
+ *  never hold their transition back (§5.1). */
+export type EdgeKind =
+	| 'take'
+	| 'take_all'
+	| 'snapshot'
+	| 'mutate'
+	| 'take_where'
+	| 'mutate_where'
+	| 'drain'
+	| 'survey';
 
 export interface TopologyEdge {
 	place: string;

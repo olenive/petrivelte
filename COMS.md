@@ -67,6 +67,16 @@ closes the page's view of it. `step`, `start`, `stop`, `reset`, `enable` and
 relay's per-client projection (`POST .../filter`, `?client=`) is not used by
 the page: its token filter is its own.
 
+An input edge's `topology.edges[].kind` is `take`, `take_all`, `snapshot`,
+`mutate`, `take_where` or `mutate_where`, and since 2026-10-14 `drain` or
+`survey` (protocol §5.1): these two read every token of their place, zero or
+more, a drain taking them and a survey copying them, and never hold the
+transition back. The page never judges fireability itself, it reads
+`fireable`, so nothing else changed. It draws `snapshot` and `survey`
+dashed, `mutate` and `mutate_where` (a mutate edge with a filter) dotted and
+the rest solid, `drain` and `survey` with a hollow arrowhead, and a kind it
+does not know as a plain edge.
+
 Every refusal arrives as `{"detail": <sentence>, "reason": <tag>}`, parsed
 into `NetProxyError` (`status`, `reason`, message = detail). The CP refuses on
 its own with 404 `net_not_found`, 409 `not_assigned`, 503 `worker_not_ready`

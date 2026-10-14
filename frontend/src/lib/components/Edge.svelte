@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { Point } from '$lib/types';
-	import type { EdgeStroke } from '$lib/netView';
+	import type { EdgeHead, EdgeStroke } from '$lib/netView';
 	import { DEFAULT_LAYOUT_CONFIG, backEdgeControl, type LayoutConfig } from '$lib/layout';
 
 	/** The centres of the two ends, already laid out. */
@@ -10,8 +10,12 @@
 	export let toShape: 'place' | 'transition';
 	/** `in`: place to transition; `out`: transition to place. */
 	export let direction: 'in' | 'out';
-	/** Read edges are dashed (`snapshot`) or dotted (`mutate`). */
+	/** Read edges are dashed (`snapshot`, `survey`) or dotted (`mutate`,
+	 *  `mutate_where`). */
 	export let stroke: EdgeStroke = 'solid';
+	/** Hollow for an input edge that accepts an empty place (`drain`,
+	 *  `survey`); independent of the stroke. */
+	export let head: EdgeHead = 'filled';
 	export let isActive: boolean = false;
 	/** A back edge, set aside by the layout to break a cycle: drawn as a
 	 *  curve bowing out to the side, as the Bevy view draws it. */
@@ -25,6 +29,12 @@
 
 	$: input = direction === 'in';
 	$: dash = stroke === 'dashed' ? '8 5' : stroke === 'dotted' ? '2 4' : 'none';
+	// The arrowhead markers are defined in GraphPanel.svelte.
+	$: marker = !input
+		? 'url(#arrowhead-output)'
+		: head === 'hollow'
+			? 'url(#arrowhead-input-hollow)'
+			: 'url(#arrowhead-input)';
 
 	// Center coordinates
 	$: cx1 = from.x;
@@ -108,8 +118,9 @@
 		stroke={isActive ? '#00ff00' : (input ? 'var(--edge-input)' : 'var(--edge-output)')}
 		stroke-width="2"
 		stroke-dasharray={dash}
-		marker-end={input ? 'url(#arrowhead-input)' : 'url(#arrowhead-output)'}
+		marker-end={marker}
 		data-edge-stroke={stroke}
+		data-edge-head={head}
 		class="edge back"
 		class:input
 		class:output={!input}
@@ -125,8 +136,9 @@
 		stroke={isActive ? '#00ff00' : (input ? 'var(--edge-input)' : 'var(--edge-output)')}
 		stroke-width="2"
 		stroke-dasharray={dash}
-		marker-end={input ? 'url(#arrowhead-input)' : 'url(#arrowhead-output)'}
+		marker-end={marker}
 		data-edge-stroke={stroke}
+		data-edge-head={head}
 		class="edge"
 		class:input
 		class:output={!input}
