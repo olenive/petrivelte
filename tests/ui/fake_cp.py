@@ -37,8 +37,8 @@ a survey's, which never hold a transition back; a snapshot's place must
 hold one to be read, as both runners require (since 2026-10-16; until then
 a snapshot was not asked). A transition may also carry a guard, given to
 `net_state` as `guards`: a function of the marking's places that must hold
-for it to be fireable, as the traffic light's three transitions are
-guarded on the colour in `Light`. A guard is not on the wire, as a
+for it to be fireable, as the traffic light's `Go` is guarded on the
+colour in `Light` and on someone waiting. A guard is not on the wire, as a
 runner's is not; it is kept in the state under `_guards`, which the reads
 leave out. A firing puts one token in each output place, labelled as the
 first token it took, unless `bodies` gives the transition a body: a

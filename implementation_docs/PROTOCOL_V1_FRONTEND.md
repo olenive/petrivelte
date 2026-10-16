@@ -289,15 +289,16 @@ example in two (§11): the `shop` keeps only the survey (`Day End`,
 `traffic-light`, has the drain beside a plain `snapshot`. The page's code
 did not change; the tests below follow the two nets. Later the same day
 the traffic light became one place (§11, `08_traffic_light.json` recorded
-again): the light, three places `Red`, `Green` and `Amber` with `Turn
-Amber` and `Turn Red` moving a token round them, is one place `Light`
-whose one token is its colour, and `Change` moves the colour on; `Turn
-Green` (on red), `Pass on Green` (on green) and `Change` (on green or
-amber) are guarded on the colour. Guards are not on the wire and the edge
-kinds are the same, so the page's code did not change again. Each of the
-two loops through `Light` (`Turn Green`'s and `Change`'s take and write
-back) is a cycle the layout breaks as any other, one edge of it drawn
-curved.
+again): the light, three places `Red`, `Green` and `Amber`, is one place
+`Light` whose one token is its colour, and `Change` moves the colour on,
+taking from `Light` and writing back to it. And later still it became two
+transitions (§11, `08_traffic_light.json` recorded again): `Go`, guarded
+on green and someone waiting, drains `Waiting` and reads `Light` through a
+plain `snapshot`; `Change`, unguarded, cycles the light. Guards are not on
+the wire and the edge kinds are the same, so the page's code did not
+change either time. `Change`'s loop through `Light` is a cycle the layout
+breaks as any other, one edge of it drawn curved. (On 2026-10-16 the light
+went from three places to one place, and then to two transitions.)
 
 ### What the wire gives the page
 
@@ -350,12 +351,12 @@ Vitest, in `netView.test.ts`:
 - an output edge never hollow;
 - the shop drawn through `drawNet`: the survey dashed with a hollow head;
 - the traffic light drawn through `drawNet`: the drain solid with a hollow
-  head, the plain read (`snapshot`) dashed with a filled one, and of each
-  loop through `Light` one edge a back edge;
+  head, the plain read (`snapshot`) dashed with a filled one, both `Go`'s,
+  and of `Change`'s loop through `Light` one edge, the write back, a back
+  edge;
 - the inspector's two phrases, the survey's on the shop's `Price Order`
-  and the drain's on the traffic light's `Turn Green`, the snapshot named
-  by its kind on `Pass on Green`, and `Light` both input and output of
-  `Turn Green` and of `Change`.
+  and the drain's on the traffic light's `Go`, the snapshot named by its
+  kind beside it, and `Light` both input and output of `Change`.
 
 The fake control plane's firing rule (`tests/ui/fake_cp.py`) now knows the
 two kinds. A survey edge takes nothing and does not hold its transition
@@ -366,10 +367,11 @@ from what each input handed over to the tokens it produces. Since
 2026-10-16 a snapshot's place must hold a token, as both runners require;
 until then the fake did not ask. Since the light became one place, a
 transition may carry a guard (`net_state(guards=...)`), a function of the
-marking's places, which must hold for it to be fireable: `Light` is never
-empty, so presence alone would let every light transition fire, and the
-traffic light's guards read the colour in it as the runners' do. A guard
-stays out of what the fake serves, as a runner's stays off the wire.
+marking's places, which must hold for it to be fireable: `Go`'s drain
+never holds it back and `Light`, which it reads, is never empty, so
+presence alone would let it fire at every colour; its guard reads the
+colour in `Light` and the count of `Waiting`, as the runners' guards do. A
+guard stays out of what the fake serves, as a runner's stays off the wire.
 
 The browser suite's
 `test_net_protocol.py::test_the_shop_draws_its_survey_and_prices_orders`
@@ -392,27 +394,25 @@ the fake's `inject` and the page's **Step**:
 
 `test_net_protocol.py::test_the_traffic_light_draws_its_drain_and_its_read_and_lets_the_cars_go`
 seeds the traffic light as §11 seeds it, `"red"` in `Light` as token 0, as
-the Rust runner numbers it, with the three guards on the colour, and gives
-`Turn Green` and `Change` the light's bodies (`Turn Green`: green into
-`Light`, every car drained into `Passed`; `Change`: the next colour into
-`Light`). It checks each edge's stroke, head and `marker-end`, the drain
-solid and hollow and the snapshot dashed with the filled input head, one
-back edge for each loop through `Light`, and the inspector's rows for
-`Turn Green` (the drain's phrase) and `Pass on Green` (`snapshot`). It
-then drives the script of transcript `08_traffic_light.json`, checking
-which transitions look fireable and which idle after every step and
-arrival:
-- `Turn Green` fires with nobody waiting, `Light #0 → Light #1`, leaving
-  `Change` alone fireable, and `Change` turns the light amber, `Light #1
-  → Light #2`.
-- Two cars arrive at amber: only `Change` is fireable, `Turn Green` and
-  `Pass on Green` idle, held by their guards. `Change` fires, `Light #2 →
-  Light #5`, and `Turn Green` alone is fireable at red.
-- `Turn Green` drains both: `Light #5, Waiting #3, Waiting #4 → Light #6,
-  Passed #7, Passed #8`, and `Change` alone is fireable.
-- A third car arrives at green: `Pass on Green` and `Change` are
-  fireable, and `Pass on Green` fires, `Waiting #9 → Passed #10`, the
-  light staying in `Light` as token 6. `Change` fires, `Light #6 → Light
-  #11`.
+the Rust runner numbers it, with `Go`'s guard (green and someone waiting)
+and the two bodies (`Go`: every car drained into `Passed`; `Change`: the
+next colour into `Light`). It checks each edge's stroke, head and
+`marker-end`, the drain solid and hollow and the snapshot dashed with the
+filled input head, one back edge for `Change`'s loop through `Light`, and
+the inspector's rows for `Go` (the drain's phrase, then `snapshot`) and
+`Change` (a plain `Light`). It then drives the script of transcript
+`08_traffic_light.json`, checking which transitions look fireable and
+which idle after every step and arrival:
+- `Change` alone is fireable, `Go` held by its guard. `Change` turns the
+  light green, `Light #0 → Light #1`, where with nobody waiting `Go` is
+  still idle, and amber, `Light #1 → Light #2`.
+- Two cars arrive at amber: only `Change` is fireable. It turns the light
+  red, `Light #2 → Light #5`, the cars still waiting, and green, `Light #5
+  → Light #6`, where `Go` and `Change` are both fireable.
+- `Go`, declared first, drains both: `Waiting #3, Waiting #4 → Passed #7,
+  Passed #8`, the light only read, and `Change` alone is fireable.
+- A third car arrives at green: `Go` and `Change` are fireable, and `Go`
+  fires, `Waiting #9 → Passed #10`, the light staying in `Light` as token
+  6. `Change` fires, `Light #6 → Light #11`.
 - The token inspector shows the three cars in `Passed` and `amber` in
   `Light`, and `Change` is fireable: the light never stops.
