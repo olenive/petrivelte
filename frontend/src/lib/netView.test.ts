@@ -168,36 +168,36 @@ const shop: NetState = {
 	marking: { places: {} },
 };
 
-// The traffic light of protocol §11, since 2026-10-16, as it is seeded: Turn
-// Green takes the light from Red and drains Waiting; Pass on Green takes the
-// front car and reads Green through a plain snapshot.
+// The traffic light of protocol §11, since 2026-10-16, the light one place
+// since later that day, as it is seeded: Light holds one token, its colour,
+// "red". Turn Green takes the light and drains Waiting, writing green back to
+// Light; Pass on Green takes the front car and reads Light through a plain
+// snapshot; Change moves the colour on. Their guards on the colour are not on
+// the wire: what the page has is each transition's fireable.
 const trafficLight: NetState = {
 	...state,
 	net: 'traffic-light',
 	topology: {
-		places: strings(['Red', 'Green', 'Amber', 'Waiting', 'Passed']),
-		transitions: [{ name: 'Turn Green' }, { name: 'Pass on Green' }, { name: 'Turn Amber' }, { name: 'Turn Red' }],
+		places: strings(['Light', 'Waiting', 'Passed']),
+		transitions: [{ name: 'Turn Green' }, { name: 'Pass on Green' }, { name: 'Change' }],
 		edges: [
-			{ place: 'Red', transition: 'Turn Green', direction: 'in', kind: 'take' },
+			{ place: 'Light', transition: 'Turn Green', direction: 'in', kind: 'take' },
 			{ place: 'Waiting', transition: 'Turn Green', direction: 'in', kind: 'drain' },
-			{ place: 'Green', transition: 'Turn Green', direction: 'out', slot: 0 },
+			{ place: 'Light', transition: 'Turn Green', direction: 'out', slot: 0 },
 			{ place: 'Passed', transition: 'Turn Green', direction: 'out', slot: 1 },
 			{ place: 'Waiting', transition: 'Pass on Green', direction: 'in', kind: 'take' },
-			{ place: 'Green', transition: 'Pass on Green', direction: 'in', kind: 'snapshot' },
+			{ place: 'Light', transition: 'Pass on Green', direction: 'in', kind: 'snapshot' },
 			{ place: 'Passed', transition: 'Pass on Green', direction: 'out' },
-			{ place: 'Green', transition: 'Turn Amber', direction: 'in', kind: 'take' },
-			{ place: 'Amber', transition: 'Turn Amber', direction: 'out' },
-			{ place: 'Amber', transition: 'Turn Red', direction: 'in', kind: 'take' },
-			{ place: 'Red', transition: 'Turn Red', direction: 'out' },
+			{ place: 'Light', transition: 'Change', direction: 'in', kind: 'take' },
+			{ place: 'Light', transition: 'Change', direction: 'out' },
 		],
 	},
 	transitions: {
 		'Turn Green': { enabled: true, fireable: true, in_flight: false },
 		'Pass on Green': { enabled: true, fireable: false, in_flight: false },
-		'Turn Amber': { enabled: true, fireable: false, in_flight: false },
-		'Turn Red': { enabled: true, fireable: false, in_flight: false },
+		Change: { enabled: true, fireable: false, in_flight: false },
 	},
-	marking: { places: { Red: { count: 1, tokens: [{ id: '0', label: '"light"' }] } } },
+	marking: { places: { Light: { count: 1, tokens: [{ id: '0', label: '"red"' }] } } },
 };
 
 describe('netView with edges on empty places', () => {
@@ -215,19 +215,22 @@ describe('netView with edges on empty places', () => {
 	it('draws the drain solid with a hollow head, and the plain read dashed with a filled one', () => {
 		const mirror = mirrorFromState(trafficLight);
 		const { layout } = layoutFor(mirror.topology, null);
-		expect(drawNet(mirror, layout).edges.map((e) => [e.key, e.stroke, e.head])).toEqual([
-			['in|Red|Turn Green|take|', 'solid', 'filled'],
+		const { edges } = drawNet(mirror, layout);
+		expect(edges.map((e) => [e.key, e.stroke, e.head])).toEqual([
+			['in|Light|Turn Green|take|', 'solid', 'filled'],
 			['in|Waiting|Turn Green|drain|', 'solid', 'hollow'],
-			['out|Green|Turn Green||0', 'solid', 'filled'],
+			['out|Light|Turn Green||0', 'solid', 'filled'],
 			['out|Passed|Turn Green||1', 'solid', 'filled'],
 			['in|Waiting|Pass on Green|take|', 'solid', 'filled'],
-			['in|Green|Pass on Green|snapshot|', 'dashed', 'filled'],
+			['in|Light|Pass on Green|snapshot|', 'dashed', 'filled'],
 			['out|Passed|Pass on Green||', 'solid', 'filled'],
-			['in|Green|Turn Amber|take|', 'solid', 'filled'],
-			['out|Amber|Turn Amber||', 'solid', 'filled'],
-			['in|Amber|Turn Red|take|', 'solid', 'filled'],
-			['out|Red|Turn Red||', 'solid', 'filled'],
+			['in|Light|Change|take|', 'solid', 'filled'],
+			['out|Light|Change||', 'solid', 'filled'],
 		]);
+		// Turn Green and Change each take from Light and write back to it: of
+		// each loop, one edge is a back edge and drawn curved, so the two do
+		// not lie on one line.
+		expect(edges.filter((e) => e.back).map((e) => e.key)).toEqual(['in|Light|Turn Green|take|', 'out|Light|Change||']);
 	});
 });
 
@@ -262,17 +265,21 @@ describe('transitionDetail', () => {
 		]);
 		expect(transitionArcs(trafficLight.topology, 'Turn Green')).toEqual({
 			inputs: [
-				{ place: 'Red', note: '' },
+				{ place: 'Light', note: '' },
 				{ place: 'Waiting', note: 'drain: takes every token, zero or more' },
 			],
 			outputs: [
-				{ place: 'Green', note: 'slot 0' },
+				{ place: 'Light', note: 'slot 0' },
 				{ place: 'Passed', note: 'slot 1' },
 			],
 		});
 		expect(transitionArcs(trafficLight.topology, 'Pass on Green').inputs).toEqual([
 			{ place: 'Waiting', note: '' },
-			{ place: 'Green', note: 'snapshot' },
+			{ place: 'Light', note: 'snapshot' },
 		]);
+		expect(transitionArcs(trafficLight.topology, 'Change')).toEqual({
+			inputs: [{ place: 'Light', note: '' }],
+			outputs: [{ place: 'Light', note: '' }],
+		});
 	});
 });

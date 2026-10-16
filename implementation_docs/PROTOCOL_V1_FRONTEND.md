@@ -287,7 +287,17 @@ Bevy viewer built the same day. On 2026-10-16 the protocol split the shop's
 example in two (§11): the `shop` keeps only the survey (`Day End`,
 `Expired` and `Close Day` are gone), and a new conformance net,
 `traffic-light`, has the drain beside a plain `snapshot`. The page's code
-did not change; the tests below follow the two nets.
+did not change; the tests below follow the two nets. Later the same day
+the traffic light became one place (§11, `08_traffic_light.json` recorded
+again): the light, three places `Red`, `Green` and `Amber` with `Turn
+Amber` and `Turn Red` moving a token round them, is one place `Light`
+whose one token is its colour, and `Change` moves the colour on; `Turn
+Green` (on red), `Pass on Green` (on green) and `Change` (on green or
+amber) are guarded on the colour. Guards are not on the wire and the edge
+kinds are the same, so the page's code did not change again. Each of the
+two loops through `Light` (`Turn Green`'s and `Change`'s take and write
+back) is a cycle the layout breaks as any other, one edge of it drawn
+curved.
 
 ### What the wire gives the page
 
@@ -340,10 +350,12 @@ Vitest, in `netView.test.ts`:
 - an output edge never hollow;
 - the shop drawn through `drawNet`: the survey dashed with a hollow head;
 - the traffic light drawn through `drawNet`: the drain solid with a hollow
-  head, the plain read (`snapshot`) dashed with a filled one;
+  head, the plain read (`snapshot`) dashed with a filled one, and of each
+  loop through `Light` one edge a back edge;
 - the inspector's two phrases, the survey's on the shop's `Price Order`
-  and the drain's on the traffic light's `Turn Green`, and the snapshot
-  named by its kind on `Pass on Green`.
+  and the drain's on the traffic light's `Turn Green`, the snapshot named
+  by its kind on `Pass on Green`, and `Light` both input and output of
+  `Turn Green` and of `Change`.
 
 The fake control plane's firing rule (`tests/ui/fake_cp.py`) now knows the
 two kinds. A survey edge takes nothing and does not hold its transition
@@ -351,9 +363,13 @@ back, and its place's tokens are handed over as copies. A drain edge takes
 every token of its place, zero or more, and does not hold its transition
 back either. `bodies` lets a test give a transition a body of its own,
 from what each input handed over to the tokens it produces. Since
-2026-10-16 a snapshot's place must hold a token, as both runners require,
-so that `Pass on Green` waits for the light in `Green`; until then the
-fake did not ask.
+2026-10-16 a snapshot's place must hold a token, as both runners require;
+until then the fake did not ask. Since the light became one place, a
+transition may carry a guard (`net_state(guards=...)`), a function of the
+marking's places, which must hold for it to be fireable: `Light` is never
+empty, so presence alone would let every light transition fire, and the
+traffic light's guards read the colour in it as the runners' do. A guard
+stays out of what the fake serves, as a runner's stays off the wire.
 
 The browser suite's
 `test_net_protocol.py::test_the_shop_draws_its_survey_and_prices_orders`
@@ -375,21 +391,28 @@ the fake's `inject` and the page's **Step**:
   With no order left, `Price Order` is idle again.
 
 `test_net_protocol.py::test_the_traffic_light_draws_its_drain_and_its_read_and_lets_the_cars_go`
-seeds the traffic light as §11 seeds it, the light in `Red` as token 0, as
-the Rust runner numbers it, and gives `Turn Green` the light's body (the
-light into `Green`, every car drained into `Passed`). It checks each edge's
-stroke, head and `marker-end`, the drain solid and hollow and the snapshot
-dashed with the filled input head, and the inspector's rows for `Turn
-Green` (the drain's phrase) and `Pass on Green` (`snapshot`). It then
-drives the script of transcript `08_traffic_light.json`:
-- `Turn Green` fires with nobody waiting, `Red #0 → Green #1`, and `Turn
-  Amber` after it.
-- Two cars arrive at amber: only `Turn Red` is fireable, `Pass on Green`
-  idle with the light not green. `Turn Red` fires.
-- `Turn Green` drains both: `Red #5, Waiting #3, Waiting #4 → Green #6,
-  Passed #7, Passed #8`.
-- A third car arrives at green: `Pass on Green` and `Turn Amber` are
+seeds the traffic light as §11 seeds it, `"red"` in `Light` as token 0, as
+the Rust runner numbers it, with the three guards on the colour, and gives
+`Turn Green` and `Change` the light's bodies (`Turn Green`: green into
+`Light`, every car drained into `Passed`; `Change`: the next colour into
+`Light`). It checks each edge's stroke, head and `marker-end`, the drain
+solid and hollow and the snapshot dashed with the filled input head, one
+back edge for each loop through `Light`, and the inspector's rows for
+`Turn Green` (the drain's phrase) and `Pass on Green` (`snapshot`). It
+then drives the script of transcript `08_traffic_light.json`, checking
+which transitions look fireable and which idle after every step and
+arrival:
+- `Turn Green` fires with nobody waiting, `Light #0 → Light #1`, leaving
+  `Change` alone fireable, and `Change` turns the light amber, `Light #1
+  → Light #2`.
+- Two cars arrive at amber: only `Change` is fireable, `Turn Green` and
+  `Pass on Green` idle, held by their guards. `Change` fires, `Light #2 →
+  Light #5`, and `Turn Green` alone is fireable at red.
+- `Turn Green` drains both: `Light #5, Waiting #3, Waiting #4 → Light #6,
+  Passed #7, Passed #8`, and `Change` alone is fireable.
+- A third car arrives at green: `Pass on Green` and `Change` are
   fireable, and `Pass on Green` fires, `Waiting #9 → Passed #10`, the
-  light staying in `Green` as token 6. `Turn Amber` fires.
-- The token inspector shows the three cars in `Passed`, and `Turn Red` is
-  fireable: the light never stops.
+  light staying in `Light` as token 6. `Change` fires, `Light #6 → Light
+  #11`.
+- The token inspector shows the three cars in `Passed` and `amber` in
+  `Light`, and `Change` is fireable: the light never stops.

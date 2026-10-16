@@ -34,12 +34,16 @@ A firing takes the front token of each input place except a read edge's
 (`snapshot`, `mutate`, `survey`), and from a `drain` edge every token, zero
 or more (§5.1). It needs a token in every input place except a drain's and
 a survey's, which never hold a transition back; a snapshot's place must
-hold one to be read, as the traffic light's `Pass on Green` waits for the
-light in `Green` (since 2026-10-16; until then a snapshot was not asked). It
-puts one token in each output place, labelled as the first token it took,
-unless `bodies` gives the transition a body: a function from what each
-input handed over (the tokens taken, or a survey's copy of every token) to
-the tokens produced.
+hold one to be read, as both runners require (since 2026-10-16; until then
+a snapshot was not asked). A transition may also carry a guard, given to
+`net_state` as `guards`: a function of the marking's places that must hold
+for it to be fireable, as the traffic light's three transitions are
+guarded on the colour in `Light`. A guard is not on the wire, as a
+runner's is not; it is kept in the state under `_guards`, which the reads
+leave out. A firing puts one token in each output place, labelled as the
+first token it took, unless `bodies` gives the transition a body: a
+function from what each input handed over (the tokens taken, or a
+survey's copy of every token) to the tokens produced.
 
 Inner nets and keys (PROTOCOL §12, §13), as the server's 2026-10-12 relay
 passes them: a token may hold inner nets (`seed_inner`), each with its own
@@ -254,11 +258,17 @@ def catch_up(cp: FakeControlPlane, after: int) -> tuple[str, list[dict[str, Any]
 
 # -- the fake net: a protocol version 1 state the routes and tests move --
 
+Guard = Callable[[dict[str, dict[str, Any]]], bool]
+
+
 def net_state(*, net: str, places: list[dict[str, Any]], transitions: list[dict[str, Any]],
               edges: list[dict[str, Any]], marking: dict[str, list[dict[str, Any]]] | None = None,
               runtime: str = "python", running: bool = False, generation: int = 1,
-              marking_version: int = 0, hints: dict[str, Any] | None = None) -> dict[str, Any]:
-    """A protocol state (§5) with every token listed."""
+              marking_version: int = 0, hints: dict[str, Any] | None = None,
+              guards: dict[str, Guard] | None = None) -> dict[str, Any]:
+    """A protocol state (§5) with every token listed. `guards` holds a
+    transition back while its function of the marking's places, `{name:
+    {count, tokens}}`, returns false."""
     marking = marking or {}
     topology: dict[str, Any] = {"places": places, "transitions": transitions, "edges": edges}
     if hints is not None:
@@ -275,6 +285,8 @@ def net_state(*, net: str, places: list[dict[str, Any]], transitions: list[dict[
         "progress": {"step_count": 0, "last_fired": None, "fired_counts": {},
                      "last_progress_at": None},
     }
+    if guards:
+        state["_guards"] = dict(guards)
     _refresh_fireable(state)
     return state
 
@@ -399,11 +411,14 @@ def _can_fire(state: dict[str, Any], transition: str) -> bool:
     places = state["marking"]["places"]
     # A take needs a token in its place, and so do a mutate edge, which
     # hands one over, and a snapshot, which reads one; a drain or a survey
-    # edge never holds the transition back (§5.2).
+    # edge never holds the transition back (§5.2). A guard, if any, has the
+    # last word.
     needed = [place for place, kind in _input_edges(state, transition)
               if kind not in ("drain", "survey")]
+    guard = state.get("_guards", {}).get(transition)
     return (live["enabled"] and not live["in_flight"] and bool(_inputs(state, transition))
-            and all(places[p]["count"] > 0 for p in needed))
+            and all(places[p]["count"] > 0 for p in needed)
+            and (guard is None or guard(places)))
 
 
 def _refresh_fireable(state: dict[str, Any]) -> bool:

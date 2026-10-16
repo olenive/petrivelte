@@ -205,44 +205,73 @@ def test_the_shop_draws_its_survey_and_prices_orders(
     _wait_look(page, "Price Order", "idle")
 
 
+def _next_colour(colour: str) -> str:
+    """The colour after `colour` (§11): red to green, green to amber, amber
+    to red."""
+    return {"red": "green", "green": "amber"}.get(colour, "red")
+
+
+def _colour(places: dict[str, dict[str, Any]]) -> str | None:
+    """The light's colour as the guards read it: the front token of
+    `Light`, or None while it is empty."""
+    tokens = places["Light"]["tokens"]
+    return json.loads(tokens[0]["label"]) if tokens else None
+
+
 def _turn_green(handed: dict[str, list[dict[str, Any]]]) -> list[tuple[str, str]]:
-    """The traffic light's Turn Green (§11): the light into Green, and every
-    car drained from Waiting, oldest first, into Passed."""
-    return [("Green", handed["Red"][0]["label"])] + [("Passed", car["label"]) for car in handed["Waiting"]]
+    """The traffic light's Turn Green (§11): the next colour, green, into
+    Light, and every car drained from Waiting, oldest first, into Passed."""
+    light = json.loads(handed["Light"][0]["label"])
+    return [("Light", json.dumps(_next_colour(light)))] + [("Passed", car["label"]) for car in handed["Waiting"]]
+
+
+def _change(handed: dict[str, list[dict[str, Any]]]) -> list[tuple[str, str]]:
+    """The traffic light's Change (§11): the next colour into Light."""
+    return [("Light", json.dumps(_next_colour(json.loads(handed["Light"][0]["label"]))))]
+
+
+def _wait_looks(page: Page, looks: dict[str, str]) -> None:
+    for transition, look in looks.items():
+        _wait_look(page, transition, look)
 
 
 def test_the_traffic_light_draws_its_drain_and_its_read_and_lets_the_cars_go(
         page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane) -> None:
-    # The traffic light of protocol §11, since 2026-10-16, as it is seeded:
-    # the light in Red, nobody waiting. Turn Green takes the light and
-    # drains Waiting; Pass on Green takes the front car and reads Green
-    # through a plain snapshot.
+    # The traffic light of protocol §11, since 2026-10-16, the light one
+    # place since later that day, as it is seeded: Light holds one token,
+    # its colour, "red", and nobody is waiting. Turn Green takes the light
+    # and drains Waiting, writing green back to Light; Pass on Green takes
+    # the front car and reads Light through a plain snapshot; Change moves
+    # the colour on. Each is guarded on the colour, which the wire does not
+    # say: the page lights what the fake says is fireable.
     cp = fresh_control_plane
-    cp.bodies[NET_ID] = {"Turn Green": _turn_green}
+    cp.bodies[NET_ID] = {"Turn Green": _turn_green, "Change": _change}
     cp.workers = [fake_cp.worker_row(WORKER_ID)]
     cp.nets = [fake_cp.net_row(NET_ID, WORKER_ID, name="traffic-light", execution_mode="manual")]
-    places = ["Red", "Green", "Amber", "Waiting", "Passed"]
+    places = ["Light", "Waiting", "Passed"]
     fake_cp.seed_net(cp, NET_ID, fake_cp.net_state(
         net="traffic-light",
         runtime="rust",
         places=[{"name": name, "type_name": "String", "serializable": True} for name in places],
-        transitions=[{"name": "Turn Green"}, {"name": "Pass on Green"}, {"name": "Turn Amber"},
-                     {"name": "Turn Red"}],
+        transitions=[{"name": "Turn Green"}, {"name": "Pass on Green"}, {"name": "Change"}],
         edges=[
-            {"place": "Red", "transition": "Turn Green", "direction": "in", "kind": "take"},
+            {"place": "Light", "transition": "Turn Green", "direction": "in", "kind": "take"},
             {"place": "Waiting", "transition": "Turn Green", "direction": "in", "kind": "drain"},
-            {"place": "Green", "transition": "Turn Green", "direction": "out", "slot": 0},
+            {"place": "Light", "transition": "Turn Green", "direction": "out", "slot": 0},
             {"place": "Passed", "transition": "Turn Green", "direction": "out", "slot": 1},
             {"place": "Waiting", "transition": "Pass on Green", "direction": "in", "kind": "take"},
-            {"place": "Green", "transition": "Pass on Green", "direction": "in", "kind": "snapshot"},
+            {"place": "Light", "transition": "Pass on Green", "direction": "in", "kind": "snapshot"},
             {"place": "Passed", "transition": "Pass on Green", "direction": "out"},
-            {"place": "Green", "transition": "Turn Amber", "direction": "in", "kind": "take"},
-            {"place": "Amber", "transition": "Turn Amber", "direction": "out"},
-            {"place": "Amber", "transition": "Turn Red", "direction": "in", "kind": "take"},
-            {"place": "Red", "transition": "Turn Red", "direction": "out"},
+            {"place": "Light", "transition": "Change", "direction": "in", "kind": "take"},
+            {"place": "Light", "transition": "Change", "direction": "out"},
         ],
         # The light is token 0, as the Rust runner numbers it.
-        marking={"Red": [{"id": "0", "label": json.dumps("light")}]},
+        marking={"Light": [{"id": "0", "label": json.dumps("red")}]},
+        guards={
+            "Turn Green": lambda places: _colour(places) == "red",
+            "Pass on Green": lambda places: _colour(places) == "green",
+            "Change": lambda places: _colour(places) not in (None, "red"),
+        },
     ))
     _open(page, frontend_url)
 
@@ -252,58 +281,69 @@ def test_the_traffic_light_draws_its_drain_and_its_read_and_lets_the_cars_go(
     assert _drawn_edges(page) == sorted([
         ("solid", "hollow", "url(#arrowhead-input-hollow)"),
         ("dashed", "filled", "url(#arrowhead-input)"),
-        *[("solid", "filled", "url(#arrowhead-input)")] * 4,
-        *[("solid", "filled", "url(#arrowhead-output)")] * 5,
+        *[("solid", "filled", "url(#arrowhead-input)")] * 3,
+        *[("solid", "filled", "url(#arrowhead-output)")] * 4,
     ])
+    # Of each loop through Light, Turn Green's and Change's, one edge is
+    # drawn curved.
+    assert page.locator(".edges [data-back-edge='true']").count() == 2
 
     # Without detail, the inspector says what the drain does, and names the
     # plain read.
     arcs = _input_arcs(page, "Turn Green")
-    assert arcs[0] == "Red"
+    assert arcs[0] == "Light"
     assert arcs[1].startswith("Waiting") and arcs[1].endswith("drain: takes every token, zero or more")
     arcs = _input_arcs(page, "Pass on Green")
     assert arcs[0] == "Waiting"
-    assert arcs[1].startswith("Green") and arcs[1].endswith("snapshot")
+    assert arcs[1].startswith("Light") and arcs[1].endswith("snapshot")
 
     # The script of transcript 08. The light turns green with nobody
-    # waiting, the drain taking nothing, and on to amber.
-    _wait_look(page, "Turn Green", "fireable")
-    _step(page, 1, "Red #0 → Green #1")
-    _step(page, 2, "Green #1 → Amber #2")
-    _wait_counts(page, {"Red": 0, "Green": 0, "Amber": 1, "Waiting": 0, "Passed": 0})
+    # waiting, the drain taking nothing, and on to amber, a new token for
+    # each colour.
+    _wait_looks(page, {"Turn Green": "fireable", "Pass on Green": "idle", "Change": "idle"})
+    _step(page, 1, "Light #0 → Light #1")
+    _wait_looks(page, {"Turn Green": "idle", "Pass on Green": "idle", "Change": "fireable"})
+    _step(page, 2, "Light #1 → Light #2")
+    _wait_counts(page, {"Light": 1, "Waiting": 0, "Passed": 0})
+    _wait_looks(page, {"Turn Green": "idle", "Pass on Green": "idle", "Change": "fireable"})
 
-    # Two cars arrive at amber: only Turn Red is fireable, and they wait.
+    # Two cars arrive at amber: only Change is fireable, and they wait,
+    # Pass on Green held by its guard as Turn Green is.
     fake_cp.inject(cp, NET_ID, "Waiting", "Car 1")
     fake_cp.inject(cp, NET_ID, "Waiting", "Car 2")
     _wait_counts(page, {"Waiting": 2})
-    _wait_look(page, "Turn Red", "fireable")
-    for transition in ("Turn Green", "Pass on Green", "Turn Amber"):
+    _wait_look(page, "Change", "fireable")
+    for transition in ("Turn Green", "Pass on Green"):
         assert page.get_attribute(f"g.transition[data-transition-id='{transition}']", "data-look") == "idle"
-    _step(page, 3, "Amber #2 → Red #5")
+    _step(page, 3, "Light #2 → Light #5")
+    _wait_looks(page, {"Turn Green": "fireable", "Pass on Green": "idle", "Change": "idle"})
 
     # Green: everyone who waited goes, the light first, then the cars.
-    _step(page, 4, "Red #5, Waiting #3, Waiting #4 → Green #6, Passed #7, Passed #8")
-    _wait_counts(page, {"Red": 0, "Green": 1, "Amber": 0, "Waiting": 0, "Passed": 2})
+    _step(page, 4, "Light #5, Waiting #3, Waiting #4 → Light #6, Passed #7, Passed #8")
+    _wait_counts(page, {"Light": 1, "Waiting": 0, "Passed": 2})
+    _wait_looks(page, {"Turn Green": "idle", "Pass on Green": "idle", "Change": "fireable"})
 
     # A car arriving at green goes straight through, reading the light,
-    # which stays in Green with its id.
+    # which stays in Light with its id.
     fake_cp.inject(cp, NET_ID, "Waiting", "Car 3")
     _wait_look(page, "Pass on Green", "fireable")
-    assert page.get_attribute("g.transition[data-transition-id='Turn Amber']", "data-look") == "fireable"
+    assert page.get_attribute("g.transition[data-transition-id='Change']", "data-look") == "fireable"
+    assert page.get_attribute("g.transition[data-transition-id='Turn Green']", "data-look") == "idle"
     _step(page, 5, "Waiting #9 → Passed #10")
-    _wait_counts(page, {"Green": 1, "Waiting": 0, "Passed": 3})
+    _wait_counts(page, {"Light": 1, "Waiting": 0, "Passed": 3})
     page.wait_for_function("() => document.querySelectorAll('.animating-token').length === 0",
                            timeout=10_000)
     assert page.locator(".tokens circle.token[data-token-id='6']").count() == 1
-    _step(page, 6, "Green #6 → Amber #11")
-    _wait_counts(page, {"Red": 0, "Green": 0, "Amber": 1, "Waiting": 0, "Passed": 3})
-    for token_id, car in (("7", "Car 1"), ("8", "Car 2"), ("10", "Car 3")):
+    _wait_looks(page, {"Turn Green": "idle", "Pass on Green": "idle", "Change": "fireable"})
+    _step(page, 6, "Light #6 → Light #11")
+    _wait_counts(page, {"Light": 1, "Waiting": 0, "Passed": 3})
+    for token_id, value in (("7", "Car 1"), ("8", "Car 2"), ("10", "Car 3"), ("11", "amber")):
         page.locator(f".tokens circle.token[data-token-id='{token_id}']").click()
         view = page.locator(f"[data-token-card-id='{token_id}'] pre[data-token-view='json']")
         view.wait_for(timeout=5_000)
-        assert car in view.inner_text()
+        assert value in view.inner_text()
     # The light cycles by itself: the net never quiesces.
-    _wait_look(page, "Turn Red", "fireable")
+    _wait_looks(page, {"Turn Green": "idle", "Pass on Green": "idle", "Change": "fireable"})
 
 
 def test_a_step_animates_the_firing_and_logs_it(page: Page, frontend_url: str,
