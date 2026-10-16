@@ -4,8 +4,9 @@ the net says.
 A small parcel net with a read edge and a place without a JSON form. Steps,
 injects, resets and switches go through the page's own controls; the fake
 moves its net and publishes what a runner would, and the page is checked for
-what it shows. The shop of protocol §11 has the edges that accept an empty
-place, a drain and a survey.
+what it shows. Two conformance nets of protocol §11 have the edges that
+accept an empty place: the shop's survey, and the traffic light's drain,
+beside a plain snapshot.
 """
 
 import json
@@ -109,45 +110,59 @@ def _price_order(handed: dict[str, list[dict[str, Any]]]) -> list[tuple[str, str
         ("Discounts Applied", json.dumps(f"{promotion} on {order}")) for promotion in promotions]
 
 
-def test_the_shop_draws_drain_and_survey_edges_and_prices_orders(
+def _drawn_edges(page: Page) -> list[tuple[str, str, str]]:
+    """Every edge drawn, as (stroke, head, marker), sorted."""
+    drawn = page.eval_on_selector_all(
+        ".edges [data-edge-stroke]",
+        "els => els.map(e => [e.dataset.edgeStroke, e.dataset.edgeHead, e.getAttribute('marker-end')])")
+    return sorted(tuple(each) for each in drawn)
+
+
+def _input_arcs(page: Page, transition: str) -> list[str]:
+    """The inspector's input rows for `transition`, which sends no detail."""
+    page.locator(f"g.transition[data-transition-id='{transition}']").click()
+    page.wait_for_function(
+        "name => document.querySelector('.transition-inspector .transition-name')?.textContent === name",
+        arg=transition, timeout=5_000)
+    return page.locator(".transition-inspector [data-arc='in']").all_inner_texts()
+
+
+def _step(page: Page, seq: int, details: str) -> None:
+    """Step through the page's control and wait for the firing's log entry."""
+    page.get_by_role("button", name="Step", exact=True).click()
+    page.wait_for_selector(f".log-entry[data-seq='{seq}']", timeout=10_000)
+    assert page.locator(f".log-entry[data-seq='{seq}'] .details").inner_text() == details
+
+
+def test_the_shop_draws_its_survey_and_prices_orders(
         page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane) -> None:
-    # The shop of protocol §11, seeded empty: Price Order surveys Promotions
-    # and Close Day drains it.
+    # The shop of protocol §11, the survey alone since 2026-10-16, seeded
+    # empty: Price Order surveys Promotions.
     cp = fresh_control_plane
     cp.bodies[NET_ID] = {"Price Order": _price_order}
     cp.workers = [fake_cp.worker_row(WORKER_ID)]
     cp.nets = [fake_cp.net_row(NET_ID, WORKER_ID, name="shop", execution_mode="manual")]
-    places = ["Orders", "Promotions", "Day End", "Priced", "Discounts Applied", "Expired"]
+    places = ["Orders", "Promotions", "Priced", "Discounts Applied"]
     fake_cp.seed_net(cp, NET_ID, fake_cp.net_state(
         net="shop",
         runtime="rust",
         places=[{"name": name, "type_name": "String", "serializable": True} for name in places],
-        transitions=[{"name": "Price Order"}, {"name": "Close Day"}],
+        transitions=[{"name": "Price Order"}],
         edges=[
             {"place": "Orders", "transition": "Price Order", "direction": "in", "kind": "take"},
             {"place": "Promotions", "transition": "Price Order", "direction": "in", "kind": "survey"},
             {"place": "Priced", "transition": "Price Order", "direction": "out", "slot": 0},
             {"place": "Discounts Applied", "transition": "Price Order", "direction": "out", "slot": 1},
-            {"place": "Day End", "transition": "Close Day", "direction": "in", "kind": "take"},
-            {"place": "Promotions", "transition": "Close Day", "direction": "in", "kind": "drain"},
-            {"place": "Expired", "transition": "Close Day", "direction": "out"},
         ],
     ))
     _open(page, frontend_url)
 
-    # The survey is dashed as a snapshot is, the drain solid as a take_all
-    # is, and both end in the hollow head.
-    drawn = page.eval_on_selector_all(
-        ".edges [data-edge-stroke]",
-        "els => els.map(e => [e.dataset.edgeStroke, e.dataset.edgeHead, e.getAttribute('marker-end')])")
-    assert sorted(tuple(each) for each in drawn) == [
+    # The survey is dashed as a snapshot is, and ends in the hollow head.
+    assert _drawn_edges(page) == [
         ("dashed", "hollow", "url(#arrowhead-input-hollow)"),
         ("solid", "filled", "url(#arrowhead-input)"),
-        ("solid", "filled", "url(#arrowhead-input)"),
         ("solid", "filled", "url(#arrowhead-output)"),
         ("solid", "filled", "url(#arrowhead-output)"),
-        ("solid", "filled", "url(#arrowhead-output)"),
-        ("solid", "hollow", "url(#arrowhead-input-hollow)"),
     ]
     # The hollow head is an outline in the input edge's colour, filled with
     # the graph's background.
@@ -158,21 +173,17 @@ def test_the_shop_draws_drain_and_survey_edges_and_prices_orders(
         " getComputedStyle(document.querySelector('.graph-container')).backgroundColor]")
     assert (fill, stroke) == (background, filled)
 
-    # Without detail, the inspector says what each does.
-    page.locator("g.transition[data-transition-id='Close Day']").click()
-    inspector = page.locator(".transition-inspector")
-    arcs = inspector.locator("[data-arc='in']").all_inner_texts()
-    assert arcs[0] == "Day End"
-    assert arcs[1].startswith("Promotions") and arcs[1].endswith("drain: takes every token, zero or more")
+    # Without detail, the inspector says what the survey does.
+    arcs = _input_arcs(page, "Price Order")
+    assert arcs[0] == "Orders"
+    assert arcs[1].startswith("Promotions") and arcs[1].endswith("survey: copies every token, zero or more")
 
-    # The first two firings of the design's script (§2). An order alone makes
-    # Price Order fireable, the surveyed Promotions empty, and it fires with
-    # no promotion running.
+    # The script of transcript 07. An order alone makes Price Order
+    # fireable, the surveyed Promotions empty, and it fires with no
+    # promotion running.
     fake_cp.inject(cp, NET_ID, "Orders", "Order 1")
     _wait_look(page, "Price Order", "fireable")
-    page.get_by_role("button", name="Step", exact=True).click()
-    page.wait_for_selector(".log-entry[data-seq='1']", timeout=10_000)
-    assert page.locator(".log-entry[data-seq='1'] .details").inner_text() == "Orders #1 → Priced #2"
+    _step(page, 1, "Orders #1 → Priced #2")
     _wait_counts(page, {"Orders": 0, "Promotions": 0, "Priced": 1, "Discounts Applied": 0})
 
     # Two promotions start, which makes nothing fireable; a second order is
@@ -183,16 +194,116 @@ def test_the_shop_draws_drain_and_survey_edges_and_prices_orders(
     assert page.get_attribute("g.transition[data-transition-id='Price Order']", "data-look") == "idle"
     fake_cp.inject(cp, NET_ID, "Orders", "Order 2")
     _wait_look(page, "Price Order", "fireable")
-    page.get_by_role("button", name="Step", exact=True).click()
-    page.wait_for_selector(".log-entry[data-seq='2']", timeout=10_000)
-    assert page.locator(".log-entry[data-seq='2'] .details").inner_text() == (
-        "Orders #5 → Priced #6, Discounts Applied #7, Discounts Applied #8")
+    _step(page, 2, "Orders #5 → Priced #6, Discounts Applied #7, Discounts Applied #8")
     _wait_counts(page, {"Orders": 0, "Promotions": 2, "Priced": 2, "Discounts Applied": 2})
     for token_id, discount in (("7", "10% off on Order 2"), ("8", "Free shipping on Order 2")):
         page.locator(f".tokens circle.token[data-token-id='{token_id}']").click()
         view = page.locator(f"[data-token-card-id='{token_id}'] pre[data-token-view='json']")
         view.wait_for(timeout=5_000)
         assert discount in view.inner_text()
+    # The promotions still running, and no order: nothing more fires.
+    _wait_look(page, "Price Order", "idle")
+
+
+def _turn_green(handed: dict[str, list[dict[str, Any]]]) -> list[tuple[str, str]]:
+    """The traffic light's Turn Green (§11): the light into Green, and every
+    car drained from Waiting, oldest first, into Passed."""
+    return [("Green", handed["Red"][0]["label"])] + [("Passed", car["label"]) for car in handed["Waiting"]]
+
+
+def test_the_traffic_light_draws_its_drain_and_its_read_and_lets_the_cars_go(
+        page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane) -> None:
+    # The traffic light of protocol §11, since 2026-10-16, as it is seeded:
+    # the light in Red, nobody waiting. Turn Green takes the light and
+    # drains Waiting; Pass on Green takes the front car and reads Green
+    # through a plain snapshot.
+    cp = fresh_control_plane
+    cp.bodies[NET_ID] = {"Turn Green": _turn_green}
+    cp.workers = [fake_cp.worker_row(WORKER_ID)]
+    cp.nets = [fake_cp.net_row(NET_ID, WORKER_ID, name="traffic-light", execution_mode="manual")]
+    places = ["Red", "Green", "Amber", "Waiting", "Passed"]
+    fake_cp.seed_net(cp, NET_ID, fake_cp.net_state(
+        net="traffic-light",
+        runtime="rust",
+        places=[{"name": name, "type_name": "String", "serializable": True} for name in places],
+        transitions=[{"name": "Turn Green"}, {"name": "Pass on Green"}, {"name": "Turn Amber"},
+                     {"name": "Turn Red"}],
+        edges=[
+            {"place": "Red", "transition": "Turn Green", "direction": "in", "kind": "take"},
+            {"place": "Waiting", "transition": "Turn Green", "direction": "in", "kind": "drain"},
+            {"place": "Green", "transition": "Turn Green", "direction": "out", "slot": 0},
+            {"place": "Passed", "transition": "Turn Green", "direction": "out", "slot": 1},
+            {"place": "Waiting", "transition": "Pass on Green", "direction": "in", "kind": "take"},
+            {"place": "Green", "transition": "Pass on Green", "direction": "in", "kind": "snapshot"},
+            {"place": "Passed", "transition": "Pass on Green", "direction": "out"},
+            {"place": "Green", "transition": "Turn Amber", "direction": "in", "kind": "take"},
+            {"place": "Amber", "transition": "Turn Amber", "direction": "out"},
+            {"place": "Amber", "transition": "Turn Red", "direction": "in", "kind": "take"},
+            {"place": "Red", "transition": "Turn Red", "direction": "out"},
+        ],
+        # The light is token 0, as the Rust runner numbers it.
+        marking={"Red": [{"id": "0", "label": json.dumps("light")}]},
+    ))
+    _open(page, frontend_url)
+
+    # The drain is solid as a take_all is and ends in the hollow head; the
+    # plain read is dashed and ends in the filled head every other input
+    # edge has.
+    assert _drawn_edges(page) == sorted([
+        ("solid", "hollow", "url(#arrowhead-input-hollow)"),
+        ("dashed", "filled", "url(#arrowhead-input)"),
+        *[("solid", "filled", "url(#arrowhead-input)")] * 4,
+        *[("solid", "filled", "url(#arrowhead-output)")] * 5,
+    ])
+
+    # Without detail, the inspector says what the drain does, and names the
+    # plain read.
+    arcs = _input_arcs(page, "Turn Green")
+    assert arcs[0] == "Red"
+    assert arcs[1].startswith("Waiting") and arcs[1].endswith("drain: takes every token, zero or more")
+    arcs = _input_arcs(page, "Pass on Green")
+    assert arcs[0] == "Waiting"
+    assert arcs[1].startswith("Green") and arcs[1].endswith("snapshot")
+
+    # The script of transcript 08. The light turns green with nobody
+    # waiting, the drain taking nothing, and on to amber.
+    _wait_look(page, "Turn Green", "fireable")
+    _step(page, 1, "Red #0 → Green #1")
+    _step(page, 2, "Green #1 → Amber #2")
+    _wait_counts(page, {"Red": 0, "Green": 0, "Amber": 1, "Waiting": 0, "Passed": 0})
+
+    # Two cars arrive at amber: only Turn Red is fireable, and they wait.
+    fake_cp.inject(cp, NET_ID, "Waiting", "Car 1")
+    fake_cp.inject(cp, NET_ID, "Waiting", "Car 2")
+    _wait_counts(page, {"Waiting": 2})
+    _wait_look(page, "Turn Red", "fireable")
+    for transition in ("Turn Green", "Pass on Green", "Turn Amber"):
+        assert page.get_attribute(f"g.transition[data-transition-id='{transition}']", "data-look") == "idle"
+    _step(page, 3, "Amber #2 → Red #5")
+
+    # Green: everyone who waited goes, the light first, then the cars.
+    _step(page, 4, "Red #5, Waiting #3, Waiting #4 → Green #6, Passed #7, Passed #8")
+    _wait_counts(page, {"Red": 0, "Green": 1, "Amber": 0, "Waiting": 0, "Passed": 2})
+
+    # A car arriving at green goes straight through, reading the light,
+    # which stays in Green with its id.
+    fake_cp.inject(cp, NET_ID, "Waiting", "Car 3")
+    _wait_look(page, "Pass on Green", "fireable")
+    assert page.get_attribute("g.transition[data-transition-id='Turn Amber']", "data-look") == "fireable"
+    _step(page, 5, "Waiting #9 → Passed #10")
+    _wait_counts(page, {"Green": 1, "Waiting": 0, "Passed": 3})
+    page.wait_for_function("() => document.querySelectorAll('.animating-token').length === 0",
+                           timeout=10_000)
+    assert page.locator(".tokens circle.token[data-token-id='6']").count() == 1
+    _step(page, 6, "Green #6 → Amber #11")
+    _wait_counts(page, {"Red": 0, "Green": 0, "Amber": 1, "Waiting": 0, "Passed": 3})
+    for token_id, car in (("7", "Car 1"), ("8", "Car 2"), ("10", "Car 3")):
+        page.locator(f".tokens circle.token[data-token-id='{token_id}']").click()
+        view = page.locator(f"[data-token-card-id='{token_id}'] pre[data-token-view='json']")
+        view.wait_for(timeout=5_000)
+        assert car in view.inner_text()
+    # The light cycles by itself: the net never quiesces.
+    _wait_look(page, "Turn Red", "fireable")
 
 
 def test_a_step_animates_the_firing_and_logs_it(page: Page, frontend_url: str,

@@ -32,8 +32,10 @@ also move the net without the page asking, with `fire`, `inject` and
 
 A firing takes the front token of each input place except a read edge's
 (`snapshot`, `mutate`, `survey`), and from a `drain` edge every token, zero
-or more (§5.1). It needs a token in every input place except a snapshot's,
-a drain's and a survey's: the last two never hold a transition back. It
+or more (§5.1). It needs a token in every input place except a drain's and
+a survey's, which never hold a transition back; a snapshot's place must
+hold one to be read, as the traffic light's `Pass on Green` waits for the
+light in `Green` (since 2026-10-16; until then a snapshot was not asked). It
 puts one token in each output place, labelled as the first token it took,
 unless `bodies` gives the transition a body: a function from what each
 input handed over (the tokens taken, or a survey's copy of every token) to
@@ -395,11 +397,11 @@ def _outputs(state: dict[str, Any], transition: str) -> list[str]:
 def _can_fire(state: dict[str, Any], transition: str) -> bool:
     live = state["transitions"][transition]
     places = state["marking"]["places"]
-    # A take needs a token in its place, and so does a mutate edge, which
-    # hands one over; a drain or a survey edge never holds the transition
-    # back (§5.2). A snapshot's place is not asked, as it never was here.
+    # A take needs a token in its place, and so do a mutate edge, which
+    # hands one over, and a snapshot, which reads one; a drain or a survey
+    # edge never holds the transition back (§5.2).
     needed = [place for place, kind in _input_edges(state, transition)
-              if kind not in ("snapshot", "drain", "survey")]
+              if kind not in ("drain", "survey")]
     return (live["enabled"] and not live["in_flight"] and bool(_inputs(state, transition))
             and all(places[p]["count"] > 0 for p in needed))
 

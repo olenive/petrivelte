@@ -145,47 +145,88 @@ describe('netView with keys and inner nets', () => {
 	});
 });
 
-// The shop of protocol §11: Price Order surveys Promotions, Close Day drains it.
+const strings = (names: string[]) => names.map((name) => ({ name, type_name: 'str', serializable: true }));
+
+// The shop of protocol §11, the survey alone since 2026-10-16: Price Order
+// surveys Promotions.
 const shop: NetState = {
 	...state,
 	net: 'shop',
 	topology: {
-		places: ['Orders', 'Promotions', 'Day End', 'Priced', 'Discounts Applied', 'Expired'].map((name) => ({
-			name,
-			type_name: 'str',
-			serializable: true,
-		})),
-		transitions: [{ name: 'Price Order' }, { name: 'Close Day' }],
+		places: strings(['Orders', 'Promotions', 'Priced', 'Discounts Applied']),
+		transitions: [{ name: 'Price Order' }],
 		edges: [
 			{ place: 'Orders', transition: 'Price Order', direction: 'in', kind: 'take' },
 			{ place: 'Promotions', transition: 'Price Order', direction: 'in', kind: 'survey' },
 			{ place: 'Priced', transition: 'Price Order', direction: 'out', slot: 0 },
 			{ place: 'Discounts Applied', transition: 'Price Order', direction: 'out', slot: 1 },
-			{ place: 'Day End', transition: 'Close Day', direction: 'in', kind: 'take' },
-			{ place: 'Promotions', transition: 'Close Day', direction: 'in', kind: 'drain' },
-			{ place: 'Expired', transition: 'Close Day', direction: 'out' },
 		],
 	},
 	transitions: {
 		'Price Order': { enabled: true, fireable: false, in_flight: false },
-		'Close Day': { enabled: true, fireable: false, in_flight: false },
 	},
 	marking: { places: {} },
 };
 
-describe('netView with edges on empty places', () => {
-	const mirror = mirrorFromState(shop);
-	const { layout } = layoutFor(mirror.topology, null);
+// The traffic light of protocol §11, since 2026-10-16, as it is seeded: Turn
+// Green takes the light from Red and drains Waiting; Pass on Green takes the
+// front car and reads Green through a plain snapshot.
+const trafficLight: NetState = {
+	...state,
+	net: 'traffic-light',
+	topology: {
+		places: strings(['Red', 'Green', 'Amber', 'Waiting', 'Passed']),
+		transitions: [{ name: 'Turn Green' }, { name: 'Pass on Green' }, { name: 'Turn Amber' }, { name: 'Turn Red' }],
+		edges: [
+			{ place: 'Red', transition: 'Turn Green', direction: 'in', kind: 'take' },
+			{ place: 'Waiting', transition: 'Turn Green', direction: 'in', kind: 'drain' },
+			{ place: 'Green', transition: 'Turn Green', direction: 'out', slot: 0 },
+			{ place: 'Passed', transition: 'Turn Green', direction: 'out', slot: 1 },
+			{ place: 'Waiting', transition: 'Pass on Green', direction: 'in', kind: 'take' },
+			{ place: 'Green', transition: 'Pass on Green', direction: 'in', kind: 'snapshot' },
+			{ place: 'Passed', transition: 'Pass on Green', direction: 'out' },
+			{ place: 'Green', transition: 'Turn Amber', direction: 'in', kind: 'take' },
+			{ place: 'Amber', transition: 'Turn Amber', direction: 'out' },
+			{ place: 'Amber', transition: 'Turn Red', direction: 'in', kind: 'take' },
+			{ place: 'Red', transition: 'Turn Red', direction: 'out' },
+		],
+	},
+	transitions: {
+		'Turn Green': { enabled: true, fireable: true, in_flight: false },
+		'Pass on Green': { enabled: true, fireable: false, in_flight: false },
+		'Turn Amber': { enabled: true, fireable: false, in_flight: false },
+		'Turn Red': { enabled: true, fireable: false, in_flight: false },
+	},
+	marking: { places: { Red: { count: 1, tokens: [{ id: '0', label: '"light"' }] } } },
+};
 
-	it('draws the survey dashed and the drain solid, both with a hollow head', () => {
+describe('netView with edges on empty places', () => {
+	it('draws the survey dashed with a hollow head', () => {
+		const mirror = mirrorFromState(shop);
+		const { layout } = layoutFor(mirror.topology, null);
 		expect(drawNet(mirror, layout).edges.map((e) => [e.key, e.stroke, e.head])).toEqual([
 			['in|Orders|Price Order|take|', 'solid', 'filled'],
 			['in|Promotions|Price Order|survey|', 'dashed', 'hollow'],
 			['out|Priced|Price Order||0', 'solid', 'filled'],
 			['out|Discounts Applied|Price Order||1', 'solid', 'filled'],
-			['in|Day End|Close Day|take|', 'solid', 'filled'],
-			['in|Promotions|Close Day|drain|', 'solid', 'hollow'],
-			['out|Expired|Close Day||', 'solid', 'filled'],
+		]);
+	});
+
+	it('draws the drain solid with a hollow head, and the plain read dashed with a filled one', () => {
+		const mirror = mirrorFromState(trafficLight);
+		const { layout } = layoutFor(mirror.topology, null);
+		expect(drawNet(mirror, layout).edges.map((e) => [e.key, e.stroke, e.head])).toEqual([
+			['in|Red|Turn Green|take|', 'solid', 'filled'],
+			['in|Waiting|Turn Green|drain|', 'solid', 'hollow'],
+			['out|Green|Turn Green||0', 'solid', 'filled'],
+			['out|Passed|Turn Green||1', 'solid', 'filled'],
+			['in|Waiting|Pass on Green|take|', 'solid', 'filled'],
+			['in|Green|Pass on Green|snapshot|', 'dashed', 'filled'],
+			['out|Passed|Pass on Green||', 'solid', 'filled'],
+			['in|Green|Turn Amber|take|', 'solid', 'filled'],
+			['out|Amber|Turn Amber||', 'solid', 'filled'],
+			['in|Amber|Turn Red|take|', 'solid', 'filled'],
+			['out|Red|Turn Red||', 'solid', 'filled'],
 		]);
 	});
 });
@@ -214,14 +255,24 @@ describe('transitionDetail', () => {
 		});
 	});
 
-	it('says in a phrase what a drain and a survey do', () => {
+	it('says in a phrase what a drain and a survey do, and names a plain read', () => {
 		expect(transitionArcs(shop.topology, 'Price Order').inputs).toEqual([
 			{ place: 'Orders', note: '' },
 			{ place: 'Promotions', note: 'survey: copies every token, zero or more' },
 		]);
-		expect(transitionArcs(shop.topology, 'Close Day').inputs).toEqual([
-			{ place: 'Day End', note: '' },
-			{ place: 'Promotions', note: 'drain: takes every token, zero or more' },
+		expect(transitionArcs(trafficLight.topology, 'Turn Green')).toEqual({
+			inputs: [
+				{ place: 'Red', note: '' },
+				{ place: 'Waiting', note: 'drain: takes every token, zero or more' },
+			],
+			outputs: [
+				{ place: 'Green', note: 'slot 0' },
+				{ place: 'Passed', note: 'slot 1' },
+			],
+		});
+		expect(transitionArcs(trafficLight.topology, 'Pass on Green').inputs).toEqual([
+			{ place: 'Waiting', note: '' },
+			{ place: 'Green', note: 'snapshot' },
 		]);
 	});
 });

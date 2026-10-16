@@ -283,7 +283,11 @@ routes, `query`, `distinct`, inner nets and the `nested` stream.
 **Status:** Implemented 2026-10-14 on branch `drain-survey-edges`. Protocol
 §5.1 (the `drain` and `survey` kinds) and §11 (the `shop` net). The design
 is petritype-rs `dev-docs/EDGES_ON_EMPTY_PLACES.md`, whose R7 and D5 the
-Bevy viewer built the same day.
+Bevy viewer built the same day. On 2026-10-16 the protocol split the shop's
+example in two (§11): the `shop` keeps only the survey (`Day End`,
+`Expired` and `Close Day` are gone), and a new conformance net,
+`traffic-light`, has the drain beside a plain `snapshot`. The page's code
+did not change; the tests below follow the two nets.
 
 ### What the wire gives the page
 
@@ -334,30 +338,58 @@ Vitest, in `netView.test.ts`:
   dotted;
 - an unknown kind, and an edge with no kind, drawn plain;
 - an output edge never hollow;
-- the shop drawn through `drawNet`;
-- the inspector's two phrases.
+- the shop drawn through `drawNet`: the survey dashed with a hollow head;
+- the traffic light drawn through `drawNet`: the drain solid with a hollow
+  head, the plain read (`snapshot`) dashed with a filled one;
+- the inspector's two phrases, the survey's on the shop's `Price Order`
+  and the drain's on the traffic light's `Turn Green`, and the snapshot
+  named by its kind on `Pass on Green`.
 
 The fake control plane's firing rule (`tests/ui/fake_cp.py`) now knows the
 two kinds. A survey edge takes nothing and does not hold its transition
 back, and its place's tokens are handed over as copies. A drain edge takes
 every token of its place, zero or more, and does not hold its transition
 back either. `bodies` lets a test give a transition a body of its own,
-from what each input handed over to the tokens it produces.
+from what each input handed over to the tokens it produces. Since
+2026-10-16 a snapshot's place must hold a token, as both runners require,
+so that `Pass on Green` waits for the light in `Green`; until then the
+fake did not ask.
 
 The browser suite's
-`test_net_protocol.py::test_the_shop_draws_drain_and_survey_edges_and_prices_orders`
+`test_net_protocol.py::test_the_shop_draws_its_survey_and_prices_orders`
 seeds the shop's topology, empty as §11 seeds it, and gives `Price Order`
 the shop's body. It checks:
 - each edge's stroke, head and `marker-end`;
 - the hollow head's fill against the graph's background, and its outline
   against the filled input head;
-- the inspector's row for `Close Day`.
+- the inspector's row for `Price Order`, the survey's phrase.
 
-It then drives the first two firings of the design's §2 script, with the
-fake's `inject` and the page's **Step**:
+It then drives the script of transcript `07_empty_place_edges.json`, with
+the fake's `inject` and the page's **Step**:
 - An order alone makes `Price Order` fireable, though `Promotions` is
   empty. It fires: the log reads `Orders #1 → Priced #2`, and nothing
   goes into `Discounts Applied`.
 - Two promotions make nothing fireable. A second order is priced with both:
   the log lists only the order as consumed, `Promotions` keeps its two
   tokens, and the token inspector shows the two discounts, oldest first.
+  With no order left, `Price Order` is idle again.
+
+`test_net_protocol.py::test_the_traffic_light_draws_its_drain_and_its_read_and_lets_the_cars_go`
+seeds the traffic light as §11 seeds it, the light in `Red` as token 0, as
+the Rust runner numbers it, and gives `Turn Green` the light's body (the
+light into `Green`, every car drained into `Passed`). It checks each edge's
+stroke, head and `marker-end`, the drain solid and hollow and the snapshot
+dashed with the filled input head, and the inspector's rows for `Turn
+Green` (the drain's phrase) and `Pass on Green` (`snapshot`). It then
+drives the script of transcript `08_traffic_light.json`:
+- `Turn Green` fires with nobody waiting, `Red #0 → Green #1`, and `Turn
+  Amber` after it.
+- Two cars arrive at amber: only `Turn Red` is fireable, `Pass on Green`
+  idle with the light not green. `Turn Red` fires.
+- `Turn Green` drains both: `Red #5, Waiting #3, Waiting #4 → Green #6,
+  Passed #7, Passed #8`.
+- A third car arrives at green: `Pass on Green` and `Turn Amber` are
+  fireable, and `Pass on Green` fires, `Waiting #9 → Passed #10`, the
+  light staying in `Green` as token 6. `Turn Amber` fires.
+- The token inspector shows the three cars in `Passed`, and `Turn Red` is
+  fireable: the light never stops.
