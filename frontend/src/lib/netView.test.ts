@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { EdgeKind, NetState, TopologyEdge } from './types';
+import type { Control, EdgeKind, NetState, TopologyEdge } from './types';
 import { mirrorFromState } from './netMirror';
 import { layoutFor } from './graphLayout';
-import { drawNet, drawTokens, edgeHead, edgeStroke, transitionLook } from './netView';
+import { drawNet, drawTokens, edgeHead, edgeStroke, placeFill, transitionLook } from './netView';
 import { detailRows, transitionArcs } from './transitionDetail';
 
 const state: NetState = {
@@ -168,17 +168,29 @@ const shop: NetState = {
 	marking: { places: {} },
 };
 
+// The traffic light's two controls, as §11 declares them: a text control
+// that adds a car to Waiting, and a button that fires Change.
+const trafficControls: Control[] = [
+	{ name: 'car', label: '+ Car', kind: 'text', node: 'Waiting', action: 'inject', config: { placeholder: 'name' } },
+	{ name: 'change', label: 'Change', kind: 'button', node: 'Change', action: 'fire' },
+];
+
 // The traffic light of protocol §11, since 2026-10-16, the light one place
 // and two transitions in all since later that day, as it is seeded: Light
-// holds one token, its colour, "red". Go drains Waiting and reads Light
-// through a plain snapshot, writing the cars to Passed; Change takes the light
-// and writes the next colour back. Go's guard, green and someone waiting, is
-// not on the wire: what the page has is each transition's fireable.
+// holds one token, its colour, "red", carrying the colour it is drawn with,
+// and Light is filled with its token's colour. Go drains Waiting and reads
+// Light through a plain snapshot, writing the cars to Passed; Change takes
+// the light and writes the next colour back. Go's guard, green and someone
+// waiting, is not on the wire: what the page has is each transition's
+// fireable.
 const trafficLight: NetState = {
 	...state,
 	net: 'traffic-light',
 	topology: {
-		places: strings(['Light', 'Waiting', 'Passed']),
+		places: [
+			{ name: 'Light', type_name: 'str', serializable: true, style: { fill: 'token' } },
+			...strings(['Waiting', 'Passed']),
+		],
 		transitions: [{ name: 'Go' }, { name: 'Change' }],
 		edges: [
 			{ place: 'Waiting', transition: 'Go', direction: 'in', kind: 'drain' },
@@ -187,12 +199,13 @@ const trafficLight: NetState = {
 			{ place: 'Light', transition: 'Change', direction: 'in', kind: 'take' },
 			{ place: 'Light', transition: 'Change', direction: 'out' },
 		],
+		controls: trafficControls,
 	},
 	transitions: {
 		Go: { enabled: true, fireable: false, in_flight: false },
 		Change: { enabled: true, fireable: true, in_flight: false },
 	},
-	marking: { places: { Light: { count: 1, tokens: [{ id: '0', label: '"red"' }] } } },
+	marking: { places: { Light: { count: 1, tokens: [{ id: '0', label: '"red"', color: '#ff6347' }] } } },
 };
 
 describe('netView with edges on empty places', () => {
@@ -222,6 +235,61 @@ describe('netView with edges on empty places', () => {
 		// edge is a back edge and drawn curved, so the two do not lie on one
 		// line.
 		expect(edges.filter((e) => e.back).map((e) => e.key)).toEqual(['out|Light|Change||']);
+	});
+});
+
+describe('netView with controls and a styled place', () => {
+	const withLight = (tokens: Array<{ id: string; label: string; color?: string }>, count = tokens.length): NetState => ({
+		...trafficLight,
+		marking: { places: { Light: { count, tokens } } },
+	});
+	const lightFill = (net: NetState) => {
+		const mirror = mirrorFromState(net);
+		const { layout } = layoutFor(mirror.topology, null);
+		return drawNet(mirror, layout).places.find((p) => p.name === 'Light')?.fill;
+	};
+
+	it('keeps the controls in declaration order and each place its style', () => {
+		const mirror = mirrorFromState(trafficLight);
+		expect(mirror.topology.controls).toEqual(trafficControls);
+		expect(mirror.places.Light.style).toEqual({ fill: 'token' });
+		expect('style' in mirror.places.Waiting).toBe(false);
+	});
+
+	it("fills Light with its one token's colour", () => {
+		const mirror = mirrorFromState(trafficLight);
+		const { layout } = layoutFor(mirror.topology, null);
+		const places = drawNet(mirror, layout).places;
+		expect(places.find((p) => p.name === 'Light')).toMatchObject({ style: { fill: 'token' }, fill: '#ff6347' });
+		// An unstyled place keeps the theme's fill, whatever it holds.
+		expect(places.filter((p) => p.fill !== undefined).map((p) => p.name)).toEqual(['Light']);
+	});
+
+	it('fills it with nothing while it holds two tokens, or none, or one without a colour', () => {
+		expect(lightFill(withLight([{ id: '0', label: '"red"', color: '#ff6347' }, { id: '1', label: '"green"', color: '#32cd32' }]))).toBeUndefined();
+		expect(lightFill(withLight([]))).toBeUndefined();
+		expect(lightFill(withLight([{ id: '0', label: '"red"' }]))).toBeUndefined();
+		// The count is the truth: one token listed of two held is not one.
+		expect(lightFill(withLight([{ id: '0', label: '"red"', color: '#ff6347' }], 2))).toBeUndefined();
+		// Without the style, a coloured token leaves the place alone.
+		expect(placeFill({ name: 'P', serializable: true, count: 1, tokens: [{ id: '0', label: 'x', color: '#ff6347' }] })).toBeUndefined();
+	});
+
+	it('draws a net that declares no controls as before: none kept, nothing filled', () => {
+		for (const net of [state, shop]) {
+			const mirror = mirrorFromState(net);
+			const { layout } = layoutFor(mirror.topology, null);
+			expect(mirror.topology.controls).toEqual([]);
+			expect(drawNet(mirror, layout).places.every((p) => p.fill === undefined && p.style === undefined)).toBe(true);
+		}
+		// A token with a colour in an unstyled place is still drawn in it.
+		const parcels = mirrorFromState({
+			...state,
+			marking: { places: { In: { count: 1, tokens: [{ id: '1', label: 'x', color: '#d94f4f' }] } } },
+		});
+		const { layout } = layoutFor(parcels.topology, null);
+		expect(drawNet(parcels, layout).places.find((p) => p.name === 'In')?.fill).toBeUndefined();
+		expect(drawTokens(parcels, layout)[0].color).toBe('#d94f4f');
 	});
 });
 

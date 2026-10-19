@@ -33,13 +33,21 @@
  * nothing else. `nested` is not this mirror's: an inner net's events move
  * the inner net's own version, never the outer one, and are routed to an
  * inner mirror by `innerNets.ts`.
+ *
+ * Controls and styles (protocol §5.1, since 2026-10-16). The topology keeps
+ * the controls the net declares, as `[]` when it declares none, and each
+ * place keeps its `style`. Neither moves with a notification: a press's
+ * effects arrive as the events of what it did, and a styled place is drawn
+ * from its tokens' colours, which the mirror already follows.
  */
 
 import type {
+	Control,
 	Keys,
 	MarkingToken,
 	NetEvent,
 	NetState,
+	PlaceStyle,
 	PlaceToken,
 	ProducedToken,
 	Progress,
@@ -62,6 +70,8 @@ export interface MirrorPlace {
 	passive?: boolean;
 	/** The keys it derives from its tokens, in declaration order (§13.1). */
 	key_names?: string[];
+	/** How it is drawn, when the net declares a style (§5.1). */
+	style?: PlaceStyle;
 	/** The true number of tokens. */
 	count: number;
 	/** The tokens the mirror knows, oldest first; at most `tokenLimit`. */
@@ -74,13 +84,17 @@ export interface Airborne {
 	token: MarkingToken;
 }
 
+/** The topology as the mirror keeps it: the controls always there, `[]`
+ *  for a net that declares none. */
+export type MirrorTopology = Topology & { controls: Control[] };
+
 export interface Mirror {
 	net: string;
 	runtime: string;
 	generation: number;
 	marking_version: number;
 	running: boolean;
-	topology: Topology;
+	topology: MirrorTopology;
 	/** By name, every place of the topology. */
 	places: Record<string, MirrorPlace>;
 	/** By name, every transition of the topology. */
@@ -130,11 +144,12 @@ export type ApplyOutcome =
 
 /** A mirror of a whole state read with `token_limit` `tokenLimit`. */
 export function mirrorFromState(state: NetState, tokenLimit = DEFAULT_TOKEN_LIMIT): Mirror {
-	const topology: Topology = {
+	const topology: MirrorTopology = {
 		places: state.topology?.places ?? [],
 		transitions: state.topology?.transitions ?? [],
 		edges: state.topology?.edges ?? [],
 		...(state.topology?.hints ? { hints: state.topology.hints } : {}),
+		controls: Array.isArray(state.topology?.controls) ? state.topology.controls : [],
 	};
 	const marking = state.marking?.places ?? {};
 	const places = Object.fromEntries(
@@ -149,6 +164,7 @@ export function mirrorFromState(state: NetState, tokenLimit = DEFAULT_TOKEN_LIMI
 					...(place.nested === true ? { nested: true } : {}),
 					...(place.passive === true ? { passive: true } : {}),
 					...(Array.isArray(place.key_names) ? { key_names: place.key_names } : {}),
+					...(place.style ? { style: place.style } : {}),
 					count: held?.count ?? held?.tokens?.length ?? 0,
 					tokens: held?.tokens ?? [],
 				},

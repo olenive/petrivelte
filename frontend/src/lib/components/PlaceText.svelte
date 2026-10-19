@@ -9,11 +9,14 @@
 	export let count: number = 0;
 	/** Under a token filter, `2 of 5`: how many of its tokens are drawn. */
 	export let matching: string | null = null;
+	/** The colour its style fills it with (protocol §5.1), so the labels'
+	 *  outlines match the circle; the theme's fill when absent. */
+	export let fill: string | undefined = undefined;
 
 	$: showCount = matching === null && placeShowsCounter(count);
 </script>
 
-<g class="place-text" data-place-id={name} data-count={count} data-matching={matching ?? undefined}>
+<g class="place-text" data-place-id={name} data-count={count} data-matching={matching ?? undefined} style:--place-fill={fill}>
 	<!-- Scrim, drawn first so everything below sits on top of it. Veils the
 	     dots toward the centre so the labels and count read cleanly, while the
 	     outer dots stay visible through its transparent edge — no hard boundary

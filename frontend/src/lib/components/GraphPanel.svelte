@@ -154,6 +154,9 @@
 	$: if (graph) {
 		updateViewBox();
 	}
+
+	// The fill of each styled place, so a badge's ring matches its place.
+	$: placeFills = new Map((graph?.places ?? []).flatMap((place) => (place.fill ? [[place.name, place.fill]] : [])));
 </script>
 
 <svelte:window on:mousemove={handleMouseMove} on:mouseup={handleMouseUp} />
@@ -213,7 +216,10 @@
 			     fading to fully transparent before the circle edge, so the number
 			     reads clearly over the dots without drawing a visible disc: the
 			     eye moves from counting dots to reading the count with nothing
-			     hard to cross. -->
+			     hard to cross. A gradient reads `--place-fill` where it is
+			     defined, here, not where it is used, so it keeps the theme's
+			     fill on a place whose style fills it; the scrim shows only from
+			     seven tokens, and a style fills a place holding exactly one. -->
 			<radialGradient id="token-count-scrim">
 				<stop offset="0%" stop-color="var(--place-fill)" stop-opacity="0.92" />
 				<stop offset="55%" stop-color="var(--place-fill)" stop-opacity="0.78" />
@@ -243,7 +249,7 @@
 			<!-- Place circles layer (background) -->
 			<g class="place-circles">
 				{#each graph.places as place (place.name)}
-					<PlaceCircle name={place.name} x={place.x} y={place.y} />
+					<PlaceCircle name={place.name} x={place.x} y={place.y} fill={place.fill} />
 				{/each}
 			</g>
 
@@ -283,7 +289,7 @@
 			<!-- Place text layer (rendered after tokens so text appears on top) -->
 			<g class="place-texts">
 				{#each graph.places as place (place.name)}
-					<PlaceText name={place.name} x={place.x} y={place.y} type_name={place.type_name} count={place.count} matching={place.matching} />
+					<PlaceText name={place.name} x={place.x} y={place.y} type_name={place.type_name} count={place.count} matching={place.matching} fill={place.fill} />
 				{/each}
 			</g>
 
@@ -292,7 +298,7 @@
 			<g class="token-badges" pointer-events="none">
 				{#each tokens as token (token.id)}
 					{#if token.badge !== null && !hiddenTokenIds.has(token.id)}
-						<g class="token-badge" data-token-badge={token.id}>
+						<g class="token-badge" data-token-badge={token.id} style:--place-fill={placeFills.get(token.place)}>
 							<circle cx={token.x + 8} cy={token.y - 8} r={7.5} fill="var(--token-badge-fill)" stroke="var(--place-fill)" stroke-width="1.5" />
 							<text
 								x={token.x + 8}

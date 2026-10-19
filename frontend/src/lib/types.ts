@@ -31,6 +31,18 @@ export interface TopologyPlace {
 	/** The keys the place derives from its tokens, in declaration order;
 	 *  absent when it declares none (§13.1). */
 	key_names?: string[];
+	/** How a viewer draws the place, when the net declares a style (since
+	 *  2026-10-16). */
+	style?: PlaceStyle;
+}
+
+/**
+ * A place's style (§5.1). The one style so far is `{fill: "token"}`: while
+ * the place holds exactly one token and that token has a `color`, the place
+ * is filled with that colour; otherwise the theme's fill.
+ */
+export interface PlaceStyle {
+	fill: 'token';
 }
 
 export interface TopologyTransition {
@@ -67,11 +79,61 @@ export interface TopologyEdge {
 	filter?: Filter;
 }
 
+/** A control's widget, which fixes the value a press carries (§5.1): none
+ *  for a `button`, a boolean for a `toggle`, a number for a `slider`, one
+ *  of the options for a `select`, a string for a `text`. */
+export type ControlKind = 'button' | 'toggle' | 'slider' | 'select' | 'text';
+
+/** What a press does, for the viewer's lighting only (§5.1): a `fire` row
+ *  is lit while its node is fireable, an `enable` toggle shows its node's
+ *  `enabled` switch, and an `inject` row, like one without an action, is
+ *  always lit. A viewer never executes an action. */
+export type ControlAction = 'fire' | 'enable' | 'inject';
+
+/** A value a press carries, by the control's kind. */
+export type ControlValue = boolean | number | string;
+
+/** A control's settings by kind, absent when empty. Other keys are a
+ *  runtime's own and are ignored. */
+export interface ControlConfig {
+	/** The initial value of a `toggle`, a `slider` or a `select`. */
+	value?: ControlValue;
+	/** A `select`'s options. */
+	options?: string[];
+	/** A `slider`'s bounds and step. */
+	start?: number;
+	stop?: number;
+	step?: number;
+	/** A `text`'s hint, shown while it is empty. */
+	placeholder?: string;
+}
+
+/**
+ * A control the net declares (§5.1, since 2026-10-16): a widget the viewer
+ * renders and a press (§6.6) runs in the runtime that owns the net. A kind
+ * or an action this page does not know is shown by its label alone, or
+ * lit as a control without an action.
+ */
+export interface Control {
+	/** Unique within the net: what `press` names. */
+	name: string;
+	/** What the legend shows. */
+	label: string;
+	kind: ControlKind | (string & {});
+	/** The place or transition it acts on, lit while its row is hovered. */
+	node?: string;
+	action?: ControlAction | (string & {});
+	config?: ControlConfig;
+}
+
 export interface Topology {
 	places: TopologyPlace[];
 	transitions: TopologyTransition[];
 	edges: TopologyEdge[];
 	hints?: { positions?: Record<string, Point> };
+	/** The controls the net declares, in declaration order; absent when it
+	 *  declares none. They belong to the outer net. */
+	controls?: Control[];
 }
 
 // -- §5.2 transition state --

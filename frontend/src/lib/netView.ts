@@ -7,11 +7,17 @@
  * not drawn and its slot stays empty, so the drawn tokens keep the slots the
  * firing animation travels from and to; each place then reads `matching of
  * count`. A token that holds nets carries a badge with their total count.
+ *
+ * A place with the style `{fill: "token"}` (protocol §5.1) is filled with
+ * the colour of its one token while it holds exactly one token and that
+ * token has a colour, and with the theme's fill otherwise. The page has no
+ * input or output highlight on places during a firing, so nothing else
+ * competes with that fill.
  */
 
 import type { NetLayout } from '$lib/layout';
-import type { Mirror } from '$lib/netMirror';
-import type { Point, TopologyEdge, TransitionState } from '$lib/types';
+import type { Mirror, MirrorPlace } from '$lib/netMirror';
+import type { PlaceStyle, Point, TopologyEdge, TransitionState } from '$lib/types';
 import { TOKEN_DOT_MAX, tokenSlotOffset } from '$lib/netHelpers';
 import { edgeEnds } from '$lib/firingPlayback';
 import { badgeCount, badgeText } from '$lib/innerNets';
@@ -25,6 +31,10 @@ export interface DrawnPlace {
 	count: number;
 	/** Under a token filter, `2 of 5` (`2+ of 300` for a lower bound); else null. */
 	matching: string | null;
+	/** Its style, as the net declares it. */
+	style?: PlaceStyle;
+	/** The colour it is filled with, by its style; absent for the theme's fill. */
+	fill?: string;
 }
 
 /** How a transition is drawn: switched off (grey, dashed), firing now,
@@ -111,6 +121,16 @@ export function transitionLook(state: TransitionState | undefined): TransitionLo
 	return 'idle';
 }
 
+/** The colour a place is filled with by its style (§5.1): its one token's
+ *  colour, while the style is `{fill: "token"}`, the place holds exactly
+ *  one token and that token has a colour; otherwise none, and the theme's
+ *  fill shows. A filter does not change it: it says what the place holds. */
+export function placeFill(place: MirrorPlace | undefined): string | undefined {
+	if (place?.style?.fill !== 'token' || place.count !== 1 || place.tokens.length !== 1) return undefined;
+	const color = place.tokens[0].color;
+	return typeof color === 'string' && color ? color : undefined;
+}
+
 function at(layout: NetLayout, name: string): Point | null {
 	const placement = layout.placements.get(name);
 	return placement ? { x: placement.x, y: placement.y } : null;
@@ -131,14 +151,18 @@ export function drawNet(mirror: Mirror, layout: NetLayout, filter: TokenFilter =
 	const places = mirror.topology.places.flatMap((place) => {
 		const p = at(layout, place.name);
 		const counted = counts?.[place.name];
+		const held = mirror.places[place.name];
+		const fill = placeFill(held);
 		return p
 			? [
 					{
 						name: place.name,
 						type_name: place.type_name ?? '',
 						...p,
-						count: mirror.places[place.name]?.count ?? 0,
+						count: held?.count ?? 0,
 						matching: counted ? matchingText(counted) : null,
+						...(held?.style ? { style: held.style } : {}),
+						...(fill ? { fill } : {}),
 					},
 				]
 			: [];
