@@ -10,6 +10,7 @@ import {
 	distinctValues,
 	enableTransition,
 	executionInject,
+	executionPress,
 	executionStep,
 	getExecutionHistory,
 	getExecutionState,
@@ -109,6 +110,7 @@ describe('protocol refusals', () => {
 		[404, 'unknown_place'],
 		[404, 'unknown_transition'],
 		[404, 'unknown_token'],
+		[404, 'unknown_control'],
 		[422, 'invalid_params'],
 		[422, 'invalid_token'],
 		[422, 'not_serializable'],
@@ -230,6 +232,51 @@ describe('version 1 bodies', () => {
 		const fetchMock = respond(200, value);
 		await expect(getToken('n-1', '3')).resolves.toEqual(value);
 		expect(fetchMock.mock.calls[0][0]).toBe('http://cp.test/api/nets/n-1/tokens/3');
+	});
+});
+
+describe('pressing a control (protocol §6.6)', () => {
+	it('posts the control and its value with an idempotency key, answering the result', async () => {
+		const fetchMock = respond(200, { status: 'pressed', marking_version: 12 });
+		await expect(executionPress('n-1', 'car', 'Taxi')).resolves.toEqual({ status: 'pressed', marking_version: 12 });
+		const [url, init] = fetchMock.mock.calls[0];
+		expect(url).toBe('http://cp.test/api/nets/n-1/press');
+		expect(init!.method).toBe('POST');
+		expect(JSON.parse(String(init!.body))).toEqual({ control: 'car', value: 'Taxi' });
+		expect((init!.headers as Record<string, string>)['X-Idempotency-Key']).toMatch(/.+/);
+	});
+
+	it('sends no value for a button, and false, 0 and the empty string as values', async () => {
+		const fetchMock = respond(200, { status: 'pressed', marking_version: 1 });
+		await executionPress('n-1', 'change');
+		await executionPress('n-1', 'on', false);
+		await executionPress('n-1', 'speed', 0);
+		await executionPress('n-1', 'car', '');
+		const bodies = fetchMock.mock.calls.map(([, init]) => JSON.parse(String(init!.body)));
+		expect(bodies).toEqual([
+			{ control: 'change' },
+			{ control: 'on', value: false },
+			{ control: 'speed', value: 0 },
+			{ control: 'car', value: '' },
+		]);
+	});
+
+	it('answers nothing with the runtime\'s reason', async () => {
+		respond(200, { status: 'nothing', reason: 'Change is not fireable', marking_version: 3 });
+		await expect(executionPress('n-1', 'change')).resolves.toEqual({
+			status: 'nothing',
+			reason: 'Change is not fireable',
+			marking_version: 3,
+		});
+	});
+
+	it('refuses a control the net does not declare with 404 unknown_control', async () => {
+		respond(404, { detail: "no control named 'nope'", reason: 'unknown_control' });
+		const error = await executionPress('n-1', 'nope').catch((e) => e);
+		expect(error).toBeInstanceOf(NetProxyError);
+		expect(error.status).toBe(404);
+		expect(error.message).toBe("no control named 'nope'");
+		expect(isProtocolError(error)).toBe(true);
 	});
 });
 

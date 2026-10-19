@@ -262,6 +262,15 @@ export interface InjectResult {
 	nested_id?: string;
 }
 
+/** `press`'s answer (§6.6): `pressed` when the control applied something,
+ *  `nothing` with a `reason` when it chose not to. Its effects arrive on
+ *  the stream as the events of whatever it did. */
+export interface PressResult {
+	status: 'pressed' | 'nothing';
+	reason?: string;
+	marking_version: number;
+}
+
 /** What every `get_token` answer carries besides the value. */
 interface TokenValueCommon {
 	id: string;

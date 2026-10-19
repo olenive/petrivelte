@@ -102,6 +102,8 @@ def fresh_control_plane(control_plane: fake_cp.FakeControlPlane) -> Iterator[fak
     control_plane.initial_inner = {}
     control_plane.boarding = {}
     control_plane.bodies = {}
+    control_plane.makers = {}
+    control_plane.presses.clear()
     control_plane.one_piece_firings = False
     control_plane.slow_steps = 0
     control_plane.slow_step_s = 1.0

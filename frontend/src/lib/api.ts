@@ -10,6 +10,7 @@ import { newIdempotencyKey, withIdempotency } from '$lib/idempotency';
 import { markRequestStart } from '$lib/stores/slowRequests';
 import { reportOutcome } from '$lib/stores/backendHealth';
 import type {
+	ControlValue,
 	DistinctResult,
 	Filter,
 	InjectResult,
@@ -17,6 +18,7 @@ import type {
 	LogEntry,
 	NetAddress,
 	NetState,
+	PressResult,
 	QueryResult,
 	StepResult,
 	TokenValue,
@@ -802,6 +804,7 @@ export type ProtocolReason =
 	| 'unknown_place'
 	| 'unknown_transition'
 	| 'unknown_token'
+	| 'unknown_control'
 	| 'invalid_params'
 	| 'invalid_token'
 	| 'not_serializable'
@@ -812,7 +815,7 @@ export type ProtocolReason =
 	| 'internal';
 
 export const PROTOCOL_REASONS: readonly ProtocolReason[] = [
-	'unknown_net', 'unknown_place', 'unknown_transition', 'unknown_token', 'invalid_params',
+	'unknown_net', 'unknown_place', 'unknown_transition', 'unknown_token', 'unknown_control', 'invalid_params',
 	'invalid_token', 'not_serializable', 'load_failed', 'unsupported', 'unknown_method',
 	'not_loaded', 'internal',
 ];
@@ -823,7 +826,7 @@ export type NetProxyReason = ControlPlaneReason | ProtocolReason | 'timeout';
 
 /**
  * A refusal from the net execution proxy (execution, history, tokens,
- * inject, enable and disable, query and distinct). ``message`` is the
+ * inject, enable and disable, press, query and distinct). ``message`` is the
  * server's ``detail``, written for a person; ``reason`` is the tag a caller
  * branches on, one of ``NetProxyReason`` from this control plane, any
  * string from a newer one, and null when the body carried none.
@@ -999,6 +1002,31 @@ export async function executionInject(
 		withIdempotency(newIdempotencyKey()),
 	);
 	if (!res.ok) throw await netProxyError(res, 'Failed to inject token');
+	return res.json();
+}
+
+/**
+ * Press a control the net declares (protocol §6.6): name it and carry the
+ * value its kind takes, none for a button. The runtime runs it and answers
+ * `pressed`, or `nothing` with a reason; its effects arrive on the stream
+ * as the events of what it did, and a press that fires answers once the
+ * firing is complete. A name the net does not declare is 404
+ * `unknown_control`, a value of the wrong shape 422 `invalid_params`. Each
+ * call mints its own idempotency key: a network-layer retry runs the
+ * control once, two clicks run it twice. Controls belong to the outer net,
+ * so a press takes no address.
+ */
+export async function executionPress(
+	netId: string,
+	control: string,
+	value?: ControlValue,
+): Promise<PressResult> {
+	const res = await post(
+		`/api/nets/${netId}/press`,
+		{ control, ...(value !== undefined ? { value } : {}) },
+		withIdempotency(newIdempotencyKey()),
+	);
+	if (!res.ok) throw await netProxyError(res, `Failed to press ${control}`);
 	return res.json();
 }
 

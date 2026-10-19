@@ -67,6 +67,22 @@ Places may declare `key_names` and tokens carry `keys`; produced
 entries carry them as a fifth element. `POST .../query` and `GET
 .../distinct` answer the protocol's results.
 
+Controls (PROTOCOL §5.1, §6.6, since 2026-10-16): `net_state(controls=...)`
+declares them in `topology.controls`, and a place given with a `style`
+keeps it. `POST .../press {control, value?}` runs one as a runner would:
+an unknown name is 404 `unknown_control`; a value the control's kind does
+not take (anything for a button, a non-boolean for a toggle, a number out
+of the slider's bounds, an option not listed, a non-string for a text) is
+422 `invalid_params`, and so is an address, since controls are the outer
+net's. Then it acts by the control's `action`: `inject` adds a token to its
+`node`, labelled and coloured by the test's `makers` (a callable per
+control from the value to `(label, color)`, so a car can be named `Car N`)
+or labelled with the value's JSON; `fire` fires its `node` as `step` does,
+or answers `nothing` with `<node> is not fireable`; `enable` sets its
+node's switch to the value; a control without an action changes nothing.
+Every press body is kept in `presses`. A body (`bodies`) may give a
+produced token a colour as a third element.
+
 Every request is recorded in `requests`, so a test can see what the page
 asked for, including anything this fake does not know about. Those unknown
 paths get a 200 with `{}` and are also listed in `unknown_paths`.
@@ -115,8 +131,14 @@ class FakeControlPlane:
     # Per net, outer transitions with a body of their own: name to a function
     # from what each input place handed over (`launch`) to the tokens the
     # firing produces, as (place, label) in order.
-    bodies: dict[str, dict[str, Callable[[dict[str, list[dict[str, Any]]]], list[tuple[str, str]]]]] = (
+    bodies: dict[str, dict[str, Callable[[dict[str, list[dict[str, Any]]]], list[tuple[str, ...]]]]] = (
         field(default_factory=dict))
+    # Per net, what an `inject` control puts down: control name to a
+    # function from the pressed value to the token's `(label, color)`, the
+    # colour None for none.
+    makers: dict[str, dict[str, Callable[[Any], tuple[str, str | None]]]] = field(default_factory=dict)
+    # Every `press` body the page sent, in order.
+    presses: list[dict[str, Any]] = field(default_factory=list)
     # Report firings in one piece (`fired`, after the firing's other lines)
     # rather than as `launched` then `distributed`.
     one_piece_firings: bool = False
@@ -265,14 +287,18 @@ def net_state(*, net: str, places: list[dict[str, Any]], transitions: list[dict[
               edges: list[dict[str, Any]], marking: dict[str, list[dict[str, Any]]] | None = None,
               runtime: str = "python", running: bool = False, generation: int = 1,
               marking_version: int = 0, hints: dict[str, Any] | None = None,
-              guards: dict[str, Guard] | None = None) -> dict[str, Any]:
+              guards: dict[str, Guard] | None = None,
+              controls: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """A protocol state (§5) with every token listed. `guards` holds a
     transition back while its function of the marking's places, `{name:
-    {count, tokens}}`, returns false."""
+    {count, tokens}}`, returns false. `controls` are the net's declared
+    controls (§5.1); a place's `style` is served as given."""
     marking = marking or {}
     topology: dict[str, Any] = {"places": places, "transitions": transitions, "edges": edges}
     if hints is not None:
         topology["hints"] = hints
+    if controls is not None:
+        topology["controls"] = controls
     state = {
         "protocol_version": 1, "runtime": runtime, "net": net, "generation": generation,
         "marking_version": marking_version, "running": running, "topology": topology,
@@ -542,7 +568,8 @@ def _produce(cp: "FakeControlPlane", net_id: str, state: dict[str, Any],
     transition = launched["transition"]
     body = cp.bodies.get(net_id, {}).get(transition) if launched.get("nested_id") is None else None
     if body is not None:
-        return [(place, {"label": label}) for place, label in body(launched["handed"])]
+        return [(place, {"label": label, **({"color": rest[0]} if rest and rest[0] else {})})
+                for place, label, *rest in body(launched["handed"])]
     consumed = launched["consumed"]
     source = consumed[0][1] if consumed else {"label": transition}
     return [(place, source) for place in _outputs(state, transition)]
@@ -659,8 +686,19 @@ def inject(cp: "FakeControlPlane", net_id: str, place: str, token: Any,
     """Append a token from outside and publish `added`; its id."""
     with cp.lock:
         state = _target(cp, net_id, nested_id)
-        record: dict[str, Any] = {"id": _next_id(state), "label": json.dumps(token)}
-        keys = _keys_for(state, place, token)
+        return add(cp, net_id, place, json.dumps(token), keys=_keys_for(state, place, token),
+                   nested_id=nested_id)
+
+
+def add(cp: "FakeControlPlane", net_id: str, place: str, label: str, *, color: str | None = None,
+        keys: dict[str, Any] | None = None, nested_id: str | None = None) -> str:
+    """Append a token with this label (and colour, and keys) and publish
+    `added`; its id."""
+    with cp.lock:
+        state = _target(cp, net_id, nested_id)
+        record: dict[str, Any] = {"id": _next_id(state), "label": label}
+        if color:
+            record["color"] = color
         if keys is not None:
             record["keys"] = keys
         state["marking"]["places"][place]["tokens"].append(record)
@@ -716,6 +754,54 @@ def toggle(cp: "FakeControlPlane", net_id: str, transition: str, enabled: bool) 
             _notify(cp, net_id, "toggled", {"transition": transition, "enabled": enabled},
                     moves_version=True)
             _notify_fireable(cp, net_id)
+
+
+def _takes(control: dict[str, Any], value: Any) -> bool:
+    """Whether a press of `control` may carry `value` (§6.6); None is absent."""
+    config = control.get("config") or {}
+    kind = control.get("kind")
+    if kind == "button":
+        return value is None
+    if kind == "toggle":
+        return isinstance(value, bool)
+    if kind == "slider":
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and config.get("start", float("-inf")) <= value <= config.get("stop", float("inf")))
+    if kind == "select":
+        return isinstance(value, str) and value in (config.get("options") or [])
+    if kind == "text":
+        return isinstance(value, str)
+    return True
+
+
+def press(cp: "FakeControlPlane", net_id: str, body: Any) -> dict[str, Any]:
+    """Run a control the net declares (§6.6) and answer `{status, reason?,
+    marking_version}`; the effects go out as the events of what it did."""
+    with cp.lock:
+        body = body if isinstance(body, dict) else {}
+        cp.presses.append(copy.deepcopy(body))
+        if "path" in body or "nested_id" in body:
+            raise Refusal(422, "invalid_params", "controls belong to the outer net")
+        state = cp.execution_state[net_id]
+        name = body.get("control")
+        control = next((each for each in state["topology"].get("controls") or [] if each["name"] == name), None)
+        if control is None:
+            raise Refusal(404, "unknown_control", f"no control named {name!r}")
+        value = body.get("value")
+        if not _takes(control, value):
+            raise Refusal(422, "invalid_params", f"{name} does not take {json.dumps(value)}")
+        action, node = control.get("action"), control.get("node")
+        answer: dict[str, Any] = {"status": "pressed"}
+        if action == "inject":
+            maker = cp.makers.get(net_id, {}).get(name)
+            label, color = maker(value) if maker else (json.dumps(value), None)
+            add(cp, net_id, node, label, color=color)
+        elif action == "fire":
+            if fire(cp, net_id, node) is None:
+                answer = {"status": "nothing", "reason": f"{node} is not fireable"}
+        elif action == "enable":
+            toggle(cp, net_id, node, value is True)
+        return {**answer, "marking_version": cp.execution_state[net_id]["marking_version"]}
 
 
 def served_state(state: dict[str, Any], token_limit: int) -> dict[str, Any]:
@@ -833,12 +919,14 @@ def _token_value(state: dict[str, Any], token_id: str) -> dict[str, Any]:
 
 def _write_answer(cp: "FakeControlPlane", method: str, path: str, body: Any) -> Any:
     """What the execution proxy answers a write, or None for a path it does not know."""
-    match = re.fullmatch(r"/api/nets/([^/]+)/(execution/(step|reset|start|stop)|inject|query"
+    match = re.fullmatch(r"/api/nets/([^/]+)/(execution/(step|reset|start|stop)|inject|query|press"
                          r"|transitions/([^/]+)/(enable|disable))", path)
     if not match or method != "POST":
         return None
     net_id = match.group(1)
     state = _net_or_refuse(cp, net_id)
+    if match.group(2) == "press":
+        return press(cp, net_id, body)
     if match.group(2) == "query":
         with cp.lock:
             body = body or {}
