@@ -38,14 +38,14 @@ relies on.
 ## Net execution proxy
 
 Execution state, history, step, start, stop, reset, inject, tokens, enable,
-disable, query and distinct go to `/api/nets/{id}/...` and the CP forwards
-them to the net's worker. Since 2026-10-04 bodies and answers are the net
+disable, press, query and distinct go to `/api/nets/{id}/...` and the CP
+forwards them to the net's worker. Since 2026-10-04 bodies and answers are the net
 protocol's, version 1 (`PROTOCOL.md` in the petritype library); the shapes
 live in `src/lib/types.ts`:
 
 | Call | Answer |
 |---|---|
-| `GET .../execution/state?token_limit=` | The protocol state: `topology.{places, transitions, edges, hints?}`, `transitions[name].{enabled, fireable, in_flight, priority?}`, `marking.places[name].{count, tokens}` (the page reads sizes from `count`; `tokens` is capped at `token_limit`, 200), `generation`, `marking_version`, `running`, `runtime`, `progress`. |
+| `GET .../execution/state?token_limit=` | The protocol state: `topology.{places, transitions, edges, hints?, controls?}`, `transitions[name].{enabled, fireable, in_flight, priority?}`, `marking.places[name].{count, tokens}` (the page reads sizes from `count`; `tokens` is capped at `token_limit`, 200), `generation`, `marking_version`, `running`, `runtime`, `progress`. |
 | `GET .../execution/history?after=&limit=` | `{entries}`, oldest first, each `{seq, transition, started_at, duration_ms, outcome, consumed, produced}` with consumed and produced as `[place, id]` pairs. The page reads it whole on a resync and `after` its newest `seq` once a firing lands. |
 | `GET .../tokens/{id}` | `{id, place, type_name, kind: "json", value}`, or `kind: "text"` with `text` for a place with no JSON form; `keys` and `nets` when the token has them. |
 | `POST .../inject {place, token}` | `{status, id, marking_version}`; watchers see `added`. The page offers only places with `serializable: true`. |
@@ -53,6 +53,7 @@ live in `src/lib/types.ts`:
 | `GET .../distinct?key=&places=&places=&path=&nested_id=` | `{marking_version, key, values}` (`distinctValues`); the filter bar's values for a key, falling back on the tokens the page holds when the route refuses. |
 | `POST .../execution/step` | `{fired, transition?, failed?, marking_version, running}` once the firing has landed. |
 | `POST .../transitions/{name}/enable\|disable` | `{marking_version}`; watchers see `toggled` if it changed. |
+| `POST .../press {control, value?}` | `{status: "pressed" \| "nothing", reason?, marking_version}`, once a press that fires has landed; watchers see the events of what it did. `value` is left out for a button. |
 
 Since 2026-10-12 the reads take an inner net's address (protocol §12.3):
 `?nested_id=` or `?path=` on `GET .../execution/state`,
@@ -77,12 +78,20 @@ dashed, `mutate` and `mutate_where` (a mutate edge with a filter) dotted and
 the rest solid, `drain` and `survey` with a hollow arrowhead, and a kind it
 does not know as a plain edge.
 
+Since 2026-10-16 a state may carry `topology.controls`, the controls the
+net declares (`{name, label, kind, node?, action?, config?}`, protocol
+§5.1), and a place `style: {fill: "token"}`. The page keeps both in its
+mirror, draws the controls as the legend over the graph and presses them
+with `POST .../press` (`executionPress`, §6.6), and fills a styled place
+with its one token's `color`. Controls belong to the outer net, so a press
+takes no address.
+
 Every refusal arrives as `{"detail": <sentence>, "reason": <tag>}`, parsed
 into `NetProxyError` (`status`, `reason`, message = detail). The CP refuses on
 its own with 404 `net_not_found`, 409 `not_assigned`, 503 `worker_not_ready`
 and 502 `worker_unreachable`, and the page shows the detail. Protocol errors
 carry the protocol's code (`isProtocolError()`): 404
-`unknown_net|unknown_place|unknown_transition|unknown_token`, 422
+`unknown_net|unknown_place|unknown_transition|unknown_token|unknown_control`, 422
 `invalid_params|invalid_token|not_serializable|load_failed`, 501
 `unsupported|unknown_method`, 409 `not_loaded`, 500 `internal`. A 409
 `not_loaded` makes `isNotLoaded()` true: shown quietly as a state, and reads

@@ -332,8 +332,9 @@ types and the drawing change.
 - **The inspector names what they do.** The transition inspector's input
   rows give the two kinds a phrase: `drain: takes every token, zero or
   more` and `survey: copies every token, zero or more`. The other kinds go
-  by their names, as before. The page has no legend and no edge tooltips,
-  so that row is the one place where it lists kinds. It shows when the
+  by their names, as before. The page has no edge tooltips, and its legend
+  (since 2026-10-19) lists the net's controls rather than edge kinds, so
+  that row is the one place where it lists kinds. It shows when the
   transition carries no `detail`.
 - **`mutate_where` is dotted now**, as `mutate` is. It is a mutate edge with
   a filter, so it is a read edge too. Until this slice it was drawn solid,
@@ -416,3 +417,158 @@ which idle after every step and arrival:
   6. `Change` fires, `Light #6 → Light #11`.
 - The token inspector shows the three cars in `Passed` and `amber` in
   `Light`, and `Change` is fireable: the light never stops.
+
+## Controls and token styles in the page (2026-10-16)
+
+**Status:** Implemented 2026-10-19 on branch `net-controls`. Protocol §5.1
+(`topology.controls` and a place's `style`, since 2026-10-16), §5.3 (a
+token's `color`) and §6.6 (`press`). petritype-server relays `press` as
+`POST /api/nets/{id}/press` (its branch `press-route`); the browser suite
+drives the page against the fake control plane, so nothing here waited on
+that route. The Bevy viewer's legend (its DESIGN §3.11) is the model, and
+the two are meant to feel alike.
+
+### What the wire gives the page
+
+- `get_state` may carry `topology.controls`, the controls the net
+  declares in declaration order, each `{name, label, kind, node?, action?,
+  config?}`. `kind` is `button`, `toggle`, `slider`, `select` or `text`,
+  and fixes the value a press carries: none, a boolean, a number within
+  `config.start` and `config.stop`, one of `config.options`, a string.
+  `config.value` is a toggle's, a slider's or a select's initial value, and
+  `config.placeholder` a text box's hint. `node` names the place or
+  transition the control acts on, and `action` (`fire`, `enable`,
+  `inject`) is for lighting only.
+- A place may carry `style: {fill: "token"}`: while it holds exactly one
+  token and that token has a `color`, it is filled with that colour. No
+  notification carries a style; the token's colour comes with the token,
+  in a state read, `added` and a produced entry.
+- `POST /api/nets/{id}/press {control, value?}` answers `{status:
+  "pressed" | "nothing", reason?, marking_version}`. A press that fires
+  answers once the firing is complete. Its effects arrive on the worker
+  stream as the events of what it did (`launched` and `distributed`,
+  `added`, `toggled`), as for `step`, `inject` and the switches. A name the
+  net does not declare is 404 `unknown_control`, a value of the wrong
+  shape 422 `invalid_params`. Controls belong to the outer net: a press
+  takes no address.
+
+### Decisions
+
+- **The mirror keeps both.** `mirrorFromState` keeps `topology.controls`,
+  as `[]` for a net that declares none, and each place's `style`. Until
+  this slice the page rebuilt the topology from four keys and dropped the
+  controls. Nothing moves them between state reads: they change only with
+  a new generation.
+- **The tint is the `--place-fill` variable.** `drawNet` gives a drawn
+  place `fill`, its one token's colour, when its style is `{fill:
+  "token"}`, its count is one and that token has a colour (`placeFill` in
+  `netView.ts`). The place's circle group and its label group set
+  `--place-fill` to it, so the circle and the labels' outlines follow, and
+  the badge of a token that holds nets takes its place's fill the same
+  way, since badges sit in a layer of their own. The count's scrim is a
+  gradient defined once for the whole graph, which reads the variable
+  where it is defined, so it keeps the theme's fill; it shows only from
+  seven tokens, so it never meets the tint. The page has no input or
+  output highlight on places during a firing, so nothing competes with
+  the tint: while `Change` is in flight `Light` is empty and has the
+  theme's fill, and when it lands `Light` takes the new colour. A token
+  filter does not change the fill, since the fill says what the place
+  holds.
+- **The legend is an overlay at the graph's top-left**, as in the Bevy
+  viewer, there only while the outer net declares a control
+  (`ControlsLegend.svelte`). Its header, `Controls (n)`, folds it; it is
+  open at first, and the fold is page state, so it lasts while the page is
+  open, across nets. It reads the outer net's controls and transitions and
+  stays while an inner net is shown, since the controls are the outer
+  net's; the page keys it by net and generation, so a new one starts its
+  rows from their initial values.
+- **Native widgets, one row per control, in declaration order.** A
+  `button` is a button carrying its label. A `toggle` is a button showing
+  its state (`aria-pressed`, a ticked or empty box) and sends the other
+  state. A `slider` is `<input type="range">` over `config.start` to
+  `config.stop` in steps of `config.step` (0, 100 and a hundredth of the
+  range when not given), its number beside it, sending on `change`, that
+  is on letting go or on each key. A `select` is a `<select>` of the
+  options, sending on change. A `text` is a text box with the placeholder
+  and a Send button, Enter sending too; the text stays in the box, and an
+  empty box sends the empty string. Initial values come from
+  `config.value`. A kind the page does not know is its label alone. The
+  rules are pure functions in `controls.ts`.
+- **Lighting.** A `fire` row is dim (opacity 0.35) while its transition is
+  not fireable and is still sent: the runtime answers `nothing`, and the
+  line under the rows says so. An `enable` toggle shows its transition's
+  `enabled` switch, which `toggled` moves; any other toggle shows what it
+  last sent. Every other row is lit. A row's widgets are disabled while
+  its press is in flight; its text box is only read-only then, so it
+  keeps the focus for the next name.
+- **The answer is one line under the rows.** `pressed` leaves no line;
+  `nothing` leaves `<label>: <reason>` in the muted text colour; a refusal
+  leaves `<label>: <detail>` in the danger colour. The next press clears
+  it, and so does a change of net. The marking follows on the stream, as
+  for `inject`: the page reads no state after a press.
+- **Hover.** Resting on a row sets `data-hover` on the group of the node
+  it acts on, and the graph's hover styles, a thicker ring on a place and
+  a blue fill on a transition, answer to `data-hover` as they do to the
+  pointer. Only while the outer net is drawn, since the node names are
+  its own.
+- **Colours from the theme's variables.** The legend reads `--bg-secondary`,
+  `--border-color`, `--button-border`, `--danger` and `--text-secondary`
+  directly, as the graph panel's other bars do. The Tailwind colour classes
+  (`text-destructive`, `bg-card`, `border-border`) resolve at `:root`,
+  where the theme's variables, set on `body`, are not defined, so on this
+  page they fall back to the inherited colour or to transparent.
+- **No keyboard shortcuts.** The page has none, and the browser holds the
+  digit keys the Bevy viewer uses.
+- `press` joins `ProtocolReason` as `unknown_control`, and
+  `executionPress(netId, control, value?)` in `api.ts` posts it with an
+  idempotency key, leaving `value` out when it is undefined.
+
+### Tests
+
+Vitest:
+- `netView.test.ts`: the traffic light fixture gains its two controls,
+  `Light`'s style and the light's colour. The mirror keeps the controls in
+  order and each place's style; `drawNet` fills `Light` with its token's
+  colour and nothing else; `Light` has no fill with two tokens, with none,
+  with one without a colour, or with one listed of two counted; an unstyled
+  place with a coloured token has none; the nets without controls keep
+  `[]` and draw as before.
+- `controls.test.ts`: the widget of each kind, the slider's range and its
+  defaults, snapping, each kind's initial value, the lighting of `fire`
+  rows, an `enable` toggle following its switch, and the notice for each
+  answer.
+- `api.nets.test.ts`: the press body with and without a value (`false`, `0`
+  and `""` sent, `undefined` left out), the idempotency key, `nothing` with
+  its reason, and 404 `unknown_control` as a protocol error.
+
+The fake control plane (`tests/ui/fake_cp.py`) serves
+`net_state(controls=...)` and a place's `style` as given, and answers
+`POST .../press` as a runner would: 404 `unknown_control` for a name it does
+not declare, 422 `invalid_params` for a value its kind does not take or for
+an address, and otherwise by the control's `action`. `inject` adds a token
+to `node`, labelled and coloured by the test's `makers`; `fire` fires
+`node` through the same `fire` as `step`, or answers `nothing` with `<node>
+is not fireable`; `enable` sets the switch. It keeps every press body in
+`presses`, emptied for each test. A transition's body may give a produced
+token a colour.
+
+The browser suite, in `test_net_protocol.py`, seeds the traffic light
+with `Light`'s style and the conformance colours (`_seed_traffic_light`):
+- `test_the_legend_presses_the_traffic_lights_controls`: the legend lists
+  `+ Car` and `Change`, both lit, and `Light` is red. A typed `Taxi`, sent
+  with Enter, and an empty box, sent with Send, add `Taxi` and `Car 2` to
+  `Waiting`; `Change` sends no value, fires (`Light #0 → Light #3` in the
+  log) and `Light` turns green. Resting on a row lights `Change` and then
+  `Waiting`; the header folds the rows away and brings them back.
+- `test_a_held_fire_control_is_dim_and_still_sends`: with a `Go` control
+  added, its row is dim at red and still sends; the line reads `Go: Go is
+  not fireable` in the muted colour, and nothing fires. The next press
+  clears the line; a car at green lights the row, and `Go` drains it.
+- `test_a_refused_press_shows_the_error_line`: a control the net no
+  longer declares is refused, and the line reads `Change: no control named
+  'change'` in the danger colour.
+- `test_the_legend_draws_each_kind_and_sends_its_value`: an `enable`
+  toggle shows `Go`'s switch and turns it off, a slider sends 7 on letting
+  go and 6 on a key, and a select sends `busy`.
+- `test_the_page_draws_the_topology_and_its_state` checks that a net
+  without controls has no legend and no filled place.
