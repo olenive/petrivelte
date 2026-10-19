@@ -13,6 +13,8 @@
 	/** Its body just failed. */
 	export let isFailing: boolean = false;
 	export let isSelected: boolean = false;
+	/** The legend's row for a control acting on it is under the pointer. */
+	export let hovered: boolean = false;
 	export let onSelect: ((name: string) => void) | null = null;
 
 	const width = 80;
@@ -32,6 +34,7 @@
 	data-transition-id={name}
 	data-look={look}
 	data-failing={isFailing ? 'true' : undefined}
+	data-hover={hovered ? 'true' : undefined}
 	on:click={handleClick}
 >
 	<rect
@@ -71,7 +74,8 @@
 		cursor: pointer;
 	}
 
-	.transition:hover rect {
+	.transition:hover rect,
+	.transition[data-hover] rect {
 		fill: #0066cc;
 	}
 

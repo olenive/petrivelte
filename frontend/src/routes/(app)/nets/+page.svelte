@@ -19,12 +19,14 @@
 		logout,
 		listNets, listWorkers, patchNet, loadNet, unloadNet,
 		getExecutionState, executionStep, executionStart, executionStop, executionReset, executionInject,
-		enableTransition, disableTransition,
+		executionPress, enableTransition, disableTransition,
 		listNetSecrets, setNetSecrets, getNetLogHistory, getExecutionHistory, runNetNow,
 		diagnoseNet, isNotLoaded, isStillInProgress, distinctValues, type NetDiagnosis,
 		type Net, type Worker, type NetParam, type SecretMetadata,
 	} from '$lib/api';
 	import GraphPanel from '$lib/components/GraphPanel.svelte';
+	import ControlsLegend from '$lib/components/ControlsLegend.svelte';
+	import { noticeOfAnswer, noticeOfError, type PressNotice } from '$lib/controls';
 	import ExecutionLog from '$lib/components/ExecutionLog.svelte';
 	import PanelFailed from '$lib/components/PanelFailed.svelte';
 	import LogViewer from '$lib/components/LogViewer.svelte';
@@ -39,7 +41,9 @@
 	import { groupByDefinition } from '$lib/netInstances';
 	import { TOKEN_STAGE_MS, FIRING_ANIMATION_MS } from '$lib/tokenAnimation';
 	import { diagnoseActivityLine, diagnoseClasses, diagnoseStateLabel } from '$lib/netDiagnose';
-	import type { InnerNetRef, KeyValue, LogEntry, NetAddress, NetEvent, NetState, StepResult } from '$lib/types';
+	import type {
+		Control, ControlValue, InnerNetRef, KeyValue, LogEntry, NetAddress, NetEvent, NetState, StepResult,
+	} from '$lib/types';
 	import { layoutFor, type KeyedLayout } from '$lib/graphLayout';
 	import {
 		DEFAULT_TOKEN_LIMIT,
@@ -305,6 +309,23 @@
 	let isInjecting = $state(false);
 	let injectError = $state<string | null>(null);
 	let injectNotice = $state<string | null>(null);
+	// The legend: the controls the outer net declares (protocol §5.1),
+	// pressed through the server (§6.6). Shown over the graph while the net
+	// declares any, and kept while an inner net is shown, since the
+	// controls are the outer net's. Open at first; folding it lasts while
+	// the page is open, across nets.
+	let legendOpen = $state(true);
+	// The controls whose press is in flight: each row is disabled until
+	// its answer is in.
+	let pressing = $state.raw<ReadonlySet<string>>(new Set());
+	// What the last press left to say: why it did nothing, or why it was
+	// refused. Cleared by the next press.
+	let pressNotice = $state<PressNotice | null>(null);
+	// The node a hovered legend row acts on; lit only while the outer net,
+	// whose node it names, is drawn.
+	let legendHover = $state<string | null>(null);
+	let legendControls = $derived(mirror?.topology.controls ?? []);
+	let hoveredNode = $derived(innerShown ? null : legendHover);
 	// Reason the net's continuous execution stopped on an error (a raised
 	// transition). Cleared when the user next acts. A normal end-of-run
 	// ("no_fireable_transitions") is not shown here.
@@ -766,6 +787,9 @@
 	function dropMirror() {
 		closeInner(null);
 		viewNotice = null;
+		pressNotice = null;
+		pressing = new Set();
+		legendHover = null;
 		distinctAnswers = {};
 		resetFilter();
 		mirror = null;
@@ -1158,6 +1182,24 @@
 			injectError = error instanceof Error ? error.message : 'Inject failed.';
 		} finally {
 			isInjecting = false;
+		}
+	}
+
+	// Press a control: name it and carry its value; the runtime runs it. Its
+	// effects reach the mirror on the stream, as an inject's do, so nothing
+	// is read back here. Controls act on the outer net only (§6.6).
+	async function handlePress(control: Control, value?: ControlValue) {
+		const netId = selectedNetId;
+		if (!netId || pressing.has(control.name)) return;
+		pressNotice = null;
+		pressing = new Set([...pressing, control.name]);
+		try {
+			const answer = await executionPress(netId, control.name, value);
+			if (selectedNetId === netId) pressNotice = noticeOfAnswer(control, answer);
+		} catch (error) {
+			if (selectedNetId === netId) pressNotice = noticeOfError(control, error);
+		} finally {
+			pressing = new Set([...pressing].filter((name) => name !== control.name));
 		}
 	}
 
@@ -2274,7 +2316,7 @@
 							style="color: inherit" onclick={() => (tokenFilter = NO_FILTER)}>Clear</button>
 					</div>
 				{/if}
-				<div class="flex-1 overflow-hidden flex min-h-0">
+				<div class="relative flex-1 overflow-hidden flex min-h-0">
 					<svelte:boundary onerror={(error) => panelFailed('graph', error)}>
 						<GraphPanel
 							graph={drawnNet}
@@ -2290,11 +2332,29 @@
 							onTokenOpen={handleTokenOpen}
 							{selectedTransitionId}
 							onTransitionSelect={handleTransitionSelect}
+							{hoveredNode}
 						/>
 						{#snippet failed(error, reset)}
 							<PanelFailed name="graph" {error} onReset={reset} />
 						{/snippet}
 					</svelte:boundary>
+					{#if legendControls.length > 0}
+						<!-- Over the graph's top-left, as in the Bevy viewer; the
+						     zoom buttons hold the top-right. A new net or
+						     generation starts its rows from their initial values. -->
+						{#key `${selectedNetId}|${mirror.generation}`}
+							<ControlsLegend
+								controls={legendControls}
+								transitions={mirror.transitions}
+								open={legendOpen}
+								{pressing}
+								notice={pressNotice}
+								onToggleOpen={() => (legendOpen = !legendOpen)}
+								onPress={handlePress}
+								onHover={(node) => (legendHover = node)}
+							/>
+						{/key}
+					{/if}
 				</div>
 			</div>
 

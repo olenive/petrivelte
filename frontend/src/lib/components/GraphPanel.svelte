@@ -33,6 +33,8 @@
 	export let onTokenOpen: ((tokenId: string) => void) | null = null;
 	export let selectedTransitionId: string | null = null;
 	export let onTransitionSelect: ((transitionId: string | null) => void) | null = null;
+	/** The node a hovered legend row acts on: lit as if the pointer rested on it. */
+	export let hoveredNode: string | null = null;
 
 	let viewBox = '0 0 1000 800';
 	let scale = 1;
@@ -249,7 +251,7 @@
 			<!-- Place circles layer (background) -->
 			<g class="place-circles">
 				{#each graph.places as place (place.name)}
-					<PlaceCircle name={place.name} x={place.x} y={place.y} fill={place.fill} />
+					<PlaceCircle name={place.name} x={place.x} y={place.y} fill={place.fill} hovered={place.name === hoveredNode} />
 				{/each}
 			</g>
 
@@ -325,6 +327,7 @@
 						isFiring={firingTransitions.has(transition.name)}
 						isFailing={failingTransitions.has(transition.name)}
 						isSelected={transition.name === selectedTransitionId}
+						hovered={transition.name === hoveredNode}
 						onSelect={handleTransitionSelect}
 					/>
 				{/each}
