@@ -2076,3 +2076,139 @@ export async function getWiring(): Promise<WiringResponse> {
 	if (!res.ok) throw new Error('Failed to load wiring');
 	return res.json();
 }
+
+// -- shares --
+//
+// A share opens a world of the owner's nets, or one notebook, to people
+// outside the account through the public tier. The owner mints, lists and
+// revokes shares here; the routes need a browser session and refuse a
+// personal API token with 403. The shapes mirror `petritype_server/shares/`
+// (`models.py` for the answers, `rules.py` for the request and its bounds).
+
+export type ShareResourceKind = 'world' | 'notebook';
+/** Read shows the shared thing; play adds injecting into the listed places
+ *  and pressing the listed controls, stamped with the share's seat. */
+export type ShareScope = 'read' | 'play';
+/** Link: anyone holding the link. Named: one person, by email. */
+export type ShareAudience = 'link' | 'named';
+
+/** One net of a world share. `worker_id` is the net's worker now, read on
+ *  every listing, so it follows a reassignment made after the mint and is
+ *  null once the net has no worker. */
+export interface ShareNet {
+	net_id: string;
+	worker_id: string | null;
+	play_places: string[];
+	play_controls: string[];
+}
+
+/** A share as its owner lists it: never the secret. `prefix` is the 8
+ *  characters after `petri_share_`. Revoked and expired shares are listed
+ *  too. A world share's `nets` loses a net when that net is deleted. */
+export interface Share {
+	id: string;
+	label: string;
+	resource_kind: ShareResourceKind;
+	/** Set exactly on a notebook share. */
+	notebook_id: string | null;
+	scope: ShareScope;
+	audience: ShareAudience;
+	/** Set exactly on a named share. */
+	member_email: string | null;
+	/** Set exactly on a play share: the name stamped on its player's inputs. */
+	seat: string | null;
+	prefix: string;
+	/** False strips token payloads and log lines from what viewers see. */
+	publish_payloads: boolean;
+	max_viewers: number;
+	inputs_per_minute: number;
+	created_at: string;
+	expires_at: string;
+	revoked_at: string | null;
+	last_used_at: string | null;
+	/** Oldest net first; empty on a notebook share. */
+	nets: ShareNet[];
+}
+
+/** The mint answer: the only time the full `token` is available. */
+export interface ShareCreated extends Share {
+	token: string;
+}
+
+/** One net of a mint request. The lists are only for a play share. */
+export interface ShareNetRequest {
+	net_id: string;
+	play_places?: string[];
+	play_controls?: string[];
+}
+
+/** The body of `POST /api/shares`. A field left out takes the server's
+ *  default: scope read, audience link, 30 days, payloads hidden, 20 viewers,
+ *  60 inputs a minute. A world names `nets`; a notebook names `notebook_id`.
+ *  `seat` belongs only on a play share and `member_email` only on a named
+ *  one: the server refuses a setting the share would never read, and an
+ *  unknown field. */
+export interface ShareRequest {
+	label: string;
+	resource_kind: ShareResourceKind;
+	nets?: ShareNetRequest[];
+	notebook_id?: string | null;
+	scope?: ShareScope;
+	audience?: ShareAudience;
+	member_email?: string;
+	seat?: string;
+	expires_in_days?: number;
+	publish_payloads?: boolean;
+	max_viewers?: number;
+	inputs_per_minute?: number;
+}
+
+/** The share routes' refusal as one sentence. The control plane's own
+ *  refusals are a sentence in `detail`; a body FastAPI cannot parse (a value
+ *  of the wrong type) is a list of complaints, and the first is named by its
+ *  field, since the form has several numbers that could be the one. A 429
+ *  carries only the limit in `detail`. */
+function shareErrorMessage(status: number, data: unknown, fallback: string): string {
+	const detail = data && typeof data === 'object' ? (data as Record<string, unknown>).detail : null;
+	if (status === 429) {
+		const limit = typeof detail === 'string' ? ` (${detail})` : '';
+		return `Too many shares minted in the last minute${limit}; wait a minute and try again`;
+	}
+	if (Array.isArray(detail) && detail.length > 0) {
+		const first = detail[0] as { loc?: unknown; msg?: unknown } | null;
+		if (first && typeof first === 'object' && 'msg' in first) {
+			const loc = Array.isArray(first.loc) ? first.loc.filter((part) => part !== 'body') : [];
+			return loc.length > 0 ? `${loc.join('.')}: ${String(first.msg)}` : String(first.msg);
+		}
+	}
+	return extractErrorMessage(data, fallback);
+}
+
+/** The owner's shares, newest first, each with its nets. With `netId`, only
+ *  the world shares that contain that net. */
+export async function listShares(netId?: string): Promise<Share[]> {
+	const path = netId === undefined ? '/api/shares' : `/api/shares?net_id=${encodeURIComponent(netId)}`;
+	const res = await get(path);
+	if (!res.ok) {
+		throw new Error(shareErrorMessage(res.status, await res.json().catch(() => null), 'Failed to load shares'));
+	}
+	return res.json();
+}
+
+/** Mint a share. A refusal (422) throws the server's sentence. */
+export async function createShare(request: ShareRequest): Promise<ShareCreated> {
+	const res = await post('/api/shares', request);
+	if (!res.ok) {
+		throw new Error(shareErrorMessage(res.status, await res.json().catch(() => null), 'Failed to create the share'));
+	}
+	return res.json();
+}
+
+/** Revoke one of the owner's shares. The row stays listed; revoking twice is fine. */
+export async function revokeShare(id: string): Promise<{ status: string }> {
+	const res = await del(`/api/shares/${encodeURIComponent(id)}`);
+	if (!res.ok) {
+		throw new Error(shareErrorMessage(res.status, await res.json().catch(() => null), 'Failed to revoke the share'));
+	}
+	return res.json();
+}

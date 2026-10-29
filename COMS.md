@@ -14,8 +14,9 @@ relies on.
   `SessionExpiredError`.
 - Personal API tokens (`petri_pat_...`) are for scripts and agents, never the
   browser. The Settings page creates, lists and revokes them; token
-  management itself needs a browser session. Each token has a scope, checked
-  by the server in `petritype_server/auth/scopes.py`:
+  management itself needs a browser session, as do shares (below). Each
+  token has a scope, checked by the server in
+  `petritype_server/auth/scopes.py`:
   - `read`: GET requests only.
   - `operate`: every other write, such as load, start, stop, reset, inject,
     and creating or editing nets and notebooks.
@@ -192,6 +193,70 @@ iframe. Health rides HTTP: the page polls `GET /api/notebooks/{id}/sync`
 CP serves (`notebookThresholds.ts`). The page cannot see the cross-origin
 iframe's socket, so `notebookSync.ts` decides from ages and counters whether
 to remount the iframe, with a capped budget.
+
+## Shares
+
+A share opens a world of the owner's nets, or one notebook, to people outside
+the account. Viewers reach it through the public tier, a separate Fly app
+with its own origin; the owner mints, lists and revokes shares over three CP
+routes (`listShares`, `createShare` and `revokeShare` in `api.ts`; the design
+is `dev-docs/SHARING.md` in the petritype-server repository):
+
+| Call | Answer |
+|---|---|
+| `GET /api/shares?net_id=` | The owner's shares, newest first, revoked and expired ones included, each with its `nets`. `net_id` (optional) narrows the list to the world shares holding that net; a malformed one is 422. |
+| `POST /api/shares` | 201 with the share and its `token`, the only time the secret is shown. |
+| `DELETE /api/shares/{id}` | `{status: "revoked"}`. The row stays listed with `revoked_at` set; revoking twice is fine; another owner's share is 404 `Share not found`. |
+
+All three need the browser session: a request carrying a personal API token
+is refused with 403 `This action needs a browser session, not an API token`,
+so a leaked script token cannot open the owner's nets to anyone.
+
+The mint body (`ShareRequest`); a field left out takes the default shown:
+
+- `label`: 1 to 100 characters after trimming.
+- `resource_kind`: `world` or `notebook`. A world names `nets`, 1 to 50 of
+  the owner's nets, all on one worker when it is minted: a net on another
+  worker, or on none, is refused. A notebook names `notebook_id`, one of the
+  owner's notebooks, and is read only.
+- `nets`: `[{net_id, play_places?, play_controls?}]`. The two lists are the
+  places a play share may inject into and the controls it may press on that
+  net, at most 100 names each, 1 to 200 characters a name; the server trims
+  them and drops repeats.
+- `scope`: `read` (default) or `play`. A read share takes no seat, places or
+  controls. A play share needs a `seat`, 1 to 100 characters, the name
+  stamped on its player's inputs, and at least one place or control on one of
+  its nets.
+- `audience`: `link` (default), anyone holding the link, or `named`, which
+  needs a `member_email`. A link share takes no `member_email`.
+- `expires_in_days`: 1 to 365, default 30, counted from the mint.
+- `publish_payloads`: default false, which strips token values and log lines
+  from what viewers see; counts and firings still show.
+- `max_viewers`: 1 to 200, default 20. `inputs_per_minute`: 1 to 600, default
+  60, per seat across the world's nets.
+
+A refused mint is 422 with one plain-English sentence in `detail`, which
+`createShare` throws as it stands. A body that does not parse (an unknown
+field, a value of the wrong type) is FastAPI's own 422, a list of complaints;
+`createShare` throws the first, prefixed with the field it names. The server
+refuses a setting the share would never read rather than storing it, so a
+caller sends `seat` and the per-net lists only on a play share and
+`member_email` only on a named one. An owner holds at most 100 active shares
+(the next is refused with `You already have 100 active shares; revoke one
+first`) and mints at most 10 a minute (429, which `createShare` words as
+such).
+
+The share answer: `id`, `label`, `resource_kind`, `notebook_id` (set exactly
+on a notebook share), `scope`, `audience`, `member_email` (set exactly on a
+named share), `seat` (set exactly on a play share), `prefix` (the 8
+characters after `petri_share_`), `publish_payloads`, `max_viewers`,
+`inputs_per_minute`, `created_at`, `expires_at`, `revoked_at`,
+`last_used_at` (written by the public tier at most once a minute), and `nets`,
+each `{net_id, worker_id, play_places, play_controls}` with `worker_id` the
+net's worker now, so a world a reassignment split shows nets on more than one
+worker. A deleted net leaves its worlds; a deleted notebook deletes its
+shares. The answer names nets and notebooks by id only. The `token` is
+`petri_share_` followed by 43 url-safe characters.
 
 ## Polling
 
