@@ -346,6 +346,27 @@ none. The mint form's Bundle select, shown for a world of either scope and
 hidden for a notebook, offers the owner's bundles by label with none as the
 default; the mint carries `bundle_id` only when a world picks one.
 
+### Artifacts
+
+An artifact is the latest bytes a net or notebook published under one name,
+such as a plot as PNG or SVG, a JSON document, a CSV table or an HTML page.
+The control plane keeps them and serves them to the owner over two routes
+(the design is "Artifacts as built" in `dev-docs/SHARING.md`). No page shows
+them yet. These routes take a personal API token of read scope as well as
+the browser session.
+
+| Call | Answer |
+|---|---|
+| `GET /api/artifacts?net_id=` or `?notebook_id=` | One of the owner's nets' or notebooks' artifacts by name, without their bytes: each `{id, net_id, notebook_id, name, content_type, size_bytes, content_hash, updated_at}`. Naming both or neither is 422 `Name exactly one of net_id and notebook_id.` |
+| `GET /api/artifacts/{artifact_id}` | The bytes with their content type and an `ETag`, 304 on a matching `If-None-Match`, under a sandboxing `Content-Security-Policy` that allows no script and no requests. Another owner's artifact is 404. |
+
+The rule for whoever builds the page that shows them: an HTML or SVG
+artifact is rendered only inside an `<img>` or a sandboxed `<iframe>` whose
+`src` is the control plane's URL for it (`${API_URL}/api/artifacts/{id}`),
+where the control plane's policy applies, and never through a blob URL or
+`{@html}`. Its bytes are whatever a net's code published, and rendered on
+the frontend's origin they would run with the owner's session.
+
 ## Polling
 
 SSE triggers refetches; a few pages also poll as a fallback: the workers page
