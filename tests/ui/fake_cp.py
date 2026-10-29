@@ -83,6 +83,15 @@ node's switch to the value; a control without an action changes nothing.
 Every press body is kept in `presses`. A body (`bodies`) may give a
 produced token a colour as a third element.
 
+Shares (`GET`, `POST` and `DELETE /api/shares`, as `shares/routes.py` in
+the server answers them): `shares` is the owner's list, newest first. A mint
+keeps its body in `share_bodies` and answers 201 with the share and a fresh
+`token`, each net carrying the `worker_id` that `wiring` gives it, and puts
+the share at the head of the list; a mint while `share_refusals` holds a
+sentence answers 422 with that sentence as `detail` instead. A revoke sets
+`revoked_at` and keeps the row; an unknown id is 404 `Share not found`.
+`wiring`, when a test sets it, is what `GET /api/wiring` answers.
+
 Every request is recorded in `requests`, so a test can see what the page
 asked for, including anything this fake does not know about. Those unknown
 paths get a 200 with `{}` and are also listed in `unknown_paths`.
@@ -101,6 +110,8 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 STAMP = "2026-09-29T10:00:00+00:00"
+# The public tier's address the dev server is given, so the shares page makes links.
+PUBLIC_SHARE_URL = "https://share.test"
 
 
 @dataclass
@@ -157,6 +168,13 @@ class FakeControlPlane:
     # page's store.
     refuse_worker_streams: int = 0
     worker_stream_answers: list[dict[str, Any]] = field(default_factory=list)
+    # What `GET /api/wiring` answers; None answers an empty account.
+    wiring: dict[str, Any] | None = None
+    # The owner's shares, newest first; every mint body; the sentences the
+    # next mints are refused with, in order.
+    shares: list[dict[str, Any]] = field(default_factory=list)
+    share_bodies: list[Any] = field(default_factory=list)
+    share_refusals: list[str] = field(default_factory=list)
     requests: list[str] = field(default_factory=list)
     unknown_paths: list[str] = field(default_factory=list)
     server_streams: list["queue.Queue[str | None]"] = field(default_factory=list)
@@ -980,6 +998,74 @@ def _write_answer(cp: "FakeControlPlane", method: str, path: str, body: Any) -> 
     return {"marking_version": cp.execution_state[net_id]["marking_version"]}
 
 
+def share_row(share_id: str, *, label: str, **overrides: Any) -> dict[str, Any]:
+    """A share as the owner's list carries it: a read link world, 30 days."""
+    return {
+        "id": share_id, "label": label, "resource_kind": "world", "notebook_id": None,
+        "scope": "read", "audience": "link", "member_email": None, "seat": None,
+        "prefix": share_id[:8].ljust(8, "x"), "publish_payloads": False, "max_viewers": 20,
+        "inputs_per_minute": 60, "created_at": STAMP, "expires_at": "2099-01-01T00:00:00+00:00",
+        "revoked_at": None, "last_used_at": None, "nets": [], **overrides,
+    }
+
+
+def _wired_worker(cp: FakeControlPlane, net_id: str) -> str | None:
+    for net in (cp.wiring or {}).get("nets", []):
+        if net["id"] == net_id:
+            return net["worker_id"]
+    return None
+
+
+def _mint(cp: FakeControlPlane, body: dict[str, Any]) -> dict[str, Any]:
+    """The share a mint body makes, with its one-time token, at the head of the list.
+
+    The token is numbered by the body's place in `share_bodies`, from 0.
+    """
+    n = len(cp.share_bodies) - 1
+    now = time.time()
+    days = body.get("expires_in_days", 30)
+    share = share_row(
+        f"share-{n:04d}-{int(now * 1000) % 10**8:08d}",
+        label=body["label"].strip(),
+        resource_kind=body["resource_kind"],
+        notebook_id=body.get("notebook_id"),
+        scope=body.get("scope", "read"),
+        audience=body.get("audience", "link"),
+        member_email=body.get("member_email"),
+        seat=body.get("seat"),
+        publish_payloads=body.get("publish_payloads", False),
+        max_viewers=body.get("max_viewers", 20),
+        inputs_per_minute=body.get("inputs_per_minute", 60),
+        created_at=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)),
+        expires_at=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now + days * 86400)),
+        nets=[{"net_id": net["net_id"], "worker_id": _wired_worker(cp, net["net_id"]),
+               "play_places": net.get("play_places", []), "play_controls": net.get("play_controls", [])}
+              for net in body.get("nets", [])],
+    )
+    cp.shares.insert(0, share)
+    return {**share, "token": f"petri_share_{n:04d}" + "A" * 39}
+
+
+def _share_answer(cp: FakeControlPlane, method: str, path: str, body: Any) -> tuple[int, Any] | None:
+    """The share routes' status and answer, or None for a path that is not one."""
+    with cp.lock:
+        if path == "/api/shares" and method == "GET":
+            return 200, cp.shares
+        if path == "/api/shares" and method == "POST":
+            cp.share_bodies.append(body)
+            if cp.share_refusals:
+                return 422, {"detail": cp.share_refusals.pop(0)}
+            return 201, _mint(cp, body)
+        match = re.fullmatch(r"/api/shares/([^/]+)", path)
+        if match and method == "DELETE":
+            for share in cp.shares:
+                if share["id"] == match.group(1):
+                    share["revoked_at"] = share["revoked_at"] or STAMP
+                    return 200, {"status": "revoked"}
+            return 404, {"detail": "Share not found"}
+    return None
+
+
 def publish_server(cp: FakeControlPlane, event: dict[str, Any]) -> None:
     """Send one control-plane event with the next per-user sequence number."""
     with cp.lock:
@@ -1006,8 +1092,8 @@ def _json_answer(cp: FakeControlPlane, path: str, query: str) -> Any:
     if path in ("/api/deployments", "/api/notebooks"):
         return []
     if path == "/api/wiring":
-        return {"workers": [], "nets": [], "notebooks": [], "bindings": [],
-                "control_plane_build": None}
+        return cp.wiring or {"workers": [], "nets": [], "notebooks": [], "bindings": [],
+                             "control_plane_build": None}
     match = re.fullmatch(r"/api/workers/([^/]+)", path)
     if match:
         row = next((worker for worker in cp.workers if worker["id"] == match.group(1)), None)
@@ -1121,6 +1207,10 @@ def _handler_for(cp: FakeControlPlane) -> type[BaseHTTPRequestHandler]:
             if match:
                 self._worker_stream(match.group(1), parts.query)
                 return
+            shared = _share_answer(cp, "GET", parts.path, None)
+            if shared is not None:
+                self._send_json(shared[1], shared[0])
+                return
             try:
                 answer = _json_answer(cp, parts.path, parts.query)
             except Refusal as refusal:
@@ -1141,8 +1231,12 @@ def _handler_for(cp: FakeControlPlane) -> type[BaseHTTPRequestHandler]:
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length) if length else b""
             cp.requests.append(f"{method} {self.path}")
+            body = json.loads(raw) if raw else None
+            shared = _share_answer(cp, method, urlsplit(self.path).path, body)
+            if shared is not None:
+                self._send_json(shared[1], shared[0])
+                return
             try:
-                body = json.loads(raw) if raw else None
                 answer = _write_answer(cp, method, urlsplit(self.path).path, body)
             except Refusal as refusal:
                 self._send_json({"detail": refusal.detail, "reason": refusal.reason}, refusal.status)
