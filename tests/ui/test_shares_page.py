@@ -6,8 +6,8 @@ nets selectable; a net on no worker never is. Past that the form judges
 nothing: it sends what the owner typed and shows the server's sentence when
 the mint is refused. A minted share's link, the public tier's address, `/s/`
 and the one-time token, is shown once. Revoked and expired shares stay in the
-list, muted and without a Revoke button. A world share names its nets by the
-names it carries itself.
+list, muted and without a Revoke button. A share names its nets, or its
+notebook, by the names it carries itself.
 
 A bundle is a zip the public tier serves beside a world share. The page
 uploads one as the raw request body, shows the server's sentence when the
@@ -230,6 +230,19 @@ def test_mint_a_notebook_share(
         "max_viewers": 20,
         "inputs_per_minute": 60,
     }]
+    expect(_rows(page).first.get_by_test_id("share-resource")).to_have_text("notebook: daily plots")
+
+
+def test_the_list_names_a_notebook_share_from_the_share_itself(
+        page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane) -> None:
+    cp = fresh_control_plane
+    # No wiring: the pickers' view knows no notebook, and the list needs none.
+    cp.wiring = None
+    cp.shares = [fake_cp.share_row("share-plots", label="plots", resource_kind="notebook",
+                                   notebook_id=NOTEBOOK, notebook_name="daily plots")]
+
+    page.goto(f"{frontend_url}/shares")
+    expect(_rows(page)).to_have_count(1, timeout=30_000)
     expect(_rows(page).first.get_by_test_id("share-resource")).to_have_text("notebook: daily plots")
 
 

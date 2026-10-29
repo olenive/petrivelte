@@ -252,8 +252,10 @@ caller sends `seat` and the per-net lists only on a play share,
 first`) and mints at most 10 a minute (429, which `createShare` words as
 such).
 
-The share answer: `id`, `label`, `resource_kind`, `notebook_id` (set exactly
-on a notebook share), `scope`, `audience`, `member_email` (set exactly on a
+The share answer: `id`, `label`, `resource_kind` (`world` or `notebook`),
+`notebook_id` and `notebook_name` (its notebook's id and name, both set
+exactly on a notebook share and null on a world), `scope` (`read` or
+`play`), `audience` (`link` or `named`), `member_email` (set exactly on a
 named share), `seat` (set exactly on a play share), `prefix` (the 8
 characters after `petri_share_`), `publish_payloads`, `max_viewers`,
 `inputs_per_minute`, `created_at`, `expires_at`, `revoked_at`,
@@ -264,27 +266,25 @@ definition_name, instance_name, worker_id, play_places, play_controls}`. A
 net's `worker_id` and names are read from the net on every answer, so they
 follow a rename or reassignment made after the mint, and a world a
 reassignment split shows nets on more than one worker. A deleted net leaves
-its worlds; a deleted notebook deletes its shares. A notebook share names its
-notebook by `notebook_id` only. The `token` is `petri_share_` followed by 43
-url-safe characters.
+its worlds; a deleted notebook deletes its shares. The `token` is
+`petri_share_` followed by 43 url-safe characters.
 
 The `/shares` page lists every share and mints and revokes them. It names a
-world share's nets by their own `instance_name` and shows the `bundle_label`
-of a share that serves a bundle. It fills its pickers from `GET
+world share's nets by their own `instance_name`, a notebook share's notebook
+by its `notebook_name`, and shows the `bundle_label` of a share that serves a
+bundle, all from the share itself. Only the mint form's pickers read `GET
 /api/wiring`, which carries every net with its `worker_id`, assigned or not,
-and every notebook, and names a notebook share's notebook from the same
-answer, since the share carries only its id. The net picker groups nets by
-worker and, once a net is picked,
-leaves only nets on that worker selectable; a net on no worker is never
-selectable. Otherwise it sends what the owner typed and shows the server's
-sentence: an emptied number is left out so the default applies, and the
-place and control lists are split on commas and trimmed. The link for a
-share is `${PUBLIC_SHARE_URL}/s/${token}`, with `PUBLIC_SHARE_URL` the
-public tier's base URL, no trailing slash, read at runtime like
-`PUBLIC_API_URL` (`fly.toml` sets `https://petrify-public.fly.dev`). The
-page shows it once, after the mint. When the value is empty, or is not an
-http(s) URL (https in production), it shows the token itself with a note
-that the public tier's address is not configured.
+and every notebook. The net picker groups nets by worker and, once a net is
+picked, leaves only nets on that worker selectable; a net on no worker is
+never selectable. Otherwise it sends what the owner typed and shows the
+server's sentence: an emptied number is left out so the default applies, and
+the place and control lists are split on commas and trimmed. The link for a
+share is `${PUBLIC_SHARE_URL}/s/${token}`, with `PUBLIC_SHARE_URL` the public
+tier's base URL, no trailing slash, read at runtime like `PUBLIC_API_URL`
+(`fly.toml` sets `https://petrify-public.fly.dev`). The page shows it once,
+after the mint. When the value is empty, or is not an http(s) URL (https in
+production), it shows the token itself with a note that the public tier's
+address is not configured.
 
 ### Bundles
 

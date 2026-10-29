@@ -24,7 +24,6 @@
 		emptyShareForm,
 		formatBundleSize,
 		netsByWorker,
-		notebookName,
 		pickRefusal,
 		pickedWorkers,
 		shareLink,
@@ -51,7 +50,7 @@
 	let confirmingId = $state<string | null>(null);
 	let revokingId = $state<string | null>(null);
 
-	// What the pickers choose from, and the notebook names the list shows
+	// What the mint form's pickers choose from
 	let wiring = $state<WiringResponse | null>(null);
 	let wiringError = $state('');
 
@@ -539,10 +538,8 @@
 								<p class="text-sm text-foreground-muted" data-testid="share-resource">
 									{#if share.resource_kind === 'world'}
 										world: {share.nets.map((n) => n.instance_name).join(', ') || 'no nets'}
-									{:else if share.resource_kind === 'notebook' && share.notebook_id}
-										notebook: {notebookName(share.notebook_id, notebooks)}
 									{:else}
-										{share.resource_kind}
+										notebook: {share.notebook_name}
 									{/if}
 								</p>
 								{#if share.bundle_label}

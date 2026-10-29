@@ -86,13 +86,15 @@ produced token a colour as a third element.
 Shares (`GET`, `POST` and `DELETE /api/shares`, as `shares/routes.py` in
 the server answers them): `shares` is the owner's list, newest first. A mint
 keeps its body in `share_bodies` and answers 201 with the share and a fresh
-`token`, each net carrying the `worker_id` and names that `wiring` gives it
-and the share carrying the label of the bundle it names, and puts the share
-at the head of the list; a mint while `share_refusals` holds a sentence
-answers 422 with that sentence as `detail` instead, and so does a mint
-naming a bundle `bundles` does not hold, with the server's sentence. A
-revoke sets `revoked_at` and keeps the row; an unknown id is 404 `Share not
-found`. `wiring`, when a test sets it, is what `GET /api/wiring` answers.
+`token`, each net carrying the `worker_id` and names that `wiring` gives it,
+a notebook share carrying the `instance_name` of its notebook in `wiring` as
+`notebook_name`, and the share carrying the label of the bundle it names,
+and puts the share at the head of the list; a mint while `share_refusals`
+holds a sentence answers 422 with that sentence as `detail` instead, and so
+does a mint naming a bundle `bundles` does not hold, with the server's
+sentence. A revoke sets `revoked_at` and keeps the row; an unknown id is 404
+`Share not found`. `wiring`, when a test sets it, is what `GET /api/wiring`
+answers.
 
 Bundles (`GET`, `POST` and `DELETE /api/bundles`, as `bundles/routes.py`
 answers them): `bundles` is the owner's list, newest first. An upload's body
@@ -1023,7 +1025,7 @@ def _write_answer(cp: "FakeControlPlane", method: str, path: str, body: Any) -> 
 def share_row(share_id: str, *, label: str, **overrides: Any) -> dict[str, Any]:
     """A share as the owner's list carries it: a read link world, 30 days."""
     return {
-        "id": share_id, "label": label, "resource_kind": "world", "notebook_id": None,
+        "id": share_id, "label": label, "resource_kind": "world", "notebook_id": None, "notebook_name": None,
         "scope": "read", "audience": "link", "member_email": None, "seat": None,
         "prefix": share_id[:8].ljust(8, "x"), "publish_payloads": False, "max_viewers": 20,
         "inputs_per_minute": 60, "created_at": STAMP, "expires_at": "2099-01-01T00:00:00+00:00",
@@ -1047,6 +1049,13 @@ def _wired_net(cp: FakeControlPlane, net_id: str) -> dict[str, Any]:
     return {"worker_id": None, "definition_name": "", "instance_name": ""}
 
 
+def _wired_notebook_name(cp: FakeControlPlane, notebook_id: str | None) -> str | None:
+    for notebook in (cp.wiring or {}).get("notebooks", []):
+        if notebook["id"] == notebook_id:
+            return notebook["instance_name"]
+    return None
+
+
 def _mint(cp: FakeControlPlane, body: dict[str, Any]) -> dict[str, Any]:
     """The share a mint body makes, with its one-time token, at the head of the list.
 
@@ -1061,6 +1070,7 @@ def _mint(cp: FakeControlPlane, body: dict[str, Any]) -> dict[str, Any]:
         label=body["label"].strip(),
         resource_kind=body["resource_kind"],
         notebook_id=body.get("notebook_id"),
+        notebook_name=_wired_notebook_name(cp, body.get("notebook_id")),
         scope=body.get("scope", "read"),
         audience=body.get("audience", "link"),
         member_email=body.get("member_email"),

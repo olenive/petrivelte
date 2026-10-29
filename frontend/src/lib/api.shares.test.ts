@@ -19,6 +19,7 @@ const SHARE: Share = {
 	label: 'demo',
 	resource_kind: 'world',
 	notebook_id: null,
+	notebook_name: null,
 	scope: 'read',
 	audience: 'link',
 	member_email: null,
@@ -169,14 +170,17 @@ describe('createShare', () => {
 		).rejects.toThrow('Bundle 00000000-0000-0000-0000-0000000000b2 is not one of your bundles');
 	});
 
-	it('POSTs a notebook share by notebook id', async () => {
-		const fetchMock = respond(201, { ...SHARE, resource_kind: 'notebook', notebook_id: 'nb-1', nets: [], token: 't' });
-		await createShare({ label: 'plots', resource_kind: 'notebook', notebook_id: 'nb-1' });
+	it('POSTs a notebook share by notebook id and hands back its notebook\'s name', async () => {
+		const fetchMock = respond(201, {
+			...SHARE, resource_kind: 'notebook', notebook_id: 'nb-1', notebook_name: 'daily plots', nets: [], token: 't',
+		});
+		const answer = await createShare({ label: 'plots', resource_kind: 'notebook', notebook_id: 'nb-1' });
 		expect(JSON.parse(String(lastCall(fetchMock)[1].body))).toEqual({
 			label: 'plots',
 			resource_kind: 'notebook',
 			notebook_id: 'nb-1',
 		});
+		expect([answer.notebook_id, answer.notebook_name]).toEqual(['nb-1', 'daily plots']);
 	});
 
 	it('throws the server\'s sentence for a refused mint', async () => {

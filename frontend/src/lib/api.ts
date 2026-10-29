@@ -2125,8 +2125,9 @@ export interface Share {
 	id: string;
 	label: string;
 	resource_kind: ShareResourceKind;
-	/** Set exactly on a notebook share. */
+	/** Set exactly on a notebook share: its notebook, by id and by name. */
 	notebook_id: string | null;
+	notebook_name: string | null;
 	scope: ShareScope;
 	audience: ShareAudience;
 	/** Set exactly on a named share. */

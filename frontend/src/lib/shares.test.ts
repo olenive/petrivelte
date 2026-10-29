@@ -13,7 +13,6 @@ import {
 	emptyShareForm,
 	formatBundleSize,
 	netsByWorker,
-	notebookName,
 	parseNames,
 	pickRefusal,
 	pickedWorkers,
@@ -47,6 +46,7 @@ function share(overrides: Partial<Share> = {}): Share {
 		label: 'demo',
 		resource_kind: 'world',
 		notebook_id: null,
+		notebook_name: null,
 		scope: 'read',
 		audience: 'link',
 		member_email: null,
@@ -144,18 +144,6 @@ describe('shareLink', () => {
 		expect(shareLink('https://petrify-public.fly.dev', 'petri_share_Ab-9_x')).toBe(
 			'https://petrify-public.fly.dev/s/petri_share_Ab-9_x',
 		);
-	});
-});
-
-describe('notebookName', () => {
-	it('names a notebook by instance name, then definition name, then id', () => {
-		const notebooks = [
-			{ id: 'nb-1', instance_name: 'daily plots', definition_name: 'plots' },
-			{ id: 'nb-2', instance_name: '', definition_name: 'monitor' },
-		];
-		expect(notebookName('nb-1', notebooks)).toBe('daily plots');
-		expect(notebookName('nb-2', notebooks)).toBe('monitor');
-		expect(notebookName('fedcba9876543210', notebooks)).toBe('fedcba98');
 	});
 });
 

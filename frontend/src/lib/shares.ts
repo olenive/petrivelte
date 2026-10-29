@@ -23,14 +23,11 @@ import type {
 	ShareResourceKind,
 	ShareScope,
 	WiringNet,
-	WiringNotebook,
 	WiringWorker,
 } from '$lib/api';
 import { workerLabel } from '$lib/netInstances';
 
 export type ShareStatus = 'active' | 'expired' | 'revoked';
-
-const ID_PREFIX = 8;
 
 /** The defaults the server applies, shown in the form. */
 export const DEFAULT_EXPIRES_IN_DAYS = 30;
@@ -80,20 +77,7 @@ export function shareLink(base: string, token: string): string {
 	return `${base}/s/${encodeURIComponent(token)}`;
 }
 
-// -- names --
-
-/** A notebook share's notebook by name. A share names its notebook by id
- *  only, so this looks it up in the wiring view the notebook picker loads; a
- *  notebook the view does not know shows as the start of its id. A world
- *  share's nets carry their own names. */
-export function notebookName(
-	notebookId: string,
-	notebooks: readonly Pick<WiringNotebook, 'id' | 'instance_name' | 'definition_name'>[],
-): string {
-	const notebook = notebooks.find((n) => n.id === notebookId);
-	if (!notebook) return notebookId.slice(0, ID_PREFIX);
-	return notebook.instance_name || notebook.definition_name;
-}
+// -- a share's nets --
 
 /**
  * Why a world share cannot be served as it stands, or null. A world is

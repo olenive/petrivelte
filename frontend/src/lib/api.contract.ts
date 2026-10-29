@@ -353,9 +353,10 @@ export const __transport_and_build_contract_check = [_transport_close_shape, _wo
 // The shares page reads every field of the mint answer: the one-time `token`
 // makes the link, `nets[].worker_id` tells a world still on one worker from
 // one a reassignment split, `nets[].instance_name` names a net in the list,
-// `bundle_label` names the bundle a world serves, and the nullable columns
-// are set exactly when the share's kind needs them (a seat on play, an email
-// on named, a notebook id on a notebook share). The request mirrors the
+// `notebook_name` names a notebook share's notebook there, `bundle_label`
+// names the bundle a world serves, and the nullable columns are set exactly
+// when the share's kind needs them (a seat on play, an email on named, a
+// notebook's id and name on a notebook share). The request mirrors the
 // server's `ShareRequest`, which refuses an unknown field. A bundle is listed
 // by every field of the upload answer.
 const _share_created_shape: ShareCreated = {
@@ -363,6 +364,7 @@ const _share_created_shape: ShareCreated = {
 	label: 'two-seat game',
 	resource_kind: 'world',
 	notebook_id: null,
+	notebook_name: null,
 	scope: 'play',
 	audience: 'named',
 	member_email: 'ann@example.com',
