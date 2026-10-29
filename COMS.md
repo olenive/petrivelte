@@ -315,7 +315,10 @@ only the frontend's origin. Each refusal is one plain-English sentence in
 `detail`, which `uploadBundle` throws as it stands:
 
 - 413 `A bundle's zip is at most 64 MiB.` for a larger body; a declared
-  length above the cap is refused unread.
+  length above the cap is refused unread. The server can send that answer
+  before the browser has sent the whole body, and a browser may then report
+  the upload as `Failed to fetch` instead, so the page checks the file's size
+  first (below).
 - 415 `Send the zip as the raw request body, with Content-Type
   application/zip.` for any other content type.
 - 422 `A bundle's label must be 1 to 100 characters`, counted after trimming.
@@ -334,13 +337,14 @@ only the frontend's origin. Each refusal is one plain-English sentence in
 The `/shares` page's Bundles section lists the owner's bundles (label, size
 uncompressed in MB to one decimal, file count, upload date) with Delete
 behind an inline confirm, and uploads a zip under a label: the Upload button
-waits for a file, the page shows a busy line while the upload runs, the
-server's sentence on a refusal, and the new bundle at the head of the list
-on success. After a delete it lists the shares again, so a share that named
-the bundle shows none. The mint form's Bundle select, shown for a world of
-either scope and hidden for a notebook, offers the owner's bundles by label
-with none as the default; the mint carries `bundle_id` only when a world
-picks one.
+waits for a file, a file over 64 MiB is refused in the page with the
+server's 413 sentence and no request (`bundleFileRefusal` in `shares.ts`),
+the page shows a busy line while the upload runs, the server's sentence on a
+refusal, and the new bundle at the head of the list on success. After a
+delete it lists the shares again, so a share that named the bundle shows
+none. The mint form's Bundle select, shown for a world of either scope and
+hidden for a notebook, offers the owner's bundles by label with none as the
+default; the mint carries `bundle_id` only when a world picks one.
 
 ## Polling
 

@@ -1,14 +1,16 @@
 /**
  * Pure helpers for the shares page: a share's state and link, the net picker
- * that keeps a world on one worker, the mint request built from the form, and
- * a bundle's size as the bundles section shows it.
+ * that keeps a world on one worker, the mint request built from the form, a
+ * bundle's size as the bundles section shows it, and whether a zip is small
+ * enough to upload.
  *
  * The form refuses nothing the server does not refuse. It builds the request
  * from what the owner typed and leaves every judgement of it to the server,
  * whose sentence the page shows. What it does decide is what to leave out: a
  * seat and the per-net lists belong only on a play share, an email only on a
  * named one and a bundle only on a world, and the server refuses each anywhere
- * else.
+ * else. The one check made before sending is a bundle zip's size, against the
+ * server's own cap and with its own sentence (`bundleFileRefusal`).
  */
 
 import type {
@@ -283,6 +285,24 @@ export function withoutToken(created: ShareCreated): Share {
 // -- bundles --
 
 const BYTES_PER_MB = 1_000_000;
+const BYTES_PER_MIB = 1024 * 1024;
+
+/** The largest zip the server reads, `MAX_UPLOAD_BYTES` in its `bundles/rules.py`. */
+export const MAX_BUNDLE_ZIP_BYTES = 64 * BYTES_PER_MIB;
+
+/** The server's 413 sentence for a larger zip. */
+export const BUNDLE_TOO_LARGE = `A bundle's zip is at most ${MAX_BUNDLE_ZIP_BYTES / BYTES_PER_MIB} MiB.`;
+
+/**
+ * Why a zip of this many bytes cannot be uploaded, or null when it can be
+ * sent. The server refuses a larger zip with 413, but it can answer before
+ * the browser has sent the whole body, and a browser may then report the
+ * upload as a failed fetch instead of the answer, so the page refuses it
+ * first, in the server's words, without a request.
+ */
+export function bundleFileRefusal(sizeBytes: number): string | null {
+	return sizeBytes > MAX_BUNDLE_ZIP_BYTES ? BUNDLE_TOO_LARGE : null;
+}
 
 /** A size in megabytes (millions of bytes) to one decimal, such as "12.3 MB".
  *  A bundle too small to show at that precision is "under 0.1 MB" rather

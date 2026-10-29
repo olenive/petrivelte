@@ -19,6 +19,7 @@
 		DEFAULT_EXPIRES_IN_DAYS,
 		DEFAULT_INPUTS_PER_MINUTE,
 		DEFAULT_MAX_VIEWERS,
+		bundleFileRefusal,
 		describeInputs,
 		emptyShareForm,
 		formatBundleSize,
@@ -196,6 +197,12 @@
 	async function handleUpload() {
 		if (bundleFile === null) return;
 		uploadError = '';
+		// Too large is refused here, before a request the browser might report only as a failed fetch.
+		const refusal = bundleFileRefusal(bundleFile.size);
+		if (refusal !== null) {
+			uploadError = refusal;
+			return;
+		}
 		uploading = true;
 		try {
 			const uploaded = await uploadBundle(bundleLabel, bundleFile);

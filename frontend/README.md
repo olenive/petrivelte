@@ -54,7 +54,9 @@ Most modules are pure functions with a table of cases in a sibling test.
   `PUBLIC_SHARE_URL` (`shareLinkBase` says why there is none), the net
   picker grouped by worker that keeps a world on one worker,
   `shareRequest`, which builds the mint body from the form and leaves out
-  only what the share's kind would refuse, and `formatBundleSize`.
+  only what the share's kind would refuse, `formatBundleSize`, and
+  `bundleFileRefusal`, which refuses a zip over the server's 64 MiB cap in
+  the server's words before it is sent.
 - `netHelpers.ts`: net labels, token layout, `applyTokenCounts`, and
   `coerceParamValue`, which applies the server's declared `coerce` for a
   factory parameter and falls back to the annotation text (`int`, `float`,

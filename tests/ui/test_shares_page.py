@@ -11,7 +11,8 @@ names it carries itself.
 
 A bundle is a zip the public tier serves beside a world share. The page
 uploads one as the raw request body, shows the server's sentence when the
-upload is refused, deletes one after a confirm, and offers the owner's
+upload is refused, refuses a zip over the server's cap in the server's words
+before sending it, deletes one after a confirm, and offers the owner's
 bundles to a world share's mint.
 """
 
@@ -344,6 +345,38 @@ def test_a_refused_upload_shows_the_servers_sentence(
     expect(page.locator('input[name="bundle-label"]')).to_have_value("chess board")
     expect(bundles.get_by_role("button", name="Upload")).to_be_enabled()
     assert len(cp.bundle_uploads) == 1
+
+
+def test_a_zip_over_the_cap_is_refused_before_it_is_sent(
+        page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane,
+        tmp_path: Path) -> None:
+    # A server can answer 413 before the body is all sent, which a browser may
+    # report only as a failed fetch, so the page refuses the zip itself.
+    cp = fresh_control_plane
+    huge = tmp_path / "huge.zip"
+    with huge.open("wb") as sparse:
+        sparse.truncate(64 * 1024 * 1024 + 1)
+    chess = _zip(tmp_path / "chess.zip", {"index.html": b"<!doctype html><title>chess</title>"})
+
+    page.goto(f"{frontend_url}/shares")
+    bundles = page.get_by_test_id("bundles")
+    expect(bundles.get_by_text("You have no bundles.")).to_be_visible(timeout=30_000)
+    page.locator('input[name="bundle-label"]').fill("chess board")
+    page.locator('input[name="bundle-file"]').set_input_files(str(huge))
+    bundles.get_by_role("button", name="Upload").click()
+
+    expect(page.get_by_test_id("bundle-upload-error")).to_have_text("A bundle's zip is at most 64 MiB.")
+    assert cp.bundle_uploads == []
+    assert not [line for line in cp.requests if line.startswith("POST /api/bundles")]
+    expect(page.locator('input[name="bundle-label"]')).to_have_value("chess board")
+
+    # A zip within the cap then goes, and the sentence clears.
+    page.locator('input[name="bundle-file"]').set_input_files(str(chess))
+    bundles.get_by_role("button", name="Upload").click()
+    expect(_bundle_rows(page)).to_have_count(1, timeout=10_000)
+    expect(page.get_by_test_id("bundle-upload-error")).to_have_count(0)
+    [sent] = cp.bundle_uploads
+    assert sent["body"] == chess.read_bytes()
 
 
 def test_delete_a_bundle_asks_first_and_its_share_carries_on_without_it(

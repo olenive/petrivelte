@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { Share, ShareCreated, ShareNet, WiringNet } from './api';
 import {
+	BUNDLE_TOO_LARGE,
 	DEFAULT_EXPIRES_IN_DAYS,
 	DEFAULT_INPUTS_PER_MINUTE,
 	DEFAULT_MAX_VIEWERS,
+	MAX_BUNDLE_ZIP_BYTES,
 	NO_WORKER_REASON,
 	OTHER_WORKER_REASON,
+	bundleFileRefusal,
 	describeInputs,
 	emptyShareForm,
 	formatBundleSize,
@@ -422,5 +425,20 @@ describe('formatBundleSize', () => {
 
 	it('shows an empty bundle as 0.0 MB', () => {
 		expect(formatBundleSize(0)).toBe('0.0 MB');
+	});
+});
+
+describe('bundleFileRefusal', () => {
+	it('is the server\'s 413 sentence for a zip over 64 MiB', () => {
+		expect(MAX_BUNDLE_ZIP_BYTES).toBe(67_108_864);
+		expect(BUNDLE_TOO_LARGE).toBe("A bundle's zip is at most 64 MiB.");
+		expect(bundleFileRefusal(MAX_BUNDLE_ZIP_BYTES + 1)).toBe(BUNDLE_TOO_LARGE);
+		expect(bundleFileRefusal(200_000_000)).toBe(BUNDLE_TOO_LARGE);
+	});
+
+	it('is null up to 64 MiB, which the server reads', () => {
+		expect(bundleFileRefusal(MAX_BUNDLE_ZIP_BYTES)).toBeNull();
+		expect(bundleFileRefusal(1_500_000)).toBeNull();
+		expect(bundleFileRefusal(0)).toBeNull();
 	});
 });
