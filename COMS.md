@@ -258,6 +258,21 @@ worker. A deleted net leaves its worlds; a deleted notebook deletes its
 shares. The answer names nets and notebooks by id only. The `token` is
 `petri_share_` followed by 43 url-safe characters.
 
+The `/shares` page lists every share and mints and revokes them. It names a
+share's nets and notebook, and fills its pickers, from `GET /api/wiring`,
+which carries every net with its `worker_id`, assigned or not, and every
+notebook. The net picker groups nets by worker and, once a net is picked,
+leaves only nets on that worker selectable; a net on no worker is never
+selectable. Otherwise it sends what the owner typed and shows the server's
+sentence: an emptied number is left out so the default applies, and the
+place and control lists are split on commas and trimmed. The link for a
+share is `${PUBLIC_SHARE_URL}/s/${token}`, with `PUBLIC_SHARE_URL` the
+public tier's base URL, no trailing slash, read at runtime like
+`PUBLIC_API_URL` (`fly.toml` sets `https://petrify-public.fly.dev`). The
+page shows it once, after the mint. When the value is empty, or is not an
+http(s) URL (https in production), it shows the token itself with a note
+that the public tier's address is not configured.
+
 ## Polling
 
 SSE triggers refetches; a few pages also poll as a fallback: the workers page

@@ -18,7 +18,8 @@ npm run build && npm run preview
 The control plane runs from `../petritype-server` with
 `uv run uvicorn petritype_server.server:app --reload --port 8000`.
 Deploy with `fly deploy` (app `petrify-frontend`; `PUBLIC_API_URL` is set in
-`fly.toml` as a build arg and env var).
+`fly.toml` as a build arg and env var, and `PUBLIC_SHARE_URL`, the public
+tier's base URL that share links start with, as an env var).
 
 ## Routes (`src/routes`)
 
@@ -29,6 +30,7 @@ Deploy with `fly deploy` (app `petrify-frontend`; `PUBLIC_API_URL` is set in
 | `/nets` | Net selector, graph, execution controls, inject, runs and schedule, logs, secrets, Diagnose; inner nets (open a badged token's net in place, breadcrumb and Up) and a token filter by keys. |
 | `/notebooks` | Notebook index grouped by worker, badges from `load_state` plus `/sync`. |
 | `/notebooks/[id]` | One notebook in an iframe, with load progress and health. |
+| `/shares` | The owner's shares (world or notebook, scope, audience, seat, expiry, state, last use) with revoke, and the form that mints one and shows its link once. |
 | `/workers` | Workers, their nets, occupancy, build chip, logs, lifecycle actions. |
 | `/workers/[id]/logs` | Full-page worker log. |
 | `/deployments` | GitHub repos, builds and discovered definitions. |
@@ -45,7 +47,13 @@ Most modules are pure functions with a table of cases in a sibling test.
   {limit, since, contains, newest_first})`, runs, operations, notebooks,
   occupancy, wiring. `api.contract.ts` holds compile-time shape checks.
 - `apiTokens.ts`: token display helpers, `SCOPE_CHOICES`, `DEFAULT_SCOPE`
-  (`read`) and `describeScope`; `ApiTokenScope` is in `api.ts`.
+  (`read`) and `describeScope`; `ApiTokenScope` is in `api.ts`. The expiry,
+  last-use and created wording also serves shares.
+- `shares.ts`: the shares page's rules: a share's state, its link from
+  `PUBLIC_SHARE_URL` (`shareLinkBase` says why there is none), the net
+  picker grouped by worker that keeps a world on one worker, and
+  `shareRequest`, which builds the mint body from the form and leaves out
+  only what the share's kind would refuse.
 - `netHelpers.ts`: net labels, token layout, `applyTokenCounts`, and
   `coerceParamValue`, which applies the server's declared `coerce` for a
   factory parameter and falls back to the annotation text (`int`, `float`,

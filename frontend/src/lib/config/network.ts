@@ -52,3 +52,9 @@ function toWebSocketBaseUrl(apiUrl: string): string {
 
 export const API_URL = resolveApiUrl();
 export const WS_BASE_URL = toWebSocketBaseUrl(API_URL);
+
+/** PUBLIC_SHARE_URL as set, or '': the public tier's base URL, which a share's
+ * link starts with. The shares page judges it with `shareLinkBase` and shows
+ * the bare token when it cannot make a link, so an unset value never stops
+ * the app. */
+export const PUBLIC_SHARE_URL = env.PUBLIC_SHARE_URL ?? '';
