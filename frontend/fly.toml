@@ -12,6 +12,9 @@ primary_region = 'lhr'
 
 [env]
   PUBLIC_API_URL = "https://petrify-fly-app.fly.dev"
+  # The public tier's base URL, which share links start with. Read at
+  # runtime only, so it needs no build arg.
+  PUBLIC_SHARE_URL = "https://petrify-public.fly.dev"
 
 [http_service]
   internal_port = 3000

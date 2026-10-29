@@ -47,7 +47,8 @@ export function describeSpan(ms: number): string {
 	return 'less than a minute';
 }
 
-export function describeExpiry(token: ApiToken, nowMs: number): string {
+/** Also worded for a share, which carries the same two fields. */
+export function describeExpiry(token: Pick<ApiToken, 'expires_at' | 'revoked_at'>, nowMs: number): string {
 	if (token.revoked_at) return 'revoked';
 	const remaining = Date.parse(token.expires_at) - nowMs;
 	return remaining > 0
@@ -55,13 +56,13 @@ export function describeExpiry(token: ApiToken, nowMs: number): string {
 		: `expired ${describeSpan(remaining)} ago`;
 }
 
-export function describeLastUsed(token: ApiToken, nowMs: number): string {
+export function describeLastUsed(token: Pick<ApiToken, 'last_used_at'>, nowMs: number): string {
 	if (!token.last_used_at) return 'never used';
 	const ago = nowMs - Date.parse(token.last_used_at);
 	return ago < MINUTE_MS ? 'used just now' : `used ${describeSpan(ago)} ago`;
 }
 
-export function formatCreated(token: ApiToken): string {
+export function formatCreated(token: Pick<ApiToken, 'created_at'>): string {
 	return new Date(token.created_at).toLocaleDateString(undefined, {
 		year: 'numeric',
 		month: 'short',

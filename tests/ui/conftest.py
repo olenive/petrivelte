@@ -64,7 +64,8 @@ def frontend_url(ui_port: int, control_plane: fake_cp.FakeControlPlane) -> Itera
         pytest.fail("npm is not on PATH; the browser suite needs it to run vite dev")
     if not (FRONTEND / "node_modules").exists():
         subprocess.run([npm, "ci"], cwd=FRONTEND, check=True)
-    env = {**os.environ, "PUBLIC_API_URL": f"http://127.0.0.1:{control_plane.port}"}
+    env = {**os.environ, "PUBLIC_API_URL": f"http://127.0.0.1:{control_plane.port}",
+           "PUBLIC_SHARE_URL": fake_cp.PUBLIC_SHARE_URL}
     process = subprocess.Popen(
         [npm, "run", "dev", "--", "--host", "127.0.0.1", "--port", str(ui_port), "--strictPort"],
         cwd=FRONTEND,
@@ -111,6 +112,14 @@ def fresh_control_plane(control_plane: fake_cp.FakeControlPlane) -> Iterator[fak
     control_plane.replay_delay_s = 0.0
     control_plane.refuse_worker_streams = 0
     control_plane.worker_stream_answers.clear()
+    control_plane.wiring = None
+    control_plane.shares = []
+    control_plane.share_bodies.clear()
+    control_plane.share_refusals.clear()
+    control_plane.bundles = []
+    control_plane.bundle_uploads.clear()
+    control_plane.bundle_refusals.clear()
+    control_plane.slow_upload_s = 0.0
     control_plane.requests.clear()
     control_plane.unknown_paths.clear()
     yield control_plane

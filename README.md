@@ -14,8 +14,9 @@ cd frontend && npm install && npm run dev   # http://localhost:5173
 ```
 
 `npm test` runs vitest and `npm run check` runs svelte-check. The browser
-suite under `tests/ui` drives the real nets page with Playwright against a
-fake control plane (`tests/ui/fake_cp.py`, both event streams included):
+suite under `tests/ui` drives the real nets, workers and shares pages with
+Playwright against a fake control plane (`tests/ui/fake_cp.py`, both event
+streams and the share and bundle routes included):
 `uv run --with "playwright>=1.45" --with pytest pytest tests/ui -q`, after
 `uv run --with "playwright>=1.45" playwright install chromium` once.
 `just check` at the repository root runs all three, and `just` lists the recipes.
