@@ -8,6 +8,7 @@ import {
 	OTHER_WORKER_REASON,
 	describeInputs,
 	emptyShareForm,
+	formatBundleSize,
 	netsByWorker,
 	notebookName,
 	parseNames,
@@ -20,7 +21,6 @@ import {
 	shareTokenLabel,
 	togglePicked,
 	withoutToken,
-	worldNetNames,
 	worldProblem,
 	type ShareForm,
 } from './shares';
@@ -34,8 +34,8 @@ function iso(ms: number): string {
 	return new Date(ms).toISOString();
 }
 
-function shareNet(net_id: string, worker_id: string | null, instance_name = net_id): ShareNet {
-	return { net_id, definition_name: 'def', instance_name, worker_id, play_places: [], play_controls: [] };
+function shareNet(net_id: string, worker_id: string | null): ShareNet {
+	return { net_id, definition_name: 'def', instance_name: net_id, worker_id, play_places: [], play_controls: [] };
 }
 
 function share(overrides: Partial<Share> = {}): Share {
@@ -144,24 +144,7 @@ describe('shareLink', () => {
 	});
 });
 
-describe('worldNetNames and notebookName', () => {
-	const nets = [net('net-a', W1, 'traffic light'), net('net-b', W1, 'shop')];
-
-	it('names a world\'s nets by instance name in the share\'s order', () => {
-		const world = share({
-			nets: [
-				shareNet('net-b', W1),
-				shareNet('net-a', W1),
-			],
-		});
-		expect(worldNetNames(world, nets)).toEqual(['shop', 'traffic light']);
-	});
-
-	it('shows a net the wiring view does not know by the start of its id', () => {
-		const world = share({ nets: [shareNet('0123456789abcdef', W1)] });
-		expect(worldNetNames(world, nets)).toEqual(['01234567']);
-	});
-
+describe('notebookName', () => {
 	it('names a notebook by instance name, then definition name, then id', () => {
 		const notebooks = [
 			{ id: 'nb-1', instance_name: 'daily plots', definition_name: 'plots' },
@@ -312,6 +295,7 @@ describe('emptyShareForm', () => {
 			expiresInDays: 30,
 			maxViewers: 20,
 			inputsPerMinute: 60,
+			bundleId: null,
 		});
 		expect([DEFAULT_EXPIRES_IN_DAYS, DEFAULT_MAX_VIEWERS, DEFAULT_INPUTS_PER_MINUTE]).toEqual([30, 20, 60]);
 	});
@@ -372,6 +356,21 @@ describe('shareRequest', () => {
 		});
 	});
 
+	it('sends the picked bundle on a world of either scope', () => {
+		expect(shareRequest(form({ bundleId: 'bundle-1' }))).toMatchObject({ resource_kind: 'world', bundle_id: 'bundle-1' });
+		const play = shareRequest(form({ scope: 'play', seat: 'north', playPlaces: { 'net-a': 'moves' }, bundleId: 'bundle-1' }));
+		expect(play).toMatchObject({ scope: 'play', bundle_id: 'bundle-1' });
+	});
+
+	it('leaves the bundle out when none is picked', () => {
+		expect(shareRequest(form())).not.toHaveProperty('bundle_id');
+	});
+
+	it('leaves a picked bundle off a notebook share, which would refuse it', () => {
+		const request = shareRequest(form({ resourceKind: 'notebook', notebookId: 'nb-1', bundleId: 'bundle-1' }));
+		expect(request).not.toHaveProperty('bundle_id');
+	});
+
 	it('sends a notebook by id and no nets', () => {
 		const request = shareRequest(form({ resourceKind: 'notebook', notebookId: 'nb-1', netIds: ['net-a'] }));
 		expect(request.notebook_id).toBe('nb-1');
@@ -404,5 +403,24 @@ describe('withoutToken', () => {
 		const listed = withoutToken(created);
 		expect(listed).toEqual(share());
 		expect(listed).not.toHaveProperty('token');
+	});
+});
+
+describe('formatBundleSize', () => {
+	it('shows megabytes, millions of bytes, to one decimal', () => {
+		expect(formatBundleSize(12_345_678)).toBe('12.3 MB');
+		expect(formatBundleSize(28_600_000)).toBe('28.6 MB');
+		expect(formatBundleSize(268_435_456)).toBe('268.4 MB');
+		expect(formatBundleSize(1_000_000)).toBe('1.0 MB');
+		expect(formatBundleSize(50_000)).toBe('0.1 MB');
+	});
+
+	it('says a small bundle is under 0.1 MB rather than none', () => {
+		expect(formatBundleSize(1)).toBe('under 0.1 MB');
+		expect(formatBundleSize(49_999)).toBe('under 0.1 MB');
+	});
+
+	it('shows an empty bundle as 0.0 MB', () => {
+		expect(formatBundleSize(0)).toBe('0.0 MB');
 	});
 });

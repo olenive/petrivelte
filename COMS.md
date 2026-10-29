@@ -269,9 +269,12 @@ notebook by `notebook_id` only. The `token` is `petri_share_` followed by 43
 url-safe characters.
 
 The `/shares` page lists every share and mints and revokes them. It names a
-share's nets and notebook, and fills its pickers, from `GET /api/wiring`,
-which carries every net with its `worker_id`, assigned or not, and every
-notebook. The net picker groups nets by worker and, once a net is picked,
+world share's nets by their own `instance_name` and shows the `bundle_label`
+of a share that serves a bundle. It fills its pickers from `GET
+/api/wiring`, which carries every net with its `worker_id`, assigned or not,
+and every notebook, and names a notebook share's notebook from the same
+answer, since the share carries only its id. The net picker groups nets by
+worker and, once a net is picked,
 leaves only nets on that worker selectable; a net on no worker is never
 selectable. Otherwise it sends what the owner typed and shows the server's
 sentence: an emptied number is left out so the default applies, and the
@@ -327,6 +330,17 @@ only the frontend's origin. Each refusal is one plain-English sentence in
   `dev-docs/SHARING.md`; a path twice.
 - 422 `You already have 20 bundles; delete one first`.
 - 429 past 5 uploads a minute, which `uploadBundle` words as such.
+
+The `/shares` page's Bundles section lists the owner's bundles (label, size
+uncompressed in MB to one decimal, file count, upload date) with Delete
+behind an inline confirm, and uploads a zip under a label: the Upload button
+waits for a file, the page shows a busy line while the upload runs, the
+server's sentence on a refusal, and the new bundle at the head of the list
+on success. After a delete it lists the shares again, so a share that named
+the bundle shows none. The mint form's Bundle select, shown for a world of
+either scope and hidden for a notebook, offers the owner's bundles by label
+with none as the default; the mint carries `bundle_id` only when a world
+picks one.
 
 ## Polling
 

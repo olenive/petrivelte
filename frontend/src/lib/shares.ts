@@ -1,12 +1,14 @@
 /**
  * Pure helpers for the shares page: a share's state and link, the net picker
- * that keeps a world on one worker, and the mint request built from the form.
+ * that keeps a world on one worker, the mint request built from the form, and
+ * a bundle's size as the bundles section shows it.
  *
  * The form refuses nothing the server does not refuse. It builds the request
  * from what the owner typed and leaves every judgement of it to the server,
  * whose sentence the page shows. What it does decide is what to leave out: a
- * seat and the per-net lists belong only on a play share and an email only on
- * a named one, and the server refuses each anywhere else.
+ * seat and the per-net lists belong only on a play share, an email only on a
+ * named one and a bundle only on a world, and the server refuses each anywhere
+ * else.
  */
 
 import type {
@@ -78,19 +80,10 @@ export function shareLink(base: string, token: string): string {
 
 // -- names --
 
-function netName(netId: string, nets: readonly Pick<WiringNet, 'id' | 'instance_name'>[]): string {
-	return nets.find((n) => n.id === netId)?.instance_name ?? netId.slice(0, ID_PREFIX);
-}
-
-/** A world share's nets by instance name, in the share's order; a net the
- *  wiring view does not know shows as the start of its id. */
-export function worldNetNames(
-	share: Pick<Share, 'nets'>,
-	nets: readonly Pick<WiringNet, 'id' | 'instance_name'>[],
-): string[] {
-	return share.nets.map((n) => netName(n.net_id, nets));
-}
-
+/** A notebook share's notebook by name. A share names its notebook by id
+ *  only, so this looks it up in the wiring view the notebook picker loads; a
+ *  notebook the view does not know shows as the start of its id. A world
+ *  share's nets carry their own names. */
 export function notebookName(
 	notebookId: string,
 	notebooks: readonly Pick<WiringNotebook, 'id' | 'instance_name' | 'definition_name'>[],
@@ -208,6 +201,8 @@ export interface ShareForm {
 	publishPayloads: boolean;
 	maxViewers: number | null;
 	inputsPerMinute: number | null;
+	/** The bundle a world serves, or null for none. */
+	bundleId: string | null;
 }
 
 export function emptyShareForm(): ShareForm {
@@ -226,6 +221,7 @@ export function emptyShareForm(): ShareForm {
 		publishPayloads: false,
 		maxViewers: DEFAULT_MAX_VIEWERS,
 		inputsPerMinute: DEFAULT_INPUTS_PER_MINUTE,
+		bundleId: null,
 	};
 }
 
@@ -260,6 +256,7 @@ export function shareRequest(form: ShareForm): ShareRequest {
 									}
 								: { net_id: id },
 					),
+					...(form.bundleId ? { bundle_id: form.bundleId } : {}),
 				}
 			: { notebook_id: form.notebookId };
 	return {
@@ -281,4 +278,17 @@ export function shareRequest(form: ShareForm): ShareRequest {
 export function withoutToken(created: ShareCreated): Share {
 	const { token: _token, ...share } = created;
 	return share;
+}
+
+// -- bundles --
+
+const BYTES_PER_MB = 1_000_000;
+
+/** A size in megabytes (millions of bytes) to one decimal, such as "12.3 MB".
+ *  A bundle too small to show at that precision is "under 0.1 MB" rather
+ *  than reading as empty. */
+export function formatBundleSize(bytes: number): string {
+	const mb = bytes / BYTES_PER_MB;
+	if (bytes > 0 && mb < 0.05) return 'under 0.1 MB';
+	return `${mb.toFixed(1)} MB`;
 }

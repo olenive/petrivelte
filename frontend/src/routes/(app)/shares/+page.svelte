@@ -2,9 +2,13 @@
 	import { onMount } from 'svelte';
 	import {
 		createShare,
+		deleteBundle,
 		getWiring,
+		listBundles,
 		listShares,
 		revokeShare,
+		uploadBundle,
+		type Bundle,
 		type Share,
 		type ShareCreated,
 		type WiringResponse,
@@ -17,6 +21,7 @@
 		DEFAULT_MAX_VIEWERS,
 		describeInputs,
 		emptyShareForm,
+		formatBundleSize,
 		netsByWorker,
 		notebookName,
 		pickRefusal,
@@ -28,7 +33,6 @@
 		shareTokenLabel,
 		togglePicked,
 		withoutToken,
-		worldNetNames,
 		worldProblem,
 		type ShareForm,
 		type ShareStatus,
@@ -46,9 +50,23 @@
 	let confirmingId = $state<string | null>(null);
 	let revokingId = $state<string | null>(null);
 
-	// What the pickers choose from, and the names the list shows
+	// What the pickers choose from, and the notebook names the list shows
 	let wiring = $state<WiringResponse | null>(null);
 	let wiringError = $state('');
+
+	// The owner's bundles, which the bundle picker also offers
+	let bundles = $state<Bundle[]>([]);
+	let bundlesLoaded = $state(false);
+	let bundlesError = $state('');
+	let confirmingBundleId = $state<string | null>(null);
+	let deletingBundleId = $state<string | null>(null);
+
+	// The upload form
+	let bundleLabel = $state('');
+	let bundleFile = $state<File | null>(null);
+	let bundleFileInput = $state<HTMLInputElement | null>(null);
+	let uploading = $state(false);
+	let uploadError = $state('');
 
 	// The form
 	let form = $state<ShareForm>(emptyShareForm());
@@ -80,6 +98,7 @@
 	onMount(() => {
 		void loadShares();
 		void loadWiring();
+		void loadBundles();
 	});
 
 	async function loadShares() {
@@ -103,6 +122,17 @@
 		}
 	}
 
+	async function loadBundles() {
+		try {
+			bundles = await listBundles();
+			bundlesError = '';
+		} catch (e) {
+			bundlesError = e instanceof Error ? e.message : String(e);
+		} finally {
+			bundlesLoaded = true;
+		}
+	}
+
 	/** The row's last line: dates, use and the share's policy. */
 	function facts(share: Share): string[] {
 		return [
@@ -115,6 +145,16 @@
 		];
 	}
 
+	/** A bundle row's last line. */
+	function bundleFacts(bundle: Bundle): string[] {
+		return [
+			`${formatBundleSize(bundle.size_bytes)} uncompressed`,
+			`${bundle.file_count} file${bundle.file_count === 1 ? '' : 's'}`,
+			`uploaded ${formatCreated(bundle)}`,
+		];
+	}
+
+	/** A picked net of the mint form by name, from the wiring view the picker lists. */
 	function netName(netId: string): string {
 		return nets.find((n) => n.id === netId)?.instance_name ?? netId.slice(0, 8);
 	}
@@ -150,6 +190,40 @@
 			sharesError = e instanceof Error ? e.message : String(e);
 		} finally {
 			revokingId = null;
+		}
+	}
+
+	async function handleUpload() {
+		if (bundleFile === null) return;
+		uploadError = '';
+		uploading = true;
+		try {
+			const uploaded = await uploadBundle(bundleLabel, bundleFile);
+			bundles = [uploaded, ...bundles.filter((b) => b.id !== uploaded.id)];
+			bundleLabel = '';
+			bundleFile = null;
+			if (bundleFileInput) bundleFileInput.value = '';
+		} catch (e) {
+			uploadError = e instanceof Error ? e.message : String(e);
+		} finally {
+			uploading = false;
+		}
+	}
+
+	async function handleDeleteBundle(bundle: Bundle) {
+		bundlesError = '';
+		deletingBundleId = bundle.id;
+		try {
+			await deleteBundle(bundle.id);
+			bundles = bundles.filter((b) => b.id !== bundle.id);
+			if (form.bundleId === bundle.id) form.bundleId = null;
+			confirmingBundleId = null;
+			// The server takes the bundle off every share that named it.
+			void loadShares();
+		} catch (e) {
+			bundlesError = e instanceof Error ? e.message : String(e);
+		} finally {
+			deletingBundleId = null;
 		}
 	}
 
@@ -252,6 +326,19 @@
 						</div>
 					{/each}
 				</fieldset>
+
+				<label class="flex flex-col gap-1 text-sm text-foreground-muted" data-testid="share-bundle-picker">
+					Bundle
+					<select name="share-bundle" bind:value={form.bundleId} class="{inputClass} w-full max-w-sm">
+						<option value={null}>none</option>
+						{#each bundles as bundle (bundle.id)}
+							<option value={bundle.id}>{bundle.label}</option>
+						{/each}
+					</select>
+					<span class="text-xs text-foreground-faint">
+						Optional: a game or viewer from your bundles below, served beside the world under its link.
+					</span>
+				</label>
 			{:else}
 				<fieldset class="flex flex-col gap-1 text-sm text-foreground-muted" data-testid="share-notebook-picker">
 					<legend class="mb-1">Notebook</legend>
@@ -444,13 +531,16 @@
 								</div>
 								<p class="text-sm text-foreground-muted" data-testid="share-resource">
 									{#if share.resource_kind === 'world'}
-										world: {worldNetNames(share, nets).join(', ') || 'no nets'}
+										world: {share.nets.map((n) => n.instance_name).join(', ') || 'no nets'}
 									{:else if share.resource_kind === 'notebook' && share.notebook_id}
 										notebook: {notebookName(share.notebook_id, notebooks)}
 									{:else}
 										{share.resource_kind}
 									{/if}
 								</p>
+								{#if share.bundle_label}
+									<p class="text-xs text-foreground-muted" data-testid="share-bundle">bundle <span class="text-foreground">{share.bundle_label}</span></p>
+								{/if}
 								{#if share.audience === 'named' && share.member_email}
 									<p class="text-xs text-foreground-muted">for {share.member_email}</p>
 								{/if}
@@ -459,7 +549,7 @@
 									{#each share.nets as shared (shared.net_id)}
 										{@const inputs = describeInputs(shared)}
 										{#if inputs}
-											<p class="text-xs text-foreground-faint">{netName(shared.net_id)}: {inputs}</p>
+											<p class="text-xs text-foreground-faint">{shared.instance_name}: {inputs}</p>
 										{/if}
 									{/each}
 								{/if}
@@ -507,5 +597,110 @@
 				{/each}
 			</ul>
 		{/if}
+	</section>
+
+	<!-- The owner's bundles -->
+	<section class="bg-card border border-border rounded-lg p-6" data-testid="bundles">
+		<div class="mb-4 flex items-baseline justify-between gap-2">
+			<h2 class="text-lg font-medium text-foreground">Bundles</h2>
+			{#if bundlesLoaded && !bundlesError}
+				<span class="text-sm text-foreground-muted">{bundles.length} bundle{bundles.length === 1 ? '' : 's'}</span>
+			{/if}
+		</div>
+
+		<form class="flex flex-col gap-3" novalidate onsubmit={(e) => { e.preventDefault(); void handleUpload(); }} data-testid="bundle-form">
+			<div class="flex flex-wrap items-end gap-3">
+				<label class="flex flex-col gap-1 text-sm text-foreground-muted flex-1 min-w-[200px]">
+					Label
+					<input type="text" name="bundle-label" bind:value={bundleLabel} placeholder="e.g. chess board" disabled={uploading} class={inputClass} />
+				</label>
+				<label class="flex flex-col gap-1 text-sm text-foreground-muted">
+					Zip file
+					<input
+						type="file"
+						name="bundle-file"
+						accept=".zip,application/zip"
+						bind:this={bundleFileInput}
+						disabled={uploading}
+						onchange={(e) => { bundleFile = e.currentTarget.files?.[0] ?? null; }}
+						class="text-sm text-foreground file:mr-3 file:px-3 file:py-1.5 file:rounded-md file:border file:border-border file:bg-surface file:text-foreground file:cursor-pointer"
+					/>
+				</label>
+				<button type="submit" disabled={uploading || bundleFile === null}
+					class="px-4 py-2 border border-accent rounded-md bg-accent text-accent-foreground text-sm font-semibold cursor-pointer transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed">
+					{uploading ? 'Uploading...' : 'Upload'}
+				</button>
+			</div>
+			{#if uploading && bundleFile}
+				<p class="text-xs text-foreground-muted" role="status" data-testid="bundle-uploading">
+					Uploading {bundleFile.name}, {formatBundleSize(bundleFile.size)}...
+				</p>
+			{/if}
+			{#if uploadError}
+				<div class="px-3 py-2.5 rounded-md bg-error-bg text-error text-sm" role="alert" data-testid="bundle-upload-error">{uploadError}</div>
+			{/if}
+			<p class="text-xs text-foreground-faint">
+				A bundle is a zip with <code>index.html</code> at its root, at most 64 MiB, served beside a shared world.
+			</p>
+		</form>
+
+		{#if bundlesError}
+			<div class="mt-4 px-3 py-2.5 rounded-md bg-error-bg text-error text-sm flex items-center justify-between gap-2" role="alert">
+				<span>{bundlesError}</span>
+				<button type="button" class="shrink-0 text-xs underline bg-transparent border-0 cursor-pointer text-error" onclick={() => void loadBundles()}>Retry</button>
+			</div>
+		{/if}
+
+		<div class="mt-4">
+			{#if !bundlesLoaded}
+				<p class="text-sm text-foreground-faint">Loading...</p>
+			{:else if bundles.length === 0 && !bundlesError}
+				<p class="text-sm text-foreground-faint">You have no bundles.</p>
+			{:else}
+				<ul class="flex flex-col gap-2">
+					{#each bundles as bundle (bundle.id)}
+						<li class="p-3 rounded-md bg-muted border border-border" data-testid="bundle-row">
+							<div class="flex items-start justify-between gap-3">
+								<div class="min-w-0 flex flex-col gap-1">
+									<span class="text-foreground font-medium truncate">{bundle.label}</span>
+									<p class="text-xs text-foreground-faint">{bundleFacts(bundle).join(' · ')}</p>
+								</div>
+								<div class="shrink-0 flex flex-col items-end gap-1">
+									{#if confirmingBundleId === bundle.id}
+										<span class="text-xs text-foreground-muted text-right max-w-[220px]">Delete it? Shares that serve it carry on without it, and it cannot be restored.</span>
+										<div class="flex gap-2">
+											<button
+												type="button"
+												class="px-3 py-1.5 rounded-md text-xs font-medium border border-destructive bg-transparent text-destructive cursor-pointer transition-all hover:bg-destructive-hover hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
+												onclick={() => void handleDeleteBundle(bundle)}
+												disabled={deletingBundleId === bundle.id}
+											>
+												{deletingBundleId === bundle.id ? 'Deleting...' : 'Yes, delete'}
+											</button>
+											<button
+												type="button"
+												class="px-3 py-1.5 rounded-md text-xs border border-border bg-transparent text-foreground-muted cursor-pointer hover:text-foreground"
+												onclick={() => { confirmingBundleId = null; }}
+												disabled={deletingBundleId === bundle.id}
+											>
+												Cancel
+											</button>
+										</div>
+									{:else}
+										<button
+											type="button"
+											class="px-3 py-1.5 rounded-md text-xs border border-border bg-transparent text-foreground-muted cursor-pointer transition-colors hover:border-destructive hover:text-destructive"
+											onclick={() => { confirmingBundleId = bundle.id; }}
+										>
+											Delete
+										</button>
+									{/if}
+								</div>
+							</div>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		</div>
 	</section>
 </div>
