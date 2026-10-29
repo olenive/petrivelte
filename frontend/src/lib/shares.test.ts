@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Share, ShareCreated, WiringNet } from './api';
+import type { Share, ShareCreated, ShareNet, WiringNet } from './api';
 import {
 	DEFAULT_EXPIRES_IN_DAYS,
 	DEFAULT_INPUTS_PER_MINUTE,
@@ -34,6 +34,10 @@ function iso(ms: number): string {
 	return new Date(ms).toISOString();
 }
 
+function shareNet(net_id: string, worker_id: string | null, instance_name = net_id): ShareNet {
+	return { net_id, definition_name: 'def', instance_name, worker_id, play_places: [], play_controls: [] };
+}
+
 function share(overrides: Partial<Share> = {}): Share {
 	return {
 		id: 's1',
@@ -52,7 +56,9 @@ function share(overrides: Partial<Share> = {}): Share {
 		expires_at: iso(NOW + 29 * DAY),
 		revoked_at: null,
 		last_used_at: null,
-		nets: [{ net_id: 'net-a', worker_id: W1, play_places: [], play_controls: [] }],
+		bundle_id: null,
+		bundle_label: null,
+		nets: [shareNet('net-a', W1)],
 		...overrides,
 	};
 }
@@ -144,15 +150,15 @@ describe('worldNetNames and notebookName', () => {
 	it('names a world\'s nets by instance name in the share\'s order', () => {
 		const world = share({
 			nets: [
-				{ net_id: 'net-b', worker_id: W1, play_places: [], play_controls: [] },
-				{ net_id: 'net-a', worker_id: W1, play_places: [], play_controls: [] },
+				shareNet('net-b', W1),
+				shareNet('net-a', W1),
 			],
 		});
 		expect(worldNetNames(world, nets)).toEqual(['shop', 'traffic light']);
 	});
 
 	it('shows a net the wiring view does not know by the start of its id', () => {
-		const world = share({ nets: [{ net_id: '0123456789abcdef', worker_id: W1, play_places: [], play_controls: [] }] });
+		const world = share({ nets: [shareNet('0123456789abcdef', W1)] });
 		expect(worldNetNames(world, nets)).toEqual(['01234567']);
 	});
 
@@ -180,8 +186,8 @@ describe('worldProblem', () => {
 	it('says when a net has lost its worker', () => {
 		const world = share({
 			nets: [
-				{ net_id: 'net-a', worker_id: W1, play_places: [], play_controls: [] },
-				{ net_id: 'net-b', worker_id: null, play_places: [], play_controls: [] },
+				shareNet('net-a', W1),
+				shareNet('net-b', null),
 			],
 		});
 		expect(worldProblem(world)).toBe('A net of this world is on no worker now, so the world cannot be served.');
@@ -190,8 +196,8 @@ describe('worldProblem', () => {
 	it('says when a reassignment split the world across workers', () => {
 		const world = share({
 			nets: [
-				{ net_id: 'net-a', worker_id: W1, play_places: [], play_controls: [] },
-				{ net_id: 'net-b', worker_id: W2, play_places: [], play_controls: [] },
+				shareNet('net-a', W1),
+				shareNet('net-b', W2),
 			],
 		});
 		expect(worldProblem(world)).toBe('Its nets are on more than one worker now, so the world cannot be served.');

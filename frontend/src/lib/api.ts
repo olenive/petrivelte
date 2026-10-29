@@ -81,6 +81,9 @@ function _isExpectedSlowPath(method: string, path: string): boolean {
 	if (_EXPECTED_SLOW_SUFFIXES.some((s) => path.endsWith(s))) return true;
 	// Worker creation provisions a machine — slow by nature.
 	if (method === 'POST' && path === '/api/workers') return true;
+	// A bundle upload's time is the zip's transfer, check and store, which
+	// grows with its size.
+	if (method === 'POST' && path.split('?')[0] === '/api/bundles') return true;
 	return false;
 }
 
@@ -178,6 +181,16 @@ async function put(path: string, body: unknown): Promise<Response> {
 		credentials: 'include',
 		headers: jsonHeaders,
 		body: JSON.stringify(body),
+	}));
+}
+
+/** POST a raw body, such as a file, with its own content type. */
+async function postRaw(path: string, body: Blob, contentType: string): Promise<Response> {
+	return _timed('POST', path, () => fetch(`${API_URL}${path}`, {
+		method: 'POST',
+		credentials: 'include',
+		headers: { 'Content-Type': contentType },
+		body,
 	}));
 }
 
@@ -2092,11 +2105,14 @@ export type ShareScope = 'read' | 'play';
 /** Link: anyone holding the link. Named: one person, by email. */
 export type ShareAudience = 'link' | 'named';
 
-/** One net of a world share. `worker_id` is the net's worker now, read on
- *  every listing, so it follows a reassignment made after the mint and is
- *  null once the net has no worker. */
+/** One net of a world share. `worker_id` and the two names are the net's
+ *  as they are now, read on every listing, so they follow a reassignment or
+ *  rename made after the mint; `worker_id` is null once the net has no
+ *  worker. */
 export interface ShareNet {
 	net_id: string;
+	definition_name: string;
+	instance_name: string;
 	worker_id: string | null;
 	play_places: string[];
 	play_controls: string[];
@@ -2126,6 +2142,10 @@ export interface Share {
 	expires_at: string;
 	revoked_at: string | null;
 	last_used_at: string | null;
+	/** The bundle served beside a world share, by id and label; both null
+	 *  when it names none, and once that bundle is deleted. */
+	bundle_id: string | null;
+	bundle_label: string | null;
 	/** Oldest net first; empty on a notebook share. */
 	nets: ShareNet[];
 }
@@ -2145,9 +2165,9 @@ export interface ShareNetRequest {
 /** The body of `POST /api/shares`. A field left out takes the server's
  *  default: scope read, audience link, 30 days, payloads hidden, 20 viewers,
  *  60 inputs a minute. A world names `nets`; a notebook names `notebook_id`.
- *  `seat` belongs only on a play share and `member_email` only on a named
- *  one: the server refuses a setting the share would never read, and an
- *  unknown field. */
+ *  `seat` belongs only on a play share, `member_email` only on a named one
+ *  and `bundle_id` only on a world: the server refuses a setting the share
+ *  would never read, and an unknown field. */
 export interface ShareRequest {
 	label: string;
 	resource_kind: ShareResourceKind;
@@ -2161,27 +2181,38 @@ export interface ShareRequest {
 	publish_payloads?: boolean;
 	max_viewers?: number;
 	inputs_per_minute?: number;
+	/** One of the owner's bundles, served beside a world share of either scope. */
+	bundle_id?: string;
 }
 
-/** The share routes' refusal as one sentence. The control plane's own
- *  refusals are a sentence in `detail`; a body FastAPI cannot parse (a value
- *  of the wrong type) is a list of complaints, and the first is named by its
- *  field, since the form has several numbers that could be the one. A 429
- *  carries only the limit in `detail`. */
-function shareErrorMessage(status: number, data: unknown, fallback: string): string {
+/** A share or bundle route's refusal as one sentence. The control plane's
+ *  own refusals are a sentence in `detail`; a request FastAPI cannot parse (a
+ *  value of the wrong type) is a list of complaints, and the first is named
+ *  by its field, since the form has several numbers that could be the one. A
+ *  429 carries only the limit in `detail`, so `limited` says what was done
+ *  too often. */
+function sentenceErrorMessage(status: number, data: unknown, fallback: string, limited: string): string {
 	const detail = data && typeof data === 'object' ? (data as Record<string, unknown>).detail : null;
 	if (status === 429) {
 		const limit = typeof detail === 'string' ? ` (${detail})` : '';
-		return `Too many shares minted in the last minute${limit}; wait a minute and try again`;
+		return `${limited}${limit}; wait a minute and try again`;
 	}
 	if (Array.isArray(detail) && detail.length > 0) {
 		const first = detail[0] as { loc?: unknown; msg?: unknown } | null;
 		if (first && typeof first === 'object' && 'msg' in first) {
-			const loc = Array.isArray(first.loc) ? first.loc.filter((part) => part !== 'body') : [];
+			const loc = Array.isArray(first.loc)
+				? first.loc.filter((part) => part !== 'body' && part !== 'query')
+				: [];
 			return loc.length > 0 ? `${loc.join('.')}: ${String(first.msg)}` : String(first.msg);
 		}
 	}
 	return extractErrorMessage(data, fallback);
+}
+
+const SHARES_LIMITED = 'Too many shares minted in the last minute';
+
+function shareErrorMessage(status: number, data: unknown, fallback: string): string {
+	return sentenceErrorMessage(status, data, fallback, SHARES_LIMITED);
 }
 
 /** The owner's shares, newest first, each with its nets. With `netId`, only
@@ -2209,6 +2240,65 @@ export async function revokeShare(id: string): Promise<{ status: string }> {
 	const res = await del(`/api/shares/${encodeURIComponent(id)}`);
 	if (!res.ok) {
 		throw new Error(shareErrorMessage(res.status, await res.json().catch(() => null), 'Failed to revoke the share'));
+	}
+	return res.json();
+}
+
+// -- bundles --
+//
+// A bundle is a zip of static files, a game or viewer compiled to
+// WebAssembly, that the public tier serves beside a world share naming it.
+// The owner uploads, lists and deletes bundles here; like the share routes,
+// these need a browser session and refuse a personal API token with 403. The
+// shapes mirror `petritype_server/bundles/models.py`.
+
+/** A bundle as its owner lists it. `size_bytes` is its files' total
+ *  uncompressed; `content_hash` is the SHA-256 of the zip as uploaded. A
+ *  bundle never changes: a new upload is a new bundle. */
+export interface Bundle {
+	id: string;
+	label: string;
+	size_bytes: number;
+	file_count: number;
+	content_hash: string;
+	created_at: string;
+}
+
+const BUNDLES_LIMITED = 'Too many bundles uploaded in the last minute';
+
+function bundleErrorMessage(status: number, data: unknown, fallback: string): string {
+	return sentenceErrorMessage(status, data, fallback, BUNDLES_LIMITED);
+}
+
+/** The owner's bundles, newest first. */
+export async function listBundles(): Promise<Bundle[]> {
+	const res = await get('/api/bundles');
+	if (!res.ok) {
+		throw new Error(bundleErrorMessage(res.status, await res.json().catch(() => null), 'Failed to load bundles'));
+	}
+	return res.json();
+}
+
+/** Upload a zip as a bundle: the file itself is the request body, sent as
+ *  `application/zip`, and the label goes in the query string. A refusal
+ *  throws the server's sentence: 413 for a zip over the size cap, 415 for
+ *  another content type, 422 for a label out of bounds, a zip the server's
+ *  check refuses, or an owner at the bundle cap. */
+export async function uploadBundle(label: string, file: Blob): Promise<Bundle> {
+	const res = await postRaw(`/api/bundles?label=${encodeURIComponent(label)}`, file, 'application/zip');
+	if (!res.ok) {
+		const fallback = res.status === 413 ? 'The zip is larger than the server accepts' : 'Failed to upload the bundle';
+		throw new Error(bundleErrorMessage(res.status, await res.json().catch(() => null), fallback));
+	}
+	return res.json();
+}
+
+/** Delete one of the owner's bundles. Each share that named it carries on
+ *  without one, its `bundle_id` and `bundle_label` set to null. */
+export async function deleteBundle(id: string): Promise<{ status: string }> {
+	const res = await del(`/api/bundles/${encodeURIComponent(id)}`);
+	if (!res.ok) {
+		throw new Error(bundleErrorMessage(res.status, await res.json().catch(() => null), 'Failed to delete the bundle'));
 	}
 	return res.json();
 }

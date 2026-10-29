@@ -31,7 +31,11 @@ const SHARE: Share = {
 	expires_at: '2026-11-28T12:00:00Z',
 	revoked_at: null,
 	last_used_at: null,
-	nets: [{ net_id: NET_A, worker_id: WORKER, play_places: [], play_controls: [] }],
+	bundle_id: null,
+	bundle_label: null,
+	nets: [
+		{ net_id: NET_A, definition_name: 'light_net', instance_name: 'light', worker_id: WORKER, play_places: [], play_controls: [] },
+	],
 };
 
 function respond(status: number, body: unknown) {
@@ -55,6 +59,7 @@ describe('listShares', () => {
 		const shares = await listShares();
 		expect(shares).toEqual([SHARE, revoked]);
 		expect(shares[0].nets[0].worker_id).toBe(WORKER);
+		expect(shares[0].nets[0].instance_name).toBe('light');
 		const [url, init] = lastCall(fetchMock);
 		expect(url).toBe('http://cp.test/api/shares');
 		expect(init.credentials).toBe('include');
@@ -142,6 +147,26 @@ describe('createShare', () => {
 			max_viewers: 4,
 			inputs_per_minute: 120,
 		});
+	});
+
+	it('POSTs a world share that names a bundle and hands back its label', async () => {
+		const BUNDLE = '00000000-0000-0000-0000-0000000000b1';
+		const fetchMock = respond(201, { ...SHARE, bundle_id: BUNDLE, bundle_label: 'chess board', token: 't' });
+		const answer = await createShare({ label: 'game', resource_kind: 'world', nets: [{ net_id: NET_A }], bundle_id: BUNDLE });
+		expect(JSON.parse(String(lastCall(fetchMock)[1].body))).toEqual({
+			label: 'game',
+			resource_kind: 'world',
+			nets: [{ net_id: NET_A }],
+			bundle_id: BUNDLE,
+		});
+		expect([answer.bundle_id, answer.bundle_label]).toEqual([BUNDLE, 'chess board']);
+	});
+
+	it('throws the sentence for another owner\'s bundle', async () => {
+		respond(422, { detail: 'Bundle 00000000-0000-0000-0000-0000000000b2 is not one of your bundles' });
+		await expect(
+			createShare({ label: 'x', resource_kind: 'world', nets: [{ net_id: NET_A }], bundle_id: '00000000-0000-0000-0000-0000000000b2' }),
+		).rejects.toThrow('Bundle 00000000-0000-0000-0000-0000000000b2 is not one of your bundles');
 	});
 
 	it('POSTs a notebook share by notebook id', async () => {

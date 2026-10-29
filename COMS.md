@@ -234,14 +234,20 @@ The mint body (`ShareRequest`); a field left out takes the default shown:
   from what viewers see; counts and firings still show.
 - `max_viewers`: 1 to 200, default 20. `inputs_per_minute`: 1 to 600, default
   60, per seat across the world's nets.
+- `bundle_id`: one of the owner's bundles ("Bundles" below), served beside a
+  world share of either scope, since a read share can carry a viewer that
+  only reads. Left out, the share names none. A notebook share takes none
+  (`A notebook share takes no bundle: a bundle shows or plays a world of
+  nets`), and another owner's bundle is refused (`Bundle <id> is not one of
+  your bundles`).
 
 A refused mint is 422 with one plain-English sentence in `detail`, which
 `createShare` throws as it stands. A body that does not parse (an unknown
 field, a value of the wrong type) is FastAPI's own 422, a list of complaints;
 `createShare` throws the first, prefixed with the field it names. The server
 refuses a setting the share would never read rather than storing it, so a
-caller sends `seat` and the per-net lists only on a play share and
-`member_email` only on a named one. An owner holds at most 100 active shares
+caller sends `seat` and the per-net lists only on a play share,
+`member_email` only on a named one and `bundle_id` only on a world. An owner holds at most 100 active shares
 (the next is refused with `You already have 100 active shares; revoke one
 first`) and mints at most 10 a minute (429, which `createShare` words as
 such).
@@ -251,12 +257,16 @@ on a notebook share), `scope`, `audience`, `member_email` (set exactly on a
 named share), `seat` (set exactly on a play share), `prefix` (the 8
 characters after `petri_share_`), `publish_payloads`, `max_viewers`,
 `inputs_per_minute`, `created_at`, `expires_at`, `revoked_at`,
-`last_used_at` (written by the public tier at most once a minute), and `nets`,
-each `{net_id, worker_id, play_places, play_controls}` with `worker_id` the
-net's worker now, so a world a reassignment split shows nets on more than one
-worker. A deleted net leaves its worlds; a deleted notebook deletes its
-shares. The answer names nets and notebooks by id only. The `token` is
-`petri_share_` followed by 43 url-safe characters.
+`last_used_at` (written by the public tier at most once a minute),
+`bundle_id` and `bundle_label` (the bundle a world serves, both null when it
+names none and once that bundle is deleted), and `nets`, each `{net_id,
+definition_name, instance_name, worker_id, play_places, play_controls}`. A
+net's `worker_id` and names are read from the net on every answer, so they
+follow a rename or reassignment made after the mint, and a world a
+reassignment split shows nets on more than one worker. A deleted net leaves
+its worlds; a deleted notebook deletes its shares. A notebook share names its
+notebook by `notebook_id` only. The `token` is `petri_share_` followed by 43
+url-safe characters.
 
 The `/shares` page lists every share and mints and revokes them. It names a
 share's nets and notebook, and fills its pickers, from `GET /api/wiring`,
@@ -272,6 +282,51 @@ public tier's base URL, no trailing slash, read at runtime like
 page shows it once, after the mint. When the value is empty, or is not an
 http(s) URL (https in production), it shows the token itself with a note
 that the public tier's address is not configured.
+
+### Bundles
+
+A bundle is a zip of static files, such as a game or viewer compiled to
+WebAssembly, that the public tier serves beside a world share naming it, at
+`/s/{token}/bundle/`. A bundle never changes: a new upload is a new bundle.
+The owner uploads, lists and deletes bundles over three CP routes
+(`uploadBundle`, `listBundles` and `deleteBundle` in `api.ts`; the design is
+"Bundles as built" in `dev-docs/SHARING.md`). Like the share routes they need
+the browser session, and refuse a personal API token with 403.
+
+| Call | Answer |
+|---|---|
+| `POST /api/bundles?label=` | Uploads the zip, sent as the raw request body. 201 with the bundle. |
+| `GET /api/bundles` | The owner's bundles, newest first. |
+| `DELETE /api/bundles/{id}` | `{status: "deleted"}`; another owner's bundle is 404 `Bundle not found`. Each share that named it carries on without one, its `bundle_id` and `bundle_label` null. |
+
+The bundle answer: `id`, `label`, `size_bytes` (its files' total,
+uncompressed), `file_count`, `content_hash` (the SHA-256 of the zip as
+uploaded) and `created_at`.
+
+The upload's body is the zip file itself, not a form, with `Content-Type:
+application/zip` (the server also takes `application/octet-stream`), and the
+label is the `label` query parameter. A cross-site page may send a form or
+plain-text body with the owner's cookie without asking the browser first;
+these two content types make the browser ask, and the CP's CORS list answers
+only the frontend's origin. Each refusal is one plain-English sentence in
+`detail`, which `uploadBundle` throws as it stands:
+
+- 413 `A bundle's zip is at most 64 MiB.` for a larger body; a declared
+  length above the cap is refused unread.
+- 415 `Send the zip as the raw request body, with Content-Type
+  application/zip.` for any other content type.
+- 422 `A bundle's label must be 1 to 100 characters`, counted after trimming.
+- 422 for a zip the server's check refuses, naming the first problem: not a
+  zip (`The upload is not a zip file.`); no `index.html` at its root (`There
+  is no index.html at the root of the zip. Zip the contents of the bundle's
+  folder rather than the folder itself, so that index.html is at the top.`);
+  more than 2000 files; over 256 MiB uncompressed; an entry that is
+  encrypted, damaged or a symbolic link; a path that is absolute, holds `..`,
+  a backslash or a NUL, has an empty name or one starting with a dot, or is
+  over 512 bytes; an extension outside the allow list in
+  `dev-docs/SHARING.md`; a path twice.
+- 422 `You already have 20 bundles; delete one first`.
+- 429 past 5 uploads a minute, which `uploadBundle` words as such.
 
 ## Polling
 

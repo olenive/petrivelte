@@ -13,7 +13,7 @@
 import type {
 	DailyRollup, Deployment, DeploymentSummary, DiscoveredNotebook, LastRun, Net, Notebook,
 	NotebookDefect, NotebookSlot, NotebookTransport, OpenRun, Worker, WorkerDeleteResult, Operation,
-	OperationSummary, RunPage, RunRecord, ShareCreated, ShareRequest,
+	OperationSummary, RunPage, RunRecord, ShareCreated, ShareRequest, Bundle,
 } from './api';
 
 // -- Regression lock: Deployment must expose discovered_notebooks --
@@ -352,10 +352,12 @@ export const __transport_and_build_contract_check = [_transport_close_shape, _wo
 //
 // The shares page reads every field of the mint answer: the one-time `token`
 // makes the link, `nets[].worker_id` tells a world still on one worker from
-// one a reassignment split, and the nullable columns are set exactly when
-// the share's kind needs them (a seat on play, an email on named, a
-// notebook id on a notebook share). The request mirrors the server's
-// `ShareRequest`, which refuses an unknown field.
+// one a reassignment split, `nets[].instance_name` names a net in the list,
+// `bundle_label` names the bundle a world serves, and the nullable columns
+// are set exactly when the share's kind needs them (a seat on play, an email
+// on named, a notebook id on a notebook share). The request mirrors the
+// server's `ShareRequest`, which refuses an unknown field. A bundle is listed
+// by every field of the upload answer.
 const _share_created_shape: ShareCreated = {
 	id: '44444444-4444-4444-4444-444444444444',
 	label: 'two-seat game',
@@ -373,8 +375,17 @@ const _share_created_shape: ShareCreated = {
 	expires_at: '2026-11-28T12:00:00Z',
 	revoked_at: null,
 	last_used_at: null,
+	bundle_id: '55555555-5555-5555-5555-555555555555',
+	bundle_label: 'chess board',
 	nets: [
-		{ net_id: '33333333-3333-3333-3333-333333333333', worker_id: 'w-1', play_places: ['moves'], play_controls: ['resign'] },
+		{
+			net_id: '33333333-3333-3333-3333-333333333333',
+			definition_name: 'chess_net',
+			instance_name: 'chess',
+			worker_id: 'w-1',
+			play_places: ['moves'],
+			play_controls: ['resign'],
+		},
 	],
 	token: 'petri_share_abcdefgh0123456789012345678901234567890',
 };
@@ -392,6 +403,16 @@ const _share_request_shape: Required<ShareRequest> = {
 	publish_payloads: false,
 	max_viewers: 20,
 	inputs_per_minute: 60,
+	bundle_id: '55555555-5555-5555-5555-555555555555',
 };
 
-export const __share_contract_check = [_share_created_shape, _share_request_shape];
+const _bundle_shape: Bundle = {
+	id: '55555555-5555-5555-5555-555555555555',
+	label: 'chess board',
+	size_bytes: 12_345_678,
+	file_count: 4,
+	content_hash: 'a'.repeat(64),
+	created_at: '2026-10-29T12:00:00Z',
+};
+
+export const __share_contract_check = [_share_created_shape, _share_request_shape, _bundle_shape];
