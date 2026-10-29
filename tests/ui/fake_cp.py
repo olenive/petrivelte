@@ -86,11 +86,23 @@ produced token a colour as a third element.
 Shares (`GET`, `POST` and `DELETE /api/shares`, as `shares/routes.py` in
 the server answers them): `shares` is the owner's list, newest first. A mint
 keeps its body in `share_bodies` and answers 201 with the share and a fresh
-`token`, each net carrying the `worker_id` that `wiring` gives it, and puts
-the share at the head of the list; a mint while `share_refusals` holds a
-sentence answers 422 with that sentence as `detail` instead. A revoke sets
-`revoked_at` and keeps the row; an unknown id is 404 `Share not found`.
-`wiring`, when a test sets it, is what `GET /api/wiring` answers.
+`token`, each net carrying the `worker_id` and names that `wiring` gives it
+and the share carrying the label of the bundle it names, and puts the share
+at the head of the list; a mint while `share_refusals` holds a sentence
+answers 422 with that sentence as `detail` instead, and so does a mint
+naming a bundle `bundles` does not hold, with the server's sentence. A
+revoke sets `revoked_at` and keeps the row; an unknown id is 404 `Share not
+found`. `wiring`, when a test sets it, is what `GET /api/wiring` answers.
+
+Bundles (`GET`, `POST` and `DELETE /api/bundles`, as `bundles/routes.py`
+answers them): `bundles` is the owner's list, newest first. An upload's body
+is the zip itself, never parsed as JSON; each upload's label, content type
+and bytes are kept in `bundle_uploads`. It answers 201 with a bundle whose
+size and file count are read from the zip, at the head of the list, after
+`slow_upload_s`; while `bundle_refusals` holds a `(status, sentence)` the
+upload answers that instead. A delete removes the bundle and takes it off
+every share that named it, as the server's foreign key does; an unknown id
+is 404 `Bundle not found`.
 
 Every request is recorded in `requests`, so a test can see what the page
 asked for, including anything this fake does not know about. Those unknown
@@ -98,11 +110,14 @@ paths get a 200 with `{}` and are also listed in `unknown_paths`.
 """
 
 import copy
+import hashlib
+import io
 import json
 import queue
 import re
 import threading
 import time
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -175,6 +190,13 @@ class FakeControlPlane:
     shares: list[dict[str, Any]] = field(default_factory=list)
     share_bodies: list[Any] = field(default_factory=list)
     share_refusals: list[str] = field(default_factory=list)
+    # The owner's bundles, newest first; every upload as it arrived; the
+    # (status, sentence) the next uploads are refused with, in order; and how
+    # long an upload takes to answer, so a test can see it under way.
+    bundles: list[dict[str, Any]] = field(default_factory=list)
+    bundle_uploads: list[dict[str, Any]] = field(default_factory=list)
+    bundle_refusals: list[tuple[int, str]] = field(default_factory=list)
+    slow_upload_s: float = 0.0
     requests: list[str] = field(default_factory=list)
     unknown_paths: list[str] = field(default_factory=list)
     server_streams: list["queue.Queue[str | None]"] = field(default_factory=list)
@@ -1005,15 +1027,24 @@ def share_row(share_id: str, *, label: str, **overrides: Any) -> dict[str, Any]:
         "scope": "read", "audience": "link", "member_email": None, "seat": None,
         "prefix": share_id[:8].ljust(8, "x"), "publish_payloads": False, "max_viewers": 20,
         "inputs_per_minute": 60, "created_at": STAMP, "expires_at": "2099-01-01T00:00:00+00:00",
-        "revoked_at": None, "last_used_at": None, "nets": [], **overrides,
+        "revoked_at": None, "last_used_at": None, "bundle_id": None, "bundle_label": None,
+        "nets": [], **overrides,
     }
 
 
-def _wired_worker(cp: FakeControlPlane, net_id: str) -> str | None:
+def bundle_row(bundle_id: str, *, label: str, **overrides: Any) -> dict[str, Any]:
+    """A bundle as the owner's list carries it."""
+    return {
+        "id": bundle_id, "label": label, "size_bytes": 2_500_000, "file_count": 3,
+        "content_hash": "0" * 64, "created_at": STAMP, **overrides,
+    }
+
+
+def _wired_net(cp: FakeControlPlane, net_id: str) -> dict[str, Any]:
     for net in (cp.wiring or {}).get("nets", []):
         if net["id"] == net_id:
-            return net["worker_id"]
-    return None
+            return net
+    return {"worker_id": None, "definition_name": "", "instance_name": ""}
 
 
 def _mint(cp: FakeControlPlane, body: dict[str, Any]) -> dict[str, Any]:
@@ -1024,6 +1055,7 @@ def _mint(cp: FakeControlPlane, body: dict[str, Any]) -> dict[str, Any]:
     n = len(cp.share_bodies) - 1
     now = time.time()
     days = body.get("expires_in_days", 30)
+    bundle = next((b for b in cp.bundles if b["id"] == body.get("bundle_id")), None)
     share = share_row(
         f"share-{n:04d}-{int(now * 1000) % 10**8:08d}",
         label=body["label"].strip(),
@@ -1038,7 +1070,11 @@ def _mint(cp: FakeControlPlane, body: dict[str, Any]) -> dict[str, Any]:
         inputs_per_minute=body.get("inputs_per_minute", 60),
         created_at=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)),
         expires_at=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now + days * 86400)),
-        nets=[{"net_id": net["net_id"], "worker_id": _wired_worker(cp, net["net_id"]),
+        bundle_id=bundle and bundle["id"],
+        bundle_label=bundle and bundle["label"],
+        nets=[{"net_id": net["net_id"],
+               **{key: _wired_net(cp, net["net_id"])[key]
+                  for key in ("definition_name", "instance_name", "worker_id")},
                "play_places": net.get("play_places", []), "play_controls": net.get("play_controls", [])}
               for net in body.get("nets", [])],
     )
@@ -1055,6 +1091,9 @@ def _share_answer(cp: FakeControlPlane, method: str, path: str, body: Any) -> tu
             cp.share_bodies.append(body)
             if cp.share_refusals:
                 return 422, {"detail": cp.share_refusals.pop(0)}
+            named = body.get("bundle_id")
+            if named is not None and not any(b["id"] == named for b in cp.bundles):
+                return 422, {"detail": f"Bundle {named} is not one of your bundles"}
             return 201, _mint(cp, body)
         match = re.fullmatch(r"/api/shares/([^/]+)", path)
         if match and method == "DELETE":
@@ -1063,6 +1102,55 @@ def _share_answer(cp: FakeControlPlane, method: str, path: str, body: Any) -> tu
                     share["revoked_at"] = share["revoked_at"] or STAMP
                     return 200, {"status": "revoked"}
             return 404, {"detail": "Share not found"}
+    return None
+
+
+def _uploaded_bundle(cp: FakeControlPlane, label: str, raw: bytes) -> dict[str, Any]:
+    """The bundle an upload makes, its size and file count read from the zip."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            entries = [info for info in archive.infolist() if not info.is_dir()]
+    except zipfile.BadZipFile:
+        entries = []
+    return bundle_row(
+        f"55555555-0000-0000-0000-{len(cp.bundle_uploads):012d}",
+        label=label.strip(),
+        size_bytes=sum(info.file_size for info in entries),
+        file_count=len(entries),
+        content_hash=hashlib.sha256(raw).hexdigest(),
+        created_at=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+    )
+
+
+def _bundle_answer(cp: FakeControlPlane, method: str, path: str, query: str,
+                   content_type: str | None, raw: bytes) -> tuple[int, Any] | None:
+    """The bundle routes' status and answer, or None for a path that is not one."""
+    if path == "/api/bundles" and method == "POST":
+        with cp.lock:
+            label = parse_qs(query, keep_blank_values=True).get("label", [""])[0]
+            cp.bundle_uploads.append({"label": label, "content_type": content_type, "body": raw})
+            refusal = cp.bundle_refusals.pop(0) if cp.bundle_refusals else None
+            delay = cp.slow_upload_s
+        time.sleep(delay)
+        if refusal is not None:
+            return refusal[0], {"detail": refusal[1]}
+        with cp.lock:
+            bundle = _uploaded_bundle(cp, label, raw)
+            cp.bundles.insert(0, bundle)
+        return 201, bundle
+    with cp.lock:
+        if path == "/api/bundles" and method == "GET":
+            return 200, cp.bundles
+        match = re.fullmatch(r"/api/bundles/([^/]+)", path)
+        if match and method == "DELETE":
+            bundle_id = match.group(1)
+            if not any(b["id"] == bundle_id for b in cp.bundles):
+                return 404, {"detail": "Bundle not found"}
+            cp.bundles = [b for b in cp.bundles if b["id"] != bundle_id]
+            for share in cp.shares:
+                if share["bundle_id"] == bundle_id:
+                    share["bundle_id"] = share["bundle_label"] = None
+            return 200, {"status": "deleted"}
     return None
 
 
@@ -1207,7 +1295,8 @@ def _handler_for(cp: FakeControlPlane) -> type[BaseHTTPRequestHandler]:
             if match:
                 self._worker_stream(match.group(1), parts.query)
                 return
-            shared = _share_answer(cp, "GET", parts.path, None)
+            shared = (_share_answer(cp, "GET", parts.path, None)
+                      or _bundle_answer(cp, "GET", parts.path, parts.query, None, b""))
             if shared is not None:
                 self._send_json(shared[1], shared[0])
                 return
@@ -1231,8 +1320,15 @@ def _handler_for(cp: FakeControlPlane) -> type[BaseHTTPRequestHandler]:
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length) if length else b""
             cp.requests.append(f"{method} {self.path}")
+            parts = urlsplit(self.path)
+            # An upload's body is a zip, so the bundle routes come before JSON.
+            bundled = _bundle_answer(cp, method, parts.path, parts.query,
+                                     self.headers.get("Content-Type"), raw)
+            if bundled is not None:
+                self._send_json(bundled[1], bundled[0])
+                return
             body = json.loads(raw) if raw else None
-            shared = _share_answer(cp, method, urlsplit(self.path).path, body)
+            shared = _share_answer(cp, method, parts.path, body)
             if shared is not None:
                 self._send_json(shared[1], shared[0])
                 return

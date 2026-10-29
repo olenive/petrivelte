@@ -1,4 +1,4 @@
-"""The shares page lists the owner's shares, mints one and revokes one.
+"""The shares page lists the owner's shares, mints one and revokes one, and keeps their bundles.
 
 A world is one or more nets on one worker, so the net picker groups the
 owner's nets by worker and, once one is picked, leaves only that worker's
@@ -6,11 +6,19 @@ nets selectable; a net on no worker never is. Past that the form judges
 nothing: it sends what the owner typed and shows the server's sentence when
 the mint is refused. A minted share's link, the public tier's address, `/s/`
 and the one-time token, is shown once. Revoked and expired shares stay in the
-list, muted and without a Revoke button.
+list, muted and without a Revoke button. A world share names its nets by the
+names it carries itself.
+
+A bundle is a zip the public tier serves beside a world share. The page
+uploads one as the raw request body, shows the server's sentence when the
+upload is refused, deletes one after a confirm, and offers the owner's
+bundles to a world share's mint.
 """
 
 import json
 import re
+import zipfile
+from pathlib import Path
 
 from playwright.sync_api import Page, expect
 
@@ -24,7 +32,11 @@ NET_SHOP = "22222222-0000-0000-0000-000000000002"
 NET_FAR = "22222222-0000-0000-0000-000000000003"
 NET_LOOSE = "22222222-0000-0000-0000-000000000004"
 NOTEBOOK = "33333333-0000-0000-0000-000000000001"
+BUNDLE_CHESS = "44444444-0000-0000-0000-000000000001"
+BUNDLE_VIEWER = "44444444-0000-0000-0000-000000000002"
 MUTED = re.compile(r"\bopacity-60\b")
+NO_INDEX = ("There is no index.html at the root of the zip. Zip the contents of the bundle's folder "
+            "rather than the folder itself, so that index.html is at the top.")
 
 
 def _wired_net(net_id: str, worker_id: str | None, name: str) -> dict:
@@ -50,12 +62,33 @@ def _wiring() -> dict:
     }
 
 
+def _shared_net(net_id: str, worker_id: str | None, name: str) -> dict:
+    """A net of a share as the server lists it, with the names read from the net."""
+    return {"net_id": net_id, "definition_name": f"{name}_net", "instance_name": name,
+            "worker_id": worker_id, "play_places": [], "play_controls": []}
+
+
+def _zip(path: Path, files: dict[str, bytes]) -> Path:
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+    return path
+
+
 def _net_box(page: Page, net_id: str):
     return page.locator(f'input[type="checkbox"][value="{net_id}"]')
 
 
 def _rows(page: Page):
     return page.get_by_test_id("share-row")
+
+
+def _bundle_rows(page: Page):
+    return page.get_by_test_id("bundle-row")
+
+
+def _bundle_options(page: Page):
+    return page.locator('select[name="share-bundle"] option')
 
 
 def test_mint_a_named_play_world_and_see_its_link_once(
@@ -183,6 +216,8 @@ def test_mint_a_notebook_share(
     page.get_by_role("button", name="Create share").click()
 
     expect(page.get_by_test_id("share-created")).to_be_visible()
+    # A notebook share takes no bundle, so the form offers none.
+    expect(page.get_by_test_id("share-bundle-picker")).to_have_count(0)
     assert cp.share_bodies == [{
         "label": "plots",
         "resource_kind": "notebook",
@@ -201,7 +236,7 @@ def test_revoke_asks_first_and_keeps_the_row_muted(
         page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane) -> None:
     cp = fresh_control_plane
     cp.wiring = _wiring()
-    light = {"net_id": NET_LIGHT, "worker_id": W_ALPHA, "play_places": [], "play_controls": []}
+    light = _shared_net(NET_LIGHT, W_ALPHA, "light")
     cp.shares = [
         fake_cp.share_row("share-live", label="live one", nets=[light]),
         fake_cp.share_row("share-old", label="old one", nets=[light], expires_at="2026-01-01T00:00:00+00:00"),
@@ -233,3 +268,162 @@ def test_revoke_asks_first_and_keeps_the_row_muted(
     expect(page.get_by_role("button", name="Revoke", exact=True)).to_have_count(0)
     assert [line for line in cp.requests if line.startswith("DELETE")] == ["DELETE /api/shares/share-live"]
     expect(page.get_by_text("3 shares · 0 active")).to_be_visible()
+
+
+def test_upload_a_bundle_and_see_it_listed_and_offered(
+        page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane,
+        tmp_path: Path) -> None:
+    cp = fresh_control_plane
+    cp.wiring = _wiring()
+    # Long enough to see the upload under way.
+    cp.slow_upload_s = 1.5
+    chess = _zip(tmp_path / "chess.zip", {
+        "index.html": b"<!doctype html><title>chess</title><script src=game.js></script>",
+        "game.js": b"console.log('chess');",
+        "game_bg.wasm": b"\x00asm" + b"\x00" * 1_499_996,
+    })
+
+    page.goto(f"{frontend_url}/shares")
+    bundles = page.get_by_test_id("bundles")
+    expect(bundles.get_by_text("You have no bundles.")).to_be_visible(timeout=30_000)
+    expect(bundles).to_contain_text(
+        "A bundle is a zip with index.html at its root, at most 64 MiB, served beside a shared world.")
+    upload = bundles.get_by_role("button", name="Upload")
+    expect(upload).to_be_disabled()
+    expect(_bundle_options(page)).to_have_text(["none"])
+
+    page.locator('input[name="bundle-label"]').fill("chess board")
+    page.locator('input[name="bundle-file"]').set_input_files(str(chess))
+    expect(upload).to_be_enabled()
+    upload.click()
+
+    busy = bundles.get_by_role("button", name="Uploading...")
+    expect(busy).to_be_disabled()
+    expect(page.get_by_test_id("bundle-uploading")).to_contain_text("Uploading chess.zip")
+    expect(_bundle_rows(page)).to_have_count(1, timeout=10_000)
+    expect(page.get_by_test_id("bundle-uploading")).to_have_count(0)
+
+    row = _bundle_rows(page).first
+    expect(row).to_contain_text("chess board")
+    expect(row).to_contain_text("1.5 MB uncompressed · 3 files · uploaded")
+    expect(bundles).to_contain_text("1 bundle")
+    # The form is ready for the next upload.
+    expect(page.locator('input[name="bundle-label"]')).to_have_value("")
+    expect(upload).to_be_disabled()
+
+    [sent] = cp.bundle_uploads
+    assert sent["label"] == "chess board"
+    assert sent["content_type"] == "application/zip"
+    assert sent["body"] == chess.read_bytes()
+    assert [line for line in cp.requests if line.startswith("POST /api/bundles")] == [
+        "POST /api/bundles?label=chess%20board"]
+
+    # The new bundle is offered to a world share at once.
+    expect(_bundle_options(page)).to_have_text(["none", "chess board"])
+
+
+def test_a_refused_upload_shows_the_servers_sentence(
+        page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane,
+        expected_console_errors: list[str], tmp_path: Path) -> None:
+    expected_console_errors.append("status of 422")
+    cp = fresh_control_plane
+    cp.bundle_refusals = [(422, NO_INDEX)]
+    folder = _zip(tmp_path / "chess.zip", {"chess/index.html": b"<!doctype html>"})
+
+    page.goto(f"{frontend_url}/shares")
+    bundles = page.get_by_test_id("bundles")
+    expect(bundles.get_by_text("You have no bundles.")).to_be_visible(timeout=30_000)
+    page.locator('input[name="bundle-label"]').fill("chess board")
+    page.locator('input[name="bundle-file"]').set_input_files(str(folder))
+    bundles.get_by_role("button", name="Upload").click()
+
+    expect(page.get_by_test_id("bundle-upload-error")).to_have_text(NO_INDEX)
+    expect(_bundle_rows(page)).to_have_count(0)
+    expect(bundles.get_by_text("You have no bundles.")).to_be_visible()
+    # What the owner typed stays, to fix and send again.
+    expect(page.locator('input[name="bundle-label"]')).to_have_value("chess board")
+    expect(bundles.get_by_role("button", name="Upload")).to_be_enabled()
+    assert len(cp.bundle_uploads) == 1
+
+
+def test_delete_a_bundle_asks_first_and_its_share_carries_on_without_it(
+        page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane) -> None:
+    cp = fresh_control_plane
+    # No wiring: the share list names a world's nets from the share itself.
+    cp.wiring = None
+    cp.bundles = [fake_cp.bundle_row(BUNDLE_CHESS, label="chess board", size_bytes=28_600_000, file_count=42),
+                  fake_cp.bundle_row(BUNDLE_VIEWER, label="viewer", file_count=1)]
+    cp.shares = [fake_cp.share_row("share-game", label="game night",
+                                   nets=[_shared_net(NET_LIGHT, W_ALPHA, "light"),
+                                         _shared_net(NET_SHOP, W_ALPHA, "shop")],
+                                   bundle_id=BUNDLE_CHESS, bundle_label="chess board")]
+
+    page.goto(f"{frontend_url}/shares")
+    rows = _bundle_rows(page)
+    expect(rows).to_have_count(2, timeout=30_000)
+    expect(rows.nth(0)).to_contain_text("28.6 MB uncompressed · 42 files")
+    expect(rows.nth(1)).to_contain_text("1 file ·")
+    share = _rows(page).first
+    expect(share.get_by_test_id("share-resource")).to_have_text("world: light, shop")
+    expect(share.get_by_test_id("share-bundle")).to_have_text("bundle chess board")
+
+    chess = rows.nth(0)
+    chess.get_by_role("button", name="Delete", exact=True).click()
+    expect(chess).to_contain_text("Delete it? Shares that serve it carry on without it")
+    chess.get_by_role("button", name="Cancel").click()
+    expect(chess.get_by_role("button", name="Yes, delete")).to_have_count(0)
+    assert not [line for line in cp.requests if line.startswith("DELETE")]
+
+    chess.get_by_role("button", name="Delete", exact=True).click()
+    chess.get_by_role("button", name="Yes, delete").click()
+    expect(rows).to_have_count(1)
+    expect(rows.first).to_contain_text("viewer")
+    assert [line for line in cp.requests if line.startswith("DELETE")] == [
+        f"DELETE /api/bundles/{BUNDLE_CHESS}"]
+    # The share stands, without the bundle.
+    expect(share.get_by_test_id("share-bundle")).to_have_count(0)
+    expect(share).to_have_attribute("data-status", "active")
+    expect(_bundle_options(page)).to_have_text(["none", "viewer"])
+
+
+def test_mint_a_world_share_with_a_bundle(
+        page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane) -> None:
+    cp = fresh_control_plane
+    cp.wiring = _wiring()
+    cp.bundles = [fake_cp.bundle_row(BUNDLE_CHESS, label="chess board"),
+                  fake_cp.bundle_row(BUNDLE_VIEWER, label="viewer")]
+
+    page.goto(f"{frontend_url}/shares")
+    expect(_bundle_options(page)).to_have_text(["none", "chess board", "viewer"], timeout=30_000)
+    select = page.locator('select[name="share-bundle"]')
+    expect(select.locator("option:checked")).to_have_text("none")
+
+    # Offered on a world of either scope, never on a notebook.
+    page.get_by_role("radio", name="play:").check()
+    expect(page.get_by_test_id("share-bundle-picker")).to_be_visible()
+    page.get_by_role("radio", name="read:").check()
+    page.get_by_role("radio", name="notebook:").check()
+    expect(page.get_by_test_id("share-bundle-picker")).to_have_count(0)
+    page.get_by_role("radio", name="world:").check()
+
+    page.locator('input[name="share-label"]').fill("game night")
+    _net_box(page, NET_LIGHT).check()
+    page.locator('select[name="share-bundle"]').select_option(label="chess board")
+    page.get_by_role("button", name="Create share").click()
+
+    expect(page.get_by_test_id("share-created")).to_be_visible()
+    assert cp.share_bodies == [{
+        "label": "game night",
+        "resource_kind": "world",
+        "nets": [{"net_id": NET_LIGHT}],
+        "bundle_id": BUNDLE_CHESS,
+        "scope": "read",
+        "audience": "link",
+        "expires_in_days": 30,
+        "publish_payloads": False,
+        "max_viewers": 20,
+        "inputs_per_minute": 60,
+    }]
+    row = _rows(page).first
+    expect(row.get_by_test_id("share-resource")).to_have_text("world: light")
+    expect(row.get_by_test_id("share-bundle")).to_have_text("bundle chess board")
