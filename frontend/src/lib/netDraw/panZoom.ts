@@ -11,6 +11,7 @@
  * about the middle of its view.
  */
 
+import { FRAME_MARGIN, type Extent } from '$lib/layout';
 import type { Point } from '$lib/types';
 
 export interface ViewTransform {
@@ -69,6 +70,26 @@ export function userPoint(rect: ClientRect, view: ViewBox, clientX: number, clie
 /** Scaled by `factor` about `p`, which stays where it is. */
 export function zoomAt(t: ViewTransform, p: Point, factor: number): ViewTransform {
 	return { x: p.x - (p.x - t.x) * factor, y: p.y - (p.y - t.y) * factor, k: t.k * factor };
+}
+
+/**
+ * The transform that shows the whole extent in the view, centred: scaled
+ * down, never up, so the extent fits with `margin` on every side, as
+ * `frameView` leaves it. A view too small to leave that margin fits the
+ * extent edge to edge instead. No extent, nothing to fit: the identity.
+ */
+export function fitTransform(extent: Extent | null, view: ViewBox, margin = FRAME_MARGIN): ViewTransform {
+	if (!extent) return IDENTITY;
+	const scale = (inset: number) =>
+		Math.min(
+			1,
+			(view.width - 2 * inset) / Math.max(extent.maxX - extent.minX, 1),
+			(view.height - 2 * inset) / Math.max(extent.maxY - extent.minY, 1),
+		);
+	const withMargin = scale(margin);
+	const k = withMargin > 0 ? withMargin : scale(0);
+	const centre = { x: (extent.minX + extent.maxX) / 2, y: (extent.minY + extent.maxY) / 2 };
+	return { x: view.x + view.width / 2 - k * centre.x, y: view.y + view.height / 2 - k * centre.y, k };
 }
 
 export function panBy(t: ViewTransform, dx: number, dy: number): ViewTransform {

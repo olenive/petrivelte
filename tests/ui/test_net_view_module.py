@@ -6,10 +6,10 @@ a classic `<script nonce src>`. This test builds the IIFE from
 `frontend/vite.lib.config.ts` into a temporary directory, serves it beside a
 bare page from a small local server that sends that policy with a fresh
 nonce, and has the page draw the fixture net (`frontend/src/lib/netDraw.fixture.json`)
-twice: as a share that publishes payloads sends it, and as one that does not.
-The drawing must appear, redraw a changed count in place, zoom by wheel and
-pan by drag, and the page must record no console error and no policy
-violation. A last test proves the policy is in force: the page refuses an
+three times: as a share that publishes payloads sends it, as one that does
+not, and fitted whole into a frame shorter than the net. The drawing must
+appear, redraw a changed count in place, fit, zoom by wheel and pan by drag,
+and the page must record no console error and no policy violation. A last test proves the policy is in force: the page refuses an
 inline style.
 """
 
@@ -74,11 +74,13 @@ def page_html(nonce: str, full: dict, bare: dict) -> str:
 <body>
 <svg id="full" width="800" height="500"></svg>
 <svg id="bare" width="800" height="500"></svg>
+<svg id="fit" width="600" height="300"></svg>
 <script nonce="{nonce}" src="/{SCRIPT}"></script>
 <script nonce="{nonce}">
   window.summaries = {{
     full: petriNetView.drawNet(document.getElementById('full'), {_as_script(full)}),
     bare: petriNetView.drawNet(document.getElementById('bare'), {_as_script(bare)}),
+    fit: petriNetView.drawNet(document.getElementById('fit'), {_as_script(full)}, {{ fit: true }}),
   }};
 </script>
 </body>
@@ -152,7 +154,7 @@ def site(built_module: Path) -> Iterator[str]:
 @pytest.fixture
 def bare_page(browser: Browser, site: str) -> Iterator[tuple[Page, list[str]]]:
     """The page opened, with every console error and uncaught exception recorded."""
-    context = browser.new_context(viewport={"width": 1000, "height": 1200})
+    context = browser.new_context(viewport={"width": 1000, "height": 1400})
     page = context.new_page()
     problems: list[str] = []
     page.on("pageerror", lambda error: problems.append(f"uncaught: {error}"))
@@ -238,6 +240,33 @@ def test_the_wheel_zooms_and_a_drag_pans_the_root_group(bare_page: tuple[Page, l
     assert panned != zoomed and panned.endswith("scale(1.025)")
     # The other drawing on the page is untouched.
     assert _transform(page, "bare") == "translate(0 0) scale(1)"
+    assert page.evaluate("() => window.violations") == []
+    assert problems == []
+
+
+def test_a_fitted_net_starts_whole_in_its_frame_and_still_zooms(bare_page: tuple[Page, list[str]]) -> None:
+    """The fixture is taller than a 600 by 300 frame: fitted, its lowest node is inside the svg."""
+    page, problems = bare_page
+    assert page.evaluate("() => window.summaries.fit") == {"places": 5, "transitions": 4, "edges": 11, "relaidOut": True}
+    boxes = page.evaluate("""() => {
+        const box = (el) => { const r = el.getBoundingClientRect();
+                              return {top: r.top, bottom: r.bottom, left: r.left, right: r.right}; };
+        const svg = document.getElementById('fit');
+        const nodes = [...svg.querySelectorAll('.net-place circle, .net-transition rect')].map(box);
+        return {svg: box(svg), nodes};
+    }""")
+    frame = boxes["svg"]
+    lowest = max(boxes["nodes"], key=lambda node: node["bottom"])
+    assert frame["top"] <= lowest["top"] and lowest["bottom"] <= frame["bottom"], (lowest, frame)
+    assert frame["left"] <= lowest["left"] and lowest["right"] <= frame["right"], (lowest, frame)
+    fitted = _transform(page, "fit")
+    assert not fitted.endswith("scale(1)")
+
+    box = page.locator("#fit").bounding_box()
+    assert box is not None
+    page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.mouse.wheel(0, -120)
+    page.wait_for_function(f"() => document.querySelector('#fit g.net-root').getAttribute('transform') !== {json.dumps(fitted)}")
     assert page.evaluate("() => window.violations") == []
     assert problems == []
 

@@ -110,12 +110,24 @@ token dots and labels, counts, the badges of tokens that hold nets,
 transitions in their four looks and arcs in their strokes and heads, with
 pan by drag and zoom by wheel; `releaseNet(svg)` forgets the element and
 removes its listeners. A state without tokens, as the public tier sends a
-share that does not publish payloads, draws each place with its count. The
-module writes SVG presentation attributes and classes (`net-place`,
+share that does not publish payloads, draws each place with its count.
+The options:
+
+- `tokenLabels`: each token's label on its dot and the first under its
+  place; on by default when the state lists any tokens.
+- `interactive`: pan by drag and zoom by wheel; on by default.
+- `width`, `height`: the frame in user units; by default the svg's own
+  `width` and `height` attributes, else 800 by 500.
+- `fit`: start with the whole net in view, scaled down (never up) to fit
+  the frame with the layout's margin and centred, after the first draw and
+  each re-layout; a redraw keeps the viewer's pan and zoom. Off by default,
+  which shows the net at the app's size from its first rank.
+
+The module writes SVG presentation attributes and classes (`net-place`,
 `net-transition`, `net-transition-fireable`, `net-arc`, `net-token`,
-`net-count`, `net-badge` and others), never an inline style or script, so it
-runs under a policy that allows script and style only by nonce. Colours are
-the light theme's; a host page restyles by class and sets the svg's
+`net-count`, `net-badge` and others), never an inline style or script, so
+it runs under a policy that allows script and style only by nonce. Colours
+are the light theme's; a host page restyles by class and sets the svg's
 background (the panel's is `#f0f0f0`).
 
 `npm run build:lib`, or `just build-lib` at the repository root, builds it

@@ -20,7 +20,15 @@ import { mirrorFromState } from '$lib/netMirror';
 import type { NetState } from '$lib/types';
 import { SVG_NS, patch } from '$lib/netDraw/patch';
 import { ROOT_ATTRS, sceneIds, sceneOf, type SceneIds } from '$lib/netDraw/scene';
-import { IDENTITY, installPanZoom, transformText, viewBoxText, type ViewBox, type ViewTransform } from '$lib/netDraw/panZoom';
+import {
+	IDENTITY,
+	fitTransform,
+	installPanZoom,
+	transformText,
+	viewBoxText,
+	type ViewBox,
+	type ViewTransform,
+} from '$lib/netDraw/panZoom';
 
 export interface DrawOptions {
 	/** Show token labels. Default: true when any place of the state carries a non-empty tokens array, false otherwise (then a place shows its count, as the app's badge does). */
@@ -30,6 +38,8 @@ export interface DrawOptions {
 	/** The frame the drawing is fitted into, in SVG user units; default: the svg's width and height attributes, else 800 by 500. */
 	width?: number;
 	height?: number;
+	/** Start with the whole net in view: scale the drawing down, never up, so its extent fits the frame, centred. Default false, which shows the net at the app's size from its first rank. */
+	fit?: boolean;
 }
 
 export interface DrawSummary {
@@ -115,7 +125,8 @@ function panZoomOn(svg: SVGSVGElement): () => void {
 /**
  * Draws `state` into `svg`, or brings an earlier drawing up to date in
  * place. The layout is computed on the first call and again only for a new
- * generation or a changed topology, which also resets the pan and zoom.
+ * generation or a changed topology, which also resets the pan and zoom to
+ * where a fresh drawing starts: the app's view, or with `fit` the whole net.
  */
 export function drawNet(svg: SVGSVGElement, state: NetState, options: DrawOptions = {}): DrawSummary {
 	const previous = drawings.get(svg) ?? null;
@@ -129,7 +140,10 @@ export function drawNet(svg: SVGSVGElement, state: NetState, options: DrawOption
 	const height = dimension(options.height, svg.getAttribute('height'), DEFAULT_FRAME.height);
 	const corner = frameView(keyed.layout.extent, width, height);
 	const view: ViewBox = { x: corner.x, y: corner.y, width, height };
-	const transform = previous && !relaidOut ? previous.transform : IDENTITY;
+	// A fresh layout starts from the app's view, or the whole net when
+	// fitted; a redraw keeps wherever the viewer has panned and zoomed.
+	const start = options.fit ? fitTransform(keyed.layout.extent, view) : IDENTITY;
+	const transform = previous && !relaidOut ? previous.transform : start;
 
 	const scene = sceneOf({
 		mirror,

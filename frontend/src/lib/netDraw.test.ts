@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NetState } from './types';
-import { computeLayout } from './layout';
+import { FRAME_MARGIN, computeLayout, type Extent } from './layout';
 import { drawNet, releaseNet, type DrawOptions, type DrawSummary } from './netDraw';
 import { TOKEN_DOT_MAX } from './netHelpers';
 import fixtureJson from './netDraw.fixture.json';
@@ -305,6 +305,147 @@ describe('drawNet: pan and zoom', () => {
 		draw(fixture(), { interactive: false });
 		svg.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, cancelable: true }));
 		expect(rootTransform(svg)).toMatch(/scale\(1\.025\)$/);
+	});
+});
+
+/** The root group's transform, read back from its attribute. */
+function transformOf(svg: Element): { x: number; y: number; k: number } {
+	const match = /^translate\((\S+) (\S+)\) scale\((\S+)\)$/.exec(rootTransform(svg) ?? '');
+	if (!match) throw new Error(`unreadable transform ${rootTransform(svg)}`);
+	return { x: Number(match[1]), y: Number(match[2]), k: Number(match[3]) };
+}
+
+/** Every place and transition as the box of its shape, in the frame's own
+ *  coordinates: through the root transform, then from the view box's
+ *  corner, so the frame is [0, width] by [0, height]. */
+function nodeBoxesInFrame(svg: Element): Array<{ name: string; left: number; top: number; right: number; bottom: number }> {
+	const t = transformOf(svg);
+	const [vx, vy] = (svg.getAttribute('viewBox') ?? '').split(' ').map(Number);
+	const at = (x: number, y: number) => ({ x: t.x + t.k * x - vx, y: t.y + t.k * y - vy });
+	const box = (name: string, cx: number, cy: number, halfW: number, halfH: number) => {
+		const a = at(cx - halfW, cy - halfH);
+		const b = at(cx + halfW, cy + halfH);
+		return { name, left: a.x, top: a.y, right: b.x, bottom: b.y };
+	};
+	const num = (el: Element, attr: string) => Number(el.getAttribute(attr));
+	return [
+		...all(svg, '.net-place circle').map((c) => box(c.parentElement?.getAttribute('data-place') ?? '', num(c, 'cx'), num(c, 'cy'), 30, 30)),
+		...all(svg, '.net-transition rect').map((r) =>
+			box(r.parentElement?.getAttribute('data-transition') ?? '', num(r, 'x') + 40, num(r, 'y') + 25, 40, 25),
+		),
+	];
+}
+
+/** The extent of the layout computed last. */
+function lastExtent(): Extent {
+	const extent = vi.mocked(computeLayout).mock.results.at(-1)?.value.extent;
+	if (!extent) throw new Error('no layout computed');
+	return extent;
+}
+
+/** The fit's scale for an extent in a frame, as the option promises it. */
+function fittedScale(extent: Extent, width: number, height: number): number {
+	return Math.min(1, (width - 2 * FRAME_MARGIN) / (extent.maxX - extent.minX), (height - 2 * FRAME_MARGIN) / (extent.maxY - extent.minY));
+}
+
+describe('drawNet: fit', () => {
+	/** Three places and two transitions in a line: short enough for any frame here. */
+	const small = (): NetState => {
+		const state = fixture();
+		state.topology = {
+			places: [
+				{ name: 'A', serializable: true },
+				{ name: 'B', serializable: true },
+			],
+			transitions: [{ name: 'Go' }],
+			edges: [
+				{ place: 'A', transition: 'Go', direction: 'in', kind: 'take' },
+				{ place: 'B', transition: 'Go', direction: 'out' },
+			],
+		};
+		state.transitions = { Go: { enabled: true, fireable: false, in_flight: false } };
+		state.marking = { places: { A: { count: 1, tokens: [{ id: '1', label: 'a' }] } } };
+		return state;
+	};
+
+	it('scales a net taller than the frame down until every node is inside it, centred', () => {
+		draw(fixture(), { fit: true });
+		const extent = lastExtent();
+		expect(extent.maxY - extent.minY).toBeGreaterThan(500 - 2 * FRAME_MARGIN);
+		const t = transformOf(svg);
+		expect(t.k).toBeLessThan(1);
+		expect(t.k).toBeCloseTo(fittedScale(extent, 800, 500), 12);
+		for (const node of nodeBoxesInFrame(svg)) {
+			expect(node.left, node.name).toBeGreaterThanOrEqual(0);
+			expect(node.top, node.name).toBeGreaterThanOrEqual(0);
+			expect(node.right, node.name).toBeLessThanOrEqual(800);
+			expect(node.bottom, node.name).toBeLessThanOrEqual(500);
+		}
+		const boxes = nodeBoxesInFrame(svg);
+		const top = Math.min(...boxes.map((b) => b.top));
+		const bottom = Math.max(...boxes.map((b) => b.bottom));
+		expect(top).toBeCloseTo(500 - bottom, 9);
+		expect(top).toBeCloseTo(FRAME_MARGIN, 9);
+	});
+
+	it('leaves a net that fits at scale 1, centred in the frame', () => {
+		draw(small(), { fit: true });
+		const t = transformOf(svg);
+		expect(t.k).toBe(1);
+		const boxes = nodeBoxesInFrame(svg);
+		const middle = (lo: number[], hi: number[]) => (Math.min(...lo) + Math.max(...hi)) / 2;
+		expect(middle(boxes.map((b) => b.left), boxes.map((b) => b.right))).toBeCloseTo(400, 9);
+		expect(middle(boxes.map((b) => b.top), boxes.map((b) => b.bottom))).toBeCloseTo(250, 9);
+	});
+
+	it('changes nothing without the option: the net at the app size from its first rank', () => {
+		draw(fixture());
+		expect(rootTransform(svg)).toBe('translate(0 0) scale(1)');
+		draw(fixture(), { fit: false });
+		expect(rootTransform(svg)).toBe('translate(0 0) scale(1)');
+	});
+
+	it('keeps the viewer\'s pan and zoom across a redraw that does not lay out again', () => {
+		draw(fixture(), { fit: true });
+		const fitted = rootTransform(svg);
+		svg.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, cancelable: true }));
+		svg.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: 0, clientY: 0, bubbles: true }));
+		document.dispatchEvent(new PointerEvent('pointermove', { clientX: 25, clientY: -15, bubbles: true }));
+		document.dispatchEvent(new PointerEvent('pointerup', { button: 0, bubbles: true }));
+		const moved = rootTransform(svg);
+		expect(moved).not.toBe(fitted);
+
+		const next = fixture();
+		next.marking_version = 8;
+		next.marking.places.Done = { count: 1, tokens: [{ id: '9', label: 'Job(id=9)' }] };
+		expect(draw(next, { fit: true }).relaidOut).toBe(false);
+		expect(rootTransform(svg)).toBe(moved);
+	});
+
+	it('fits again after a re-layout', () => {
+		draw(fixture(), { fit: true });
+		svg.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, cancelable: true }));
+		const grown = fixture();
+		grown.topology.places.push({ name: 'Archive', type_name: 'Job', serializable: true });
+		grown.topology.edges.push({ place: 'Archive', transition: 'Park', direction: 'out' });
+		expect(draw(grown, { fit: true }).relaidOut).toBe(true);
+		expect(transformOf(svg).k).toBeCloseTo(fittedScale(lastExtent(), 800, 500), 12);
+		for (const node of nodeBoxesInFrame(svg)) {
+			expect(node.left, node.name).toBeGreaterThanOrEqual(0);
+			expect(node.top, node.name).toBeGreaterThanOrEqual(0);
+			expect(node.right, node.name).toBeLessThanOrEqual(800);
+			expect(node.bottom, node.name).toBeLessThanOrEqual(500);
+		}
+	});
+
+	it('fits a frame too small for the margin edge to edge, never flipping the drawing', () => {
+		draw(fixture(), { fit: true, width: 100, height: 100 });
+		const t = transformOf(svg);
+		expect(t.k).toBeGreaterThan(0);
+		for (const node of nodeBoxesInFrame(svg)) {
+			expect(node.top, node.name).toBeGreaterThanOrEqual(-1e-9);
+			expect(node.bottom, node.name).toBeLessThanOrEqual(100 + 1e-9);
+		}
 	});
 });
 
