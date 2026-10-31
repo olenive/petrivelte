@@ -1,5 +1,5 @@
 /**
- * Pure helpers for the shares page: a share's state, its link or public
+ * Pure helpers for the Sharing page: a share's state, its link or public
  * address, the net picker that keeps a world on one worker, the slug a public
  * share's label suggests, the mint request built from the form, a bundle's
  * size as the bundles section shows it, and whether a zip is small enough to

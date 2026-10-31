@@ -1,4 +1,4 @@
-"""The shares page lists the owner's shares, mints one and revokes one, and keeps their bundles.
+"""The Sharing page lists the owner's shares, mints one and revokes one, and keeps their bundles.
 
 A world is one or more nets on one worker, so the net picker groups the
 owner's nets by worker and, once one is picked, leaves only that worker's
@@ -103,9 +103,9 @@ def test_mint_a_named_play_world_and_see_its_link_once(
     cp = fresh_control_plane
     cp.wiring = _wiring()
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     expect(page.get_by_text("You have no shares.")).to_be_visible(timeout=30_000)
-    expect(page.locator('nav a[href="/shares"]')).to_have_text("Shares")
+    expect(page.locator('nav a[href="/sharing"]')).to_have_text("Sharing")
 
     groups = page.get_by_test_id("share-worker-group")
     expect(groups).to_have_count(3)
@@ -193,7 +193,7 @@ def test_a_refused_mint_shows_the_servers_sentence(
     refusal = "A play share needs a seat: the name stamped on its player's inputs"
     cp.share_refusals = [refusal]
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     expect(_net_box(page, NET_LIGHT)).to_be_enabled(timeout=30_000)
     page.locator('input[name="share-label"]').fill("no seat")
     _net_box(page, NET_LIGHT).check()
@@ -214,7 +214,7 @@ def test_mint_a_notebook_share(
     cp = fresh_control_plane
     cp.wiring = _wiring()
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     page.get_by_role("radio", name="notebook:").check()
     picker = page.get_by_test_id("share-notebook-picker")
     expect(picker).to_contain_text("daily plots", timeout=30_000)
@@ -247,7 +247,7 @@ def test_the_list_names_a_notebook_share_from_the_share_itself(
     cp.shares = [fake_cp.share_row("share-plots", label="plots", resource_kind="notebook",
                                    notebook_id=NOTEBOOK, notebook_name="daily plots")]
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     expect(_rows(page)).to_have_count(1, timeout=30_000)
     expect(_rows(page).first.get_by_test_id("share-resource")).to_have_text("notebook: daily plots")
 
@@ -263,7 +263,7 @@ def test_revoke_asks_first_and_keeps_the_row_muted(
         fake_cp.share_row("share-gone", label="gone one", nets=[light], revoked_at="2026-10-01T00:00:00+00:00"),
     ]
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     rows = _rows(page)
     expect(rows).to_have_count(3, timeout=30_000)
     expect(rows.nth(0)).to_have_attribute("data-status", "active")
@@ -303,7 +303,7 @@ def test_upload_a_bundle_and_see_it_listed_and_offered(
         "game_bg.wasm": b"\x00asm" + b"\x00" * 1_499_996,
     })
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     bundles = page.get_by_test_id("bundles")
     expect(bundles.get_by_text("You have no bundles.")).to_be_visible(timeout=30_000)
     expect(bundles).to_contain_text(
@@ -350,7 +350,7 @@ def test_a_refused_upload_shows_the_servers_sentence(
     cp.bundle_refusals = [(422, NO_INDEX)]
     folder = _zip(tmp_path / "chess.zip", {"chess/index.html": b"<!doctype html>"})
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     bundles = page.get_by_test_id("bundles")
     expect(bundles.get_by_text("You have no bundles.")).to_be_visible(timeout=30_000)
     page.locator('input[name="bundle-label"]').fill("chess board")
@@ -377,7 +377,7 @@ def test_a_zip_over_the_cap_is_refused_before_it_is_sent(
         sparse.truncate(64 * 1024 * 1024 + 1)
     chess = _zip(tmp_path / "chess.zip", {"index.html": b"<!doctype html><title>chess</title>"})
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     bundles = page.get_by_test_id("bundles")
     expect(bundles.get_by_text("You have no bundles.")).to_be_visible(timeout=30_000)
     page.locator('input[name="bundle-label"]').fill("chess board")
@@ -410,7 +410,7 @@ def test_delete_a_bundle_asks_first_and_its_share_carries_on_without_it(
                                          _shared_net(NET_SHOP, W_ALPHA, "shop")],
                                    bundle_id=BUNDLE_CHESS, bundle_label="chess board")]
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     rows = _bundle_rows(page)
     expect(rows).to_have_count(2, timeout=30_000)
     expect(rows.nth(0)).to_contain_text("28.6 MB uncompressed · 42 files")
@@ -445,7 +445,7 @@ def test_mint_a_world_share_with_a_bundle(
     cp.bundles = [fake_cp.bundle_row(BUNDLE_CHESS, label="chess board"),
                   fake_cp.bundle_row(BUNDLE_VIEWER, label="viewer")]
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     expect(_bundle_options(page)).to_have_text(["none", "chess board", "viewer"], timeout=30_000)
     select = page.locator('select[name="share-bundle"]')
     expect(select.locator("option:checked")).to_have_text("none")
@@ -504,7 +504,7 @@ def test_choose_a_handle_and_mint_a_public_share_at_its_address(
     cp.wiring = _wiring()
     cp.taken_handles = {"taken"}
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     expect(page.get_by_text("You have no shares.")).to_be_visible(timeout=30_000)
     _pick_the_notebook(page)
     page.locator('input[name="share-label"]').fill("Reachability boards")
@@ -613,7 +613,7 @@ def test_a_held_slug_is_refused_until_its_share_is_revoked(
         _public_share("share-old", label="old boards", slug="old", expires_at="2026-01-01T00:00:00+00:00"),
     ]
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     rows = _rows(page)
     expect(rows).to_have_count(2, timeout=30_000)
     held = rows.nth(0)

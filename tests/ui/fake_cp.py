@@ -145,7 +145,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 STAMP = "2026-09-29T10:00:00+00:00"
-# The public tier's address the dev server is given, so the shares page makes links.
+# The public tier's address the dev server is given, so the Sharing page makes links.
 PUBLIC_SHARE_URL = "https://share.test"
 
 # A public handle and a public share's slug: lowercase letters and digits in

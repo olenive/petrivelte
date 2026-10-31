@@ -282,7 +282,7 @@ reassignment split shows nets on more than one worker. A deleted net leaves
 its worlds; a deleted notebook deletes its shares. The `token` is
 `petri_share_` followed by 43 url-safe characters.
 
-The `/shares` page lists every share and mints and revokes them. It names a
+The Sharing page (`/sharing`) lists every share and mints and revokes them. It names a
 world share's nets by their own `instance_name`, a notebook share's notebook
 by its `notebook_name`, and shows the `bundle_label` of a share that serves a
 bundle, all from the share itself. Only the mint form's pickers read `GET
@@ -330,7 +330,7 @@ on a share of another audience too. Revoking the holder frees the slug, and
 a new share minted at it takes the address over, which is how a board moves
 to a new notebook without its address changing.
 
-On the `/shares` page the audience fieldset offers `public` beside `link`
+On the Sharing page the audience fieldset offers `public` beside `link`
 and `named`. Choosing it sets the scope to read and disables play, moves an
 expiry still at 30 days to 365 (the field's placeholder and note follow the
 audience), and shows a slug field with the address previewed beneath it.
@@ -395,7 +395,7 @@ only the frontend's origin. Each refusal is one plain-English sentence in
 - 422 `You already have 20 bundles; delete one first`.
 - 429 past 5 uploads a minute, which `uploadBundle` words as such.
 
-The `/shares` page's Bundles section lists the owner's bundles (label, size
+The Sharing page's Bundles section lists the owner's bundles (label, size
 uncompressed in MB to one decimal, file count, upload date) with Delete
 behind an inline confirm, and uploads a zip under a label: the Upload button
 waits for a file, a file over 64 MiB is refused in the page with the

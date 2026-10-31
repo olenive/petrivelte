@@ -350,7 +350,7 @@ export const __transport_and_build_contract_check = [_transport_close_shape, _wo
 
 // -- Share contract --
 //
-// The shares page reads every field of the mint answer: the one-time `token`
+// The Sharing page reads every field of the mint answer: the one-time `token`
 // makes the link, `nets[].worker_id` tells a world still on one worker from
 // one a reassignment split, `nets[].instance_name` names a net in the list,
 // `notebook_name` names a notebook share's notebook there, `bundle_label`

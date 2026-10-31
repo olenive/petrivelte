@@ -13,7 +13,7 @@ import {
 } from './api';
 
 /**
- * Shares are minted, listed and revoked from the shares page, where the owner
+ * Shares are minted, listed and revoked from the Sharing page, where the owner
  * also chooses the handle public shares are served under. These tests pin the
  * request each function sends, the shapes it hands back, and that the
  * server's plain-English refusal reaches the page as the error message.

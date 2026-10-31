@@ -30,7 +30,7 @@ tier's base URL that share links start with, as an env var).
 | `/nets` | Net selector, graph, execution controls, inject, runs and schedule, logs, secrets, Diagnose; inner nets (open a badged token's net in place, breadcrumb and Up) and a token filter by keys. |
 | `/notebooks` | Notebook index grouped by worker, badges from `load_state` plus `/sync`. |
 | `/notebooks/[id]` | One notebook in an iframe, with load progress and health. |
-| `/shares` | The owner's shares (world or notebook, scope, audience, seat, bundle, expiry, state, last use) with revoke, a public share's address in full with Copy; the form that mints one, with an optional bundle for a world, and shows its link once, or a public share's address; the public handle, chosen inline before the first public share; and the owner's bundles (zips of a game or viewer served beside a shared world) with upload and delete. |
+| `/sharing` | The owner's shares (world or notebook, scope, audience, seat, bundle, expiry, state, last use) with revoke, a public share's address in full with Copy; the form that mints one, with an optional bundle for a world, and shows its link once, or a public share's address; the public handle, chosen inline before the first public share; and the owner's bundles (zips of a game or viewer served beside a shared world) with upload and delete. |
 | `/workers` | Workers, their nets, occupancy, build chip, logs, lifecycle actions. |
 | `/workers/[id]/logs` | Full-page worker log. |
 | `/deployments` | GitHub repos, builds and discovered definitions. |
@@ -51,7 +51,7 @@ Most modules are pure functions with a table of cases in a sibling test.
 - `apiTokens.ts`: token display helpers, `SCOPE_CHOICES`, `DEFAULT_SCOPE`
   (`read`) and `describeScope`; `ApiTokenScope` is in `api.ts`. The expiry,
   last-use and created wording also serves shares.
-- `shares.ts`: the shares page's rules: a share's state, its link from
+- `shares.ts`: the Sharing page's rules: a share's state, its link from
   `PUBLIC_SHARE_URL` (`shareLinkBase` says why there is none) or a public
   share's address (`publicLink`), the net picker grouped by worker that
   keeps a world on one worker, `slugFromLabel`, the slug a public share's

@@ -333,10 +333,10 @@
 </script>
 
 <svelte:head>
-	<title>Shares · Petri</title>
+	<title>Sharing · Petri</title>
 </svelte:head>
 
-<AppNav title="Shares" />
+<AppNav title="Sharing" />
 
 <div class="max-w-[900px] mx-auto p-8 flex flex-col gap-8">
 	<p class="text-sm text-foreground-muted leading-relaxed">

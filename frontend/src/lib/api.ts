@@ -2261,7 +2261,7 @@ export async function revokeShare(id: string): Promise<{ status: string }> {
 // -- the public handle --
 //
 // A public share is served at `/p/<handle>/<slug>`, under the owner's one
-// public handle. The owner chooses it on the shares page before the first
+// public handle. The owner chooses it on the Sharing page before the first
 // public share and can change it until that share is minted; from then on it
 // is fixed, since a released handle taken by another owner would put their
 // shares behind addresses that were once this owner's. Session only, as the
