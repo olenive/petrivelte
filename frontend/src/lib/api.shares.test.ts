@@ -2,11 +2,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('$lib/config/network', () => ({ API_URL: 'http://cp.test' }));
 
-import { createShare, listShares, revokeShare, type Share, type ShareCreated } from './api';
+import {
+	createShare,
+	getPublicHandle,
+	listShares,
+	revokeShare,
+	setPublicHandle,
+	type Share,
+	type ShareCreated,
+} from './api';
 
 /**
- * Shares are minted, listed and revoked from the shares page. These tests pin
- * the request each function sends, the shapes it hands back, and that the
+ * Shares are minted, listed and revoked from the shares page, where the owner
+ * also chooses the handle public shares are served under. These tests pin the
+ * request each function sends, the shapes it hands back, and that the
  * server's plain-English refusal reaches the page as the error message.
  */
 
@@ -24,6 +33,8 @@ const SHARE: Share = {
 	audience: 'link',
 	member_email: null,
 	seat: null,
+	slug: null,
+	public_path: null,
 	prefix: 'abcdefgh',
 	publish_payloads: false,
 	max_viewers: 20,
@@ -183,6 +194,49 @@ describe('createShare', () => {
 		expect([answer.notebook_id, answer.notebook_name]).toEqual(['nb-1', 'daily plots']);
 	});
 
+	it('POSTs a public share with its slug and hands back its address\'s path', async () => {
+		const fetchMock = respond(201, {
+			...SHARE,
+			resource_kind: 'notebook',
+			notebook_id: 'nb-1',
+			notebook_name: 'nb reachability',
+			nets: [],
+			audience: 'public',
+			slug: 'reachability',
+			public_path: '/p/oleg/reachability',
+			token: 'petri_share_t',
+		});
+		const answer = await createShare({
+			label: 'reachability',
+			resource_kind: 'notebook',
+			notebook_id: 'nb-1',
+			scope: 'read',
+			audience: 'public',
+			slug: 'reachability',
+		});
+		expect(JSON.parse(String(lastCall(fetchMock)[1].body))).toEqual({
+			label: 'reachability',
+			resource_kind: 'notebook',
+			notebook_id: 'nb-1',
+			scope: 'read',
+			audience: 'public',
+			slug: 'reachability',
+		});
+		expect([answer.slug, answer.public_path]).toEqual(['reachability', '/p/oleg/reachability']);
+	});
+
+	it('throws the sentences a public share is refused with', async () => {
+		respond(422, { detail: 'Choose a public handle first' });
+		await expect(
+			createShare({ label: 'x', resource_kind: 'notebook', notebook_id: 'nb-1', audience: 'public', slug: 'x' }),
+		).rejects.toThrow('Choose a public handle first');
+		const held = 'Your public share boards is already at /p/oleg/reachability; revoke it first';
+		respond(422, { detail: held });
+		await expect(
+			createShare({ label: 'x', resource_kind: 'notebook', notebook_id: 'nb-1', audience: 'public', slug: 'reachability' }),
+		).rejects.toThrow(held);
+	});
+
 	it('throws the server\'s sentence for a refused mint', async () => {
 		respond(422, { detail: 'The nets of a world must all be on one worker; these are on 2 workers' });
 		await expect(
@@ -246,5 +300,68 @@ describe('revokeShare', () => {
 	it('falls back to a plain message when the body has no detail', async () => {
 		respond(500, {});
 		await expect(revokeShare('x')).rejects.toThrow('Failed to revoke the share');
+	});
+});
+
+describe('getPublicHandle', () => {
+	it('GETs the owner\'s handle and whether it is fixed', async () => {
+		const fetchMock = respond(200, { handle: 'oleg', fixed: true });
+		await expect(getPublicHandle()).resolves.toEqual({ handle: 'oleg', fixed: true });
+		const [url, init] = lastCall(fetchMock);
+		expect(url).toBe('http://cp.test/api/public-handle');
+		expect(init.credentials).toBe('include');
+		expect(init.method ?? 'GET').toBe('GET');
+	});
+
+	it('hands back a null handle before one is chosen', async () => {
+		respond(200, { handle: null, fixed: false });
+		await expect(getPublicHandle()).resolves.toEqual({ handle: null, fixed: false });
+	});
+
+	it('surfaces the 403 a personal API token gets', async () => {
+		respond(403, { detail: 'This action needs a browser session, not an API token' });
+		await expect(getPublicHandle()).rejects.toThrow('This action needs a browser session, not an API token');
+	});
+
+	it('falls back to a plain message when the body is not JSON', async () => {
+		vi.stubGlobal('fetch', vi.fn(async () => new Response('bad gateway', { status: 502 })));
+		await expect(getPublicHandle()).rejects.toThrow('Failed to load your public handle');
+	});
+});
+
+describe('setPublicHandle', () => {
+	it('PUTs the handle as JSON and hands back the answer', async () => {
+		const fetchMock = respond(200, { handle: 'oleg', fixed: false });
+		await expect(setPublicHandle('oleg')).resolves.toEqual({ handle: 'oleg', fixed: false });
+		const [url, init] = lastCall(fetchMock);
+		expect(url).toBe('http://cp.test/api/public-handle');
+		expect(init.method).toBe('PUT');
+		expect(init.credentials).toBe('include');
+		expect(new Headers(init.headers).get('Content-Type')).toBe('application/json');
+		expect(JSON.parse(String(init.body))).toEqual({ handle: 'oleg' });
+	});
+
+	it('throws the 409 sentence for a handle another owner holds', async () => {
+		respond(409, { detail: 'That handle is taken' });
+		await expect(setPublicHandle('taken')).rejects.toThrow('That handle is taken');
+	});
+
+	it('throws the sentence for a handle a public share has fixed', async () => {
+		respond(422, { detail: 'Your public handle is fixed because a public share was minted under it' });
+		await expect(setPublicHandle('other')).rejects.toThrow(
+			'Your public handle is fixed because a public share was minted under it',
+		);
+	});
+
+	it('throws the sentence for a malformed or reserved handle as it stands', async () => {
+		respond(422, { detail: 'admin is reserved; choose another handle' });
+		await expect(setPublicHandle('admin')).rejects.toThrow('admin is reserved; choose another handle');
+	});
+
+	it('says what was done too often on a 429', async () => {
+		respond(429, { error: 'Rate limit exceeded', detail: '10 per 1 minute' });
+		await expect(setPublicHandle('oleg')).rejects.toThrow(
+			'Too many handle changes in the last minute (10 per 1 minute); wait a minute and try again',
+		);
 	});
 });

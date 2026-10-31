@@ -5,23 +5,35 @@ import {
 	DEFAULT_EXPIRES_IN_DAYS,
 	DEFAULT_INPUTS_PER_MINUTE,
 	DEFAULT_MAX_VIEWERS,
+	DEFAULT_PUBLIC_EXPIRES_IN_DAYS,
 	MAX_BUNDLE_ZIP_BYTES,
+	MAX_SLUG_LENGTH,
 	NO_WORKER_REASON,
 	OTHER_WORKER_REASON,
 	bundleFileRefusal,
+	canRevoke,
+	createdShareText,
+	defaultExpiresInDays,
 	describeInputs,
 	emptyShareForm,
+	formSlug,
 	formatBundleSize,
 	netsByWorker,
 	parseNames,
 	pickRefusal,
 	pickedWorkers,
+	previewPublicPath,
+	publicAddress,
+	publicLink,
+	revokePrompt,
 	shareLink,
 	shareLinkBase,
 	shareRequest,
 	shareStatus,
 	shareTokenLabel,
+	slugFromLabel,
 	togglePicked,
+	withAudience,
 	withoutToken,
 	worldProblem,
 	type ShareForm,
@@ -51,6 +63,8 @@ function share(overrides: Partial<Share> = {}): Share {
 		audience: 'link',
 		member_email: null,
 		seat: null,
+		slug: null,
+		public_path: null,
 		prefix: 'abcdefgh',
 		publish_payloads: false,
 		max_viewers: 20,
@@ -110,6 +124,46 @@ describe('shareTokenLabel', () => {
 	});
 });
 
+describe('canRevoke', () => {
+	it('is offered on an active share of every audience', () => {
+		expect(canRevoke({ audience: 'link' }, 'active')).toBe(true);
+		expect(canRevoke({ audience: 'named' }, 'active')).toBe(true);
+		expect(canRevoke({ audience: 'public' }, 'active')).toBe(true);
+	});
+
+	it('is offered on an expired public share, which holds its address until revoked', () => {
+		expect(canRevoke({ audience: 'public' }, 'expired')).toBe(true);
+		expect(canRevoke({ audience: 'link' }, 'expired')).toBe(false);
+		expect(canRevoke({ audience: 'named' }, 'expired')).toBe(false);
+	});
+
+	it('is never offered on a revoked share', () => {
+		expect(canRevoke({ audience: 'public' }, 'revoked')).toBe(false);
+		expect(canRevoke({ audience: 'link' }, 'revoked')).toBe(false);
+	});
+});
+
+describe('revokePrompt', () => {
+	it('warns that a link stops working', () => {
+		expect(revokePrompt({ audience: 'link' }, 'active')).toBe(
+			'Revoke it? Anyone holding its link loses access, and it cannot be restored.',
+		);
+		expect(revokePrompt({ audience: 'named' }, 'active')).toContain('Anyone holding its link loses access');
+	});
+
+	it('says a public share\'s address stops answering and can be taken again', () => {
+		expect(revokePrompt({ audience: 'public' }, 'active')).toBe(
+			'Revoke it? Its address stops answering, and it cannot be restored; a new share can then take the address.',
+		);
+	});
+
+	it('says revoking an expired public share frees its address', () => {
+		expect(revokePrompt({ audience: 'public' }, 'expired')).toBe(
+			'Revoke it? That frees its address for a new share, and it cannot be restored.',
+		);
+	});
+});
+
 describe('shareLinkBase', () => {
 	it('is the trimmed URL without a trailing slash', () => {
 		expect(shareLinkBase(' https://petrify-public.fly.dev/ ', true)).toEqual({
@@ -144,6 +198,133 @@ describe('shareLink', () => {
 		expect(shareLink('https://petrify-public.fly.dev', 'petri_share_Ab-9_x')).toBe(
 			'https://petrify-public.fly.dev/s/petri_share_Ab-9_x',
 		);
+	});
+});
+
+describe('publicLink', () => {
+	it('is the base followed by the share\'s public path', () => {
+		expect(publicLink('https://petrify-public.fly.dev', '/p/oleg/reachability')).toBe(
+			'https://petrify-public.fly.dev/p/oleg/reachability',
+		);
+	});
+});
+
+describe('publicAddress', () => {
+	it('is the full address when the public tier\'s address is configured', () => {
+		expect(publicAddress('https://share.test', '/p/oleg/boards')).toBe('https://share.test/p/oleg/boards');
+	});
+
+	it('is the path alone when it is not', () => {
+		expect(publicAddress(null, '/p/oleg/boards')).toBe('/p/oleg/boards');
+	});
+});
+
+describe('createdShareText', () => {
+	const TOKEN = 'petri_share_Ab-9_x';
+
+	it('is a link share\'s link, which holds its token', () => {
+		expect(createdShareText({ token: TOKEN, public_path: null }, 'https://share.test')).toBe(
+			'https://share.test/s/petri_share_Ab-9_x',
+		);
+	});
+
+	it('is a public share\'s address and never its token', () => {
+		const text = createdShareText({ token: TOKEN, public_path: '/p/oleg/boards' }, 'https://share.test');
+		expect(text).toBe('https://share.test/p/oleg/boards');
+		expect(text).not.toContain(TOKEN);
+	});
+
+	it('falls back to the bare token, or the bare path, without a public tier address', () => {
+		expect(createdShareText({ token: TOKEN, public_path: null }, null)).toBe(TOKEN);
+		expect(createdShareText({ token: TOKEN, public_path: '/p/oleg/boards' }, null)).toBe('/p/oleg/boards');
+	});
+});
+
+describe('slugFromLabel', () => {
+	it('lowercases and turns each run of other characters into one hyphen', () => {
+		expect(slugFromLabel('Reachability boards')).toBe('reachability-boards');
+		expect(slugFromLabel('nb  reachability -- v2!')).toBe('nb-reachability-v2');
+		expect(slugFromLabel('Traffic_Light.2026')).toBe('traffic-light-2026');
+	});
+
+	it('trims hyphens from both ends', () => {
+		expect(slugFromLabel('  (draft) status board  ')).toBe('draft-status-board');
+		expect(slugFromLabel('--status--')).toBe('status');
+	});
+
+	it('treats letters outside a to z as separators', () => {
+		expect(slugFromLabel('Café Zürich')).toBe('caf-z-rich');
+	});
+
+	it('cuts to 60 characters and trims a hyphen the cut leaves at the end', () => {
+		const long = 'a'.repeat(59) + ' board';
+		expect(slugFromLabel(long)).toBe('a'.repeat(59));
+		expect(slugFromLabel('b'.repeat(80))).toBe('b'.repeat(MAX_SLUG_LENGTH));
+		expect(MAX_SLUG_LENGTH).toBe(60);
+	});
+
+	it('suggests nothing for a label with no letter or digit', () => {
+		expect(slugFromLabel('')).toBe('');
+		expect(slugFromLabel(' !? ')).toBe('');
+	});
+});
+
+describe('previewPublicPath', () => {
+	it('is /p/, the handle and the slug', () => {
+		expect(previewPublicPath('oleg', 'boards')).toBe('/p/oleg/boards');
+	});
+
+	it('holds a place for a handle not chosen yet', () => {
+		expect(previewPublicPath(null, 'boards')).toBe('/p/<your handle>/boards');
+	});
+});
+
+describe('defaultExpiresInDays', () => {
+	it('is a year for a public share and 30 days for any other', () => {
+		expect(defaultExpiresInDays('public')).toBe(DEFAULT_PUBLIC_EXPIRES_IN_DAYS);
+		expect(DEFAULT_PUBLIC_EXPIRES_IN_DAYS).toBe(365);
+		expect(defaultExpiresInDays('link')).toBe(DEFAULT_EXPIRES_IN_DAYS);
+		expect(defaultExpiresInDays('named')).toBe(DEFAULT_EXPIRES_IN_DAYS);
+	});
+});
+
+describe('formSlug', () => {
+	it('follows the label until the owner edits it', () => {
+		expect(formSlug({ label: 'Reachability boards', slug: '', slugEdited: false })).toBe('reachability-boards');
+	});
+
+	it('is what the owner typed once edited, whatever the label says', () => {
+		expect(formSlug({ label: 'Reachability boards', slug: 'boards', slugEdited: true })).toBe('boards');
+		expect(formSlug({ label: 'Reachability boards', slug: '', slugEdited: true })).toBe('');
+	});
+});
+
+describe('withAudience', () => {
+	it('sets the scope to read for a public share, which is read only', () => {
+		const chosen = withAudience(form({ scope: 'play', seat: 'north' }), 'public');
+		expect(chosen.audience).toBe('public');
+		expect(chosen.scope).toBe('read');
+	});
+
+	it('leaves the scope alone for the other audiences', () => {
+		expect(withAudience(form({ scope: 'play' }), 'named').scope).toBe('play');
+		expect(withAudience(form({ audience: 'public', scope: 'read' }), 'link').scope).toBe('read');
+	});
+
+	it('moves an expiry still at the old default to the new audience\'s default', () => {
+		expect(withAudience(form(), 'public').expiresInDays).toBe(365);
+		expect(withAudience(form({ audience: 'public', expiresInDays: 365 }), 'link').expiresInDays).toBe(30);
+		expect(withAudience(form(), 'named').expiresInDays).toBe(30);
+	});
+
+	it('keeps an expiry the owner typed, and an emptied one', () => {
+		expect(withAudience(form({ expiresInDays: 7 }), 'public').expiresInDays).toBe(7);
+		expect(withAudience(form({ expiresInDays: null }), 'public').expiresInDays).toBeNull();
+	});
+
+	it('keeps the rest of the form as it was', () => {
+		const before = form({ label: 'boards', slug: 'b', slugEdited: true, memberEmail: 'ann@example.com' });
+		expect(withAudience(before, 'public')).toEqual({ ...before, audience: 'public', expiresInDays: 365 });
 	});
 });
 
@@ -287,6 +468,8 @@ describe('emptyShareForm', () => {
 			maxViewers: 20,
 			inputsPerMinute: 60,
 			bundleId: null,
+			slug: '',
+			slugEdited: false,
 		});
 		expect([DEFAULT_EXPIRES_IN_DAYS, DEFAULT_MAX_VIEWERS, DEFAULT_INPUTS_PER_MINUTE]).toEqual([30, 20, 60]);
 	});
@@ -378,6 +561,34 @@ describe('shareRequest', () => {
 			max_viewers: 500,
 			inputs_per_minute: 2.5,
 		});
+	});
+
+	it('sends a public share\'s slug, suggested by the label', () => {
+		const request = shareRequest(
+			form({ label: 'Reachability boards', resourceKind: 'notebook', notebookId: 'nb-1', audience: 'public', expiresInDays: 365 }),
+		);
+		expect(request).toEqual({
+			label: 'Reachability boards',
+			resource_kind: 'notebook',
+			notebook_id: 'nb-1',
+			scope: 'read',
+			audience: 'public',
+			slug: 'reachability-boards',
+			expires_in_days: 365,
+			publish_payloads: false,
+			max_viewers: 20,
+			inputs_per_minute: 60,
+		});
+	});
+
+	it('sends the slug the owner typed once edited, as typed', () => {
+		const request = shareRequest(form({ audience: 'public', slug: ' Boards ', slugEdited: true }));
+		expect(request.slug).toBe(' Boards ');
+	});
+
+	it('leaves the slug off any share but a public one, which alone takes it', () => {
+		expect(shareRequest(form({ slug: 'boards', slugEdited: true }))).not.toHaveProperty('slug');
+		expect(shareRequest(form({ audience: 'named', slug: 'boards', slugEdited: true }))).not.toHaveProperty('slug');
 	});
 
 	it('leaves an emptied number out, so the server\'s default applies', () => {

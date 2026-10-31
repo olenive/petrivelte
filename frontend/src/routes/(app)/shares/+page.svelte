@@ -3,35 +3,45 @@
 	import {
 		createShare,
 		deleteBundle,
+		getPublicHandle,
 		getWiring,
 		listBundles,
 		listShares,
 		revokeShare,
+		setPublicHandle,
 		uploadBundle,
 		type Bundle,
+		type PublicHandle,
 		type Share,
+		type ShareAudience,
 		type ShareCreated,
 		type WiringResponse,
 	} from '$lib/api';
 	import { describeExpiry, describeLastUsed, formatCreated } from '$lib/apiTokens';
 	import { PUBLIC_SHARE_URL } from '$lib/config/network';
 	import {
-		DEFAULT_EXPIRES_IN_DAYS,
 		DEFAULT_INPUTS_PER_MINUTE,
 		DEFAULT_MAX_VIEWERS,
 		bundleFileRefusal,
+		canRevoke,
+		createdShareText,
+		defaultExpiresInDays,
 		describeInputs,
 		emptyShareForm,
+		formSlug,
 		formatBundleSize,
 		netsByWorker,
 		pickRefusal,
 		pickedWorkers,
-		shareLink,
+		previewPublicPath,
+		publicAddress,
+		revokePrompt,
 		shareLinkBase,
 		shareRequest,
 		shareStatus,
 		shareTokenLabel,
 		togglePicked,
+		withAudience,
 		withoutToken,
 		worldProblem,
 		type ShareForm,
@@ -68,6 +78,15 @@
 	let uploading = $state(false);
 	let uploadError = $state('');
 
+	// The owner's public handle, which a public share's address starts with,
+	// and the inline field that chooses or changes it
+	let publicHandle = $state<PublicHandle | null>(null);
+	let handleLoadError = $state('');
+	let handleDraft = $state('');
+	let editingHandle = $state(false);
+	let savingHandle = $state(false);
+	let handleError = $state('');
+
 	// The form
 	let form = $state<ShareForm>(emptyShareForm());
 	let minting = $state(false);
@@ -75,6 +94,10 @@
 	let created = $state<ShareCreated | null>(null);
 	let copied = $state(false);
 	let copyError = $state('');
+
+	// Copying a public share's address from the list
+	let copiedShareId = $state<string | null>(null);
+	let listCopyError = $state('');
 
 	const STATUS_BADGE: Record<ShareStatus, string> = {
 		active: 'bg-success-bg text-success',
@@ -88,9 +111,17 @@
 	const groups = $derived(netsByWorker(nets, workers));
 	const picked = $derived(pickedWorkers(form.netIds, nets));
 	const activeCount = $derived(shares.filter((s) => shareStatus(s, now) === 'active').length);
-	const createdText = $derived(
-		created ? (linkBase.base !== null ? shareLink(linkBase.base, created.token) : created.token) : '',
-	);
+	const createdText = $derived(created ? createdShareText(created, linkBase.base) : '');
+	const createdIsPublic = $derived(created !== null && created.public_path !== null);
+	const slug = $derived(formSlug(form));
+	const defaultExpiry = $derived(defaultExpiresInDays(form.audience));
+	// A public share is minted under the owner's handle, so the mint waits for one.
+	const needsHandle = $derived(form.audience === 'public' && !publicHandle?.handle);
+	const AUDIENCES: { value: ShareAudience; text: string }[] = [
+		{ value: 'link', text: 'anyone holding the link' },
+		{ value: 'named', text: 'one person, recorded by email' },
+		{ value: 'public', text: 'anyone, at a stable address you choose, read only' },
+	];
 
 	const inputClass =
 		'px-3 py-2 border border-border rounded-md bg-surface text-foreground text-sm focus:outline-none focus:border-accent';
@@ -99,6 +130,7 @@
 		void loadShares();
 		void loadWiring();
 		void loadBundles();
+		void loadHandle();
 	});
 
 	async function loadShares() {
@@ -120,6 +152,41 @@
 		} catch (e) {
 			wiringError = e instanceof Error ? e.message : String(e);
 		}
+	}
+
+	async function loadHandle() {
+		try {
+			publicHandle = await getPublicHandle();
+			handleLoadError = '';
+		} catch (e) {
+			handleLoadError = e instanceof Error ? e.message : String(e);
+		}
+	}
+
+	async function handleSaveHandle() {
+		handleError = '';
+		savingHandle = true;
+		try {
+			publicHandle = await setPublicHandle(handleDraft);
+			editingHandle = false;
+			handleDraft = '';
+		} catch (e) {
+			handleError = e instanceof Error ? e.message : String(e);
+		} finally {
+			savingHandle = false;
+		}
+	}
+
+	function startHandleChange() {
+		handleDraft = publicHandle?.handle ?? '';
+		handleError = '';
+		editingHandle = true;
+	}
+
+	function cancelHandleChange() {
+		handleDraft = '';
+		handleError = '';
+		editingHandle = false;
 	}
 
 	async function loadBundles() {
@@ -171,6 +238,8 @@
 			shares = [withoutToken(answer), ...shares.filter((s) => s.id !== answer.id)];
 			now = Date.now();
 			void loadShares();
+			// The first public share fixes the handle it was minted under.
+			if (answer.audience === 'public') void loadHandle();
 		} catch (e) {
 			mintError = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -248,6 +317,18 @@
 		created = null;
 		copied = false;
 		copyError = '';
+	}
+
+	async function handleCopyAddress(share: Share) {
+		if (share.public_path === null) return;
+		listCopyError = '';
+		try {
+			await navigator.clipboard.writeText(publicAddress(linkBase.base, share.public_path));
+			copiedShareId = share.id;
+		} catch {
+			copiedShareId = null;
+			listCopyError = 'Could not copy automatically; select the address and copy it by hand.';
+		}
 	}
 </script>
 
@@ -370,10 +451,13 @@
 					<input type="radio" name="share-scope" value="read" bind:group={form.scope} />
 					<span><span class="text-foreground">read</span>: viewers watch, and change nothing</span>
 				</label>
-				<label class="flex items-baseline gap-2 cursor-pointer">
-					<input type="radio" name="share-scope" value="play" bind:group={form.scope} />
+				<label class="flex items-baseline gap-2 {form.audience === 'public' ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}">
+					<input type="radio" name="share-scope" value="play" bind:group={form.scope} disabled={form.audience === 'public'} />
 					<span><span class="text-foreground">play</span>: the holder may also put tokens into the places and press the controls you list, each input stamped with the seat</span>
 				</label>
+				{#if form.audience === 'public'}
+					<span class="text-xs text-foreground-faint" data-testid="share-public-read-only">A public share is read only.</span>
+				{/if}
 			</fieldset>
 
 			{#if form.scope === 'play'}
@@ -405,14 +489,18 @@
 
 			<fieldset class="flex flex-col gap-1 text-sm text-foreground-muted">
 				<legend class="mb-1">Audience</legend>
-				<label class="flex items-baseline gap-2 cursor-pointer">
-					<input type="radio" name="share-audience" value="link" bind:group={form.audience} />
-					<span><span class="text-foreground">link</span>: anyone holding the link</span>
-				</label>
-				<label class="flex items-baseline gap-2 cursor-pointer">
-					<input type="radio" name="share-audience" value="named" bind:group={form.audience} />
-					<span><span class="text-foreground">named</span>: one person, recorded by email</span>
-				</label>
+				{#each AUDIENCES as audience (audience.value)}
+					<label class="flex items-baseline gap-2 cursor-pointer">
+						<input
+							type="radio"
+							name="share-audience"
+							value={audience.value}
+							checked={form.audience === audience.value}
+							onchange={() => { form = withAudience(form, audience.value); }}
+						/>
+						<span><span class="text-foreground">{audience.value}</span>: {audience.text}</span>
+					</label>
+				{/each}
 			</fieldset>
 
 			{#if form.audience === 'named'}
@@ -422,10 +510,99 @@
 				</label>
 			{/if}
 
+			{#if form.audience === 'public'}
+				<div class="flex flex-col gap-3 pl-4 border-l-2 border-border text-sm text-foreground-muted" data-testid="share-public-fields">
+					<div class="flex flex-col gap-1" data-testid="public-handle">
+						{#if publicHandle === null}
+							{#if handleLoadError}
+								<div class="px-3 py-2.5 rounded-md bg-error-bg text-error text-sm flex items-center justify-between gap-2" role="alert">
+									<span>Could not load your public handle: {handleLoadError}</span>
+									<button type="button" class="shrink-0 text-xs underline bg-transparent border-0 cursor-pointer text-error" onclick={() => void loadHandle()}>Retry</button>
+								</div>
+							{:else}
+								<p class="text-foreground-faint">Loading your public handle...</p>
+							{/if}
+						{:else if publicHandle.handle === null || (editingHandle && !publicHandle.fixed)}
+							<label class="flex flex-col gap-1" for="public-handle-input">
+								{publicHandle.handle === null ? 'Choose your public handle' : 'Change your public handle'}
+							</label>
+							<div class="flex flex-wrap items-center gap-2">
+								<input
+									id="public-handle-input"
+									type="text"
+									name="public-handle"
+									bind:value={handleDraft}
+									placeholder="e.g. oleg"
+									autocomplete="off"
+									disabled={savingHandle}
+									onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void handleSaveHandle(); } }}
+									class="{inputClass} w-64"
+								/>
+								<button
+									type="button"
+									disabled={savingHandle}
+									onclick={() => void handleSaveHandle()}
+									class="px-3 py-2 rounded-md text-sm border border-accent bg-accent text-accent-foreground cursor-pointer transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+								>
+									{savingHandle ? 'Saving...' : 'Save'}
+								</button>
+								{#if editingHandle}
+									<button
+										type="button"
+										disabled={savingHandle}
+										onclick={cancelHandleChange}
+										class="px-3 py-2 rounded-md text-sm border border-border bg-transparent text-foreground-muted cursor-pointer hover:text-foreground"
+									>
+										Cancel
+									</button>
+								{/if}
+							</div>
+							<span class="text-xs text-foreground-faint">
+								Every public share's address starts with it: 3 to 30 lowercase letters, digits and single
+								hyphens. You can change it until your first public share is created; then it is fixed.
+							</span>
+							{#if handleError}
+								<div class="px-3 py-2.5 rounded-md bg-error-bg text-error text-sm" role="alert" data-testid="public-handle-error">{handleError}</div>
+							{/if}
+						{:else if publicHandle.fixed}
+							<p data-testid="public-handle-state">
+								Your public handle is <span class="text-foreground font-medium">{publicHandle.handle}</span>, fixed
+								since your first public share was created under it.
+							</p>
+						{:else}
+							<p class="flex flex-wrap items-baseline gap-2" data-testid="public-handle-state">
+								<span>Your public handle is <span class="text-foreground font-medium">{publicHandle.handle}</span>.</span>
+								<button type="button" class="text-xs underline bg-transparent border-0 p-0 cursor-pointer text-foreground-muted hover:text-foreground" onclick={startHandleChange}>Change</button>
+							</p>
+							<span class="text-xs text-foreground-faint">It can change until your first public share is created under it; then it is fixed.</span>
+						{/if}
+					</div>
+
+					<label class="flex flex-col gap-1">
+						Slug
+						<input
+							type="text"
+							name="share-slug"
+							value={slug}
+							oninput={(e) => { form.slug = e.currentTarget.value; form.slugEdited = true; }}
+							autocomplete="off"
+							class="{inputClass} w-full max-w-sm"
+						/>
+						<span class="text-xs text-foreground-faint">
+							The last part of the address, suggested from the label: 1 to 60 lowercase letters, digits and single hyphens.
+						</span>
+					</label>
+					<p class="text-xs">
+						Address
+						<code class="block mt-1 px-2 py-1.5 rounded bg-surface text-foreground break-all" data-testid="share-public-preview">{(linkBase.base ?? '') + previewPublicPath(publicHandle?.handle ?? null, slug)}</code>
+					</p>
+				</div>
+			{/if}
+
 			<label class="flex flex-col gap-1 text-sm text-foreground-muted">
 				Expires after, in days
-				<input type="number" name="share-expires-in-days" bind:value={form.expiresInDays} placeholder={String(DEFAULT_EXPIRES_IN_DAYS)} class="{inputClass} w-32" />
-				<span class="text-xs text-foreground-faint">1 to 365. Left empty, {DEFAULT_EXPIRES_IN_DAYS}.</span>
+				<input type="number" name="share-expires-in-days" bind:value={form.expiresInDays} placeholder={String(defaultExpiry)} class="{inputClass} w-32" />
+				<span class="text-xs text-foreground-faint">1 to 365. Left empty, {defaultExpiry}.</span>
 			</label>
 
 			<label class="flex items-baseline gap-2 text-sm text-foreground-muted cursor-pointer">
@@ -456,7 +633,11 @@
 				<div class="px-3 py-2.5 rounded-md bg-error-bg text-error text-sm" role="alert" data-testid="share-mint-error">{mintError}</div>
 			{/if}
 
-			<button type="submit" disabled={minting}
+			{#if needsHandle}
+				<p class="text-xs text-foreground-muted" data-testid="share-needs-handle">Choose your public handle above to create a public share.</p>
+			{/if}
+
+			<button type="submit" disabled={minting || needsHandle}
 				class="w-full py-2.5 border border-accent rounded-md bg-accent text-accent-foreground text-base font-semibold cursor-pointer transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed">
 				{minting ? 'Creating...' : 'Create share'}
 			</button>
@@ -465,7 +646,11 @@
 		{#if created}
 			<div class="mt-4 p-3 rounded-md border border-accent bg-success-bg text-sm" data-testid="share-created">
 				<p class="mb-2 font-medium text-success">
-					Share "{created.label}" created. Copy its {linkBase.base !== null ? 'link' : 'token'} now: it is shown only once.
+					{#if createdIsPublic}
+						Share "{created.label}" created at its public address, which stays in your list below.
+					{:else}
+						Share "{created.label}" created. Copy its {linkBase.base !== null ? 'link' : 'token'} now: it is shown only once.
+					{/if}
 				</p>
 				<div class="flex items-center gap-2">
 					<code class="flex-1 min-w-0 px-2 py-1.5 rounded bg-surface text-foreground text-xs break-all select-all" data-testid="share-created-text">{createdText}</code>
@@ -479,9 +664,14 @@
 				</div>
 				{#if linkBase.problem !== null}
 					<p class="mt-2 text-xs text-foreground-muted leading-relaxed" data-testid="share-link-unconfigured">
-						The public tier's address is not configured ({linkBase.problem}), so this is the share's
-						token rather than its link. The link is the public tier's address followed by
-						<code>/s/</code> and this token.
+						{#if createdIsPublic}
+							The public tier's address is not configured ({linkBase.problem}), so this is the share's
+							path rather than its address. The address is the public tier's address followed by this path.
+						{:else}
+							The public tier's address is not configured ({linkBase.problem}), so this is the share's
+							token rather than its link. The link is the public tier's address followed by
+							<code>/s/</code> and this token.
+						{/if}
 					</p>
 				{/if}
 				{#if copyError}
@@ -511,6 +701,9 @@
 
 		{#if sharesError}
 			<div class="mb-4 px-3 py-2.5 rounded-md bg-error-bg text-error text-sm" role="alert">{sharesError}</div>
+		{/if}
+		{#if listCopyError}
+			<p class="mb-4 text-xs text-error">{listCopyError}</p>
 		{/if}
 
 		{#if !sharesLoaded}
@@ -560,12 +753,25 @@
 								{#if problem}
 									<p class="text-xs text-status-warning">{problem}</p>
 								{/if}
-								<code class="text-xs text-foreground-muted">{shareTokenLabel(share.prefix)}</code>
+								{#if share.public_path !== null}
+									<div class="flex flex-wrap items-center gap-2">
+										<code class="text-xs text-foreground break-all" data-testid="share-public-address">{publicAddress(linkBase.base, share.public_path)}</code>
+										<button
+											type="button"
+											class="shrink-0 px-2 py-0.5 rounded-md text-xs border border-border bg-transparent text-foreground-muted cursor-pointer hover:text-foreground"
+											onclick={() => void handleCopyAddress(share)}
+										>
+											{copiedShareId === share.id ? 'Copied' : 'Copy'}
+										</button>
+									</div>
+								{:else}
+									<code class="text-xs text-foreground-muted">{shareTokenLabel(share.prefix)}</code>
+								{/if}
 							</div>
-							{#if status === 'active'}
+							{#if canRevoke(share, status)}
 								<div class="shrink-0 flex flex-col items-end gap-1">
 									{#if confirmingId === share.id}
-										<span class="text-xs text-foreground-muted text-right max-w-[220px]">Revoke it? Anyone holding its link loses access, and it cannot be restored.</span>
+										<span class="text-xs text-foreground-muted text-right max-w-[220px]">{revokePrompt(share, status)}</span>
 										<div class="flex gap-2">
 											<button
 												type="button"
