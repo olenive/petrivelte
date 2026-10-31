@@ -51,6 +51,8 @@ function share(overrides: Partial<Share> = {}): Share {
 		audience: 'link',
 		member_email: null,
 		seat: null,
+		slug: null,
+		public_path: null,
 		prefix: 'abcdefgh',
 		publish_payloads: false,
 		max_viewers: 20,

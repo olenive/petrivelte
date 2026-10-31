@@ -13,7 +13,7 @@
 import type {
 	DailyRollup, Deployment, DeploymentSummary, DiscoveredNotebook, LastRun, Net, Notebook,
 	NotebookDefect, NotebookSlot, NotebookTransport, OpenRun, Worker, WorkerDeleteResult, Operation,
-	OperationSummary, RunPage, RunRecord, ShareCreated, ShareRequest, Bundle,
+	OperationSummary, RunPage, RunRecord, ShareCreated, ShareRequest, Bundle, PublicHandle,
 } from './api';
 
 // -- Regression lock: Deployment must expose discovered_notebooks --
@@ -356,9 +356,10 @@ export const __transport_and_build_contract_check = [_transport_close_shape, _wo
 // `notebook_name` names a notebook share's notebook there, `bundle_label`
 // names the bundle a world serves, and the nullable columns are set exactly
 // when the share's kind needs them (a seat on play, an email on named, a
-// notebook's id and name on a notebook share). The request mirrors the
-// server's `ShareRequest`, which refuses an unknown field. A bundle is listed
-// by every field of the upload answer.
+// notebook's id and name on a notebook share, a slug and the address's path
+// on a public one). The request mirrors the server's `ShareRequest`, which
+// refuses an unknown field. A bundle is listed by every field of the upload
+// answer, and the public handle by both fields of its answer.
 const _share_created_shape: ShareCreated = {
 	id: '44444444-4444-4444-4444-444444444444',
 	label: 'two-seat game',
@@ -369,6 +370,8 @@ const _share_created_shape: ShareCreated = {
 	audience: 'named',
 	member_email: 'ann@example.com',
 	seat: 'north',
+	slug: null,
+	public_path: null,
 	prefix: 'abcdefgh',
 	publish_payloads: false,
 	max_viewers: 20,
@@ -401,6 +404,7 @@ const _share_request_shape: Required<ShareRequest> = {
 	audience: 'named',
 	member_email: 'ann@example.com',
 	seat: 'north',
+	slug: 'reachability',
 	expires_in_days: 30,
 	publish_payloads: false,
 	max_viewers: 20,
@@ -417,4 +421,18 @@ const _bundle_shape: Bundle = {
 	created_at: '2026-10-29T12:00:00Z',
 };
 
-export const __share_contract_check = [_share_created_shape, _share_request_shape, _bundle_shape];
+const _public_share_shape: ShareCreated = {
+	..._share_created_shape,
+	scope: 'read',
+	audience: 'public',
+	member_email: null,
+	seat: null,
+	slug: 'reachability',
+	public_path: '/p/oleg/reachability',
+};
+
+const _public_handle_shape: PublicHandle = { handle: 'oleg', fixed: true };
+
+export const __share_contract_check = [
+	_share_created_shape, _share_request_shape, _bundle_shape, _public_share_shape, _public_handle_shape,
+];
