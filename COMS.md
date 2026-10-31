@@ -199,16 +199,21 @@ to remount the iframe, with a capped budget.
 A share opens a world of the owner's nets, or one notebook, to people outside
 the account. Viewers reach it through the public tier, a separate Fly app
 with its own origin; the owner mints, lists and revokes shares over three CP
-routes (`listShares`, `createShare` and `revokeShare` in `api.ts`; the design
-is `dev-docs/SHARING.md` in the petritype-server repository):
+routes (`listShares`, `createShare` and `revokeShare` in `api.ts`), and
+chooses the handle public shares are served under over two more
+(`getPublicHandle` and `setPublicHandle`, "Public shares and the handle"
+below). The design is `dev-docs/SHARING.md` in the petritype-server
+repository.
 
 | Call | Answer |
 |---|---|
 | `GET /api/shares?net_id=` | The owner's shares, newest first, revoked and expired ones included, each with its `nets`. `net_id` (optional) narrows the list to the world shares holding that net; a malformed one is 422. |
 | `POST /api/shares` | 201 with the share and its `token`, the only time the secret is shown. |
 | `DELETE /api/shares/{id}` | `{status: "revoked"}`. The row stays listed with `revoked_at` set; revoking twice is fine; another owner's share is 404 `Share not found`. |
+| `GET /api/public-handle` | `{handle, fixed}`: the owner's public handle, null until one is chosen, and whether a public share has fixed it. |
+| `PUT /api/public-handle` | Body `{handle}`. 200 with `{handle, fixed}` as `GET` answers it, or a refusal below. |
 
-All three need the browser session: a request carrying a personal API token
+All five need the browser session: a request carrying a personal API token
 is refused with 403 `This action needs a browser session, not an API token`,
 so a leaked script token cannot open the owner's nets to anyone.
 
@@ -227,9 +232,14 @@ The mint body (`ShareRequest`); a field left out takes the default shown:
   controls. A play share needs a `seat`, 1 to 100 characters, the name
   stamped on its player's inputs, and at least one place or control on one of
   its nets.
-- `audience`: `link` (default), anyone holding the link, or `named`, which
-  needs a `member_email`. A link share takes no `member_email`.
-- `expires_in_days`: 1 to 365, default 30, counted from the mint.
+- `audience`: `link` (default), anyone holding the link; `named`, which
+  needs a `member_email`; or `public`, anyone, at `/p/<handle>/<slug>`,
+  which needs a `slug` and scope `read`. Only a named share takes a
+  `member_email`.
+- `slug`: a public share's slug, the last part of its address, and only on a
+  public share ("Public shares and the handle" below).
+- `expires_in_days`: 1 to 365, counted from the mint; default 30, and 365 on
+  a public share, since its address is meant to last.
 - `publish_payloads`: default false, which strips token values and log lines
   from what viewers see; counts and firings still show.
 - `max_viewers`: 1 to 200, default 20. `inputs_per_minute`: 1 to 600, default
@@ -247,7 +257,8 @@ field, a value of the wrong type) is FastAPI's own 422, a list of complaints;
 `createShare` throws the first, prefixed with the field it names. The server
 refuses a setting the share would never read rather than storing it, so a
 caller sends `seat` and the per-net lists only on a play share,
-`member_email` only on a named one and `bundle_id` only on a world. An owner holds at most 100 active shares
+`member_email` only on a named one, `slug` only on a public one and
+`bundle_id` only on a world. An owner holds at most 100 active shares
 (the next is refused with `You already have 100 active shares; revoke one
 first`) and mints at most 10 a minute (429, which `createShare` words as
 such).
@@ -255,9 +266,11 @@ such).
 The share answer: `id`, `label`, `resource_kind` (`world` or `notebook`),
 `notebook_id` and `notebook_name` (its notebook's id and name, both set
 exactly on a notebook share and null on a world), `scope` (`read` or
-`play`), `audience` (`link` or `named`), `member_email` (set exactly on a
-named share), `seat` (set exactly on a play share), `prefix` (the 8
-characters after `petri_share_`), `publish_payloads`, `max_viewers`,
+`play`), `audience` (`link`, `named` or `public`), `member_email` (set
+exactly on a named share), `seat` (set exactly on a play share), `slug` and
+`public_path` (set exactly on a public share, the path `/p/<handle>/<slug>`;
+both null otherwise), `prefix` (the 8 characters after `petri_share_`),
+`publish_payloads`, `max_viewers`,
 `inputs_per_minute`, `created_at`, `expires_at`, `revoked_at`,
 `last_used_at` (written by the public tier at most once a minute),
 `bundle_id` and `bundle_label` (the bundle a world serves, both null when it
@@ -285,6 +298,54 @@ tier's base URL, no trailing slash, read at runtime like `PUBLIC_API_URL`
 after the mint. When the value is empty, or is not an http(s) URL (https in
 production), it shows the token itself with a note that the public tier's
 address is not configured.
+
+### Public shares and the handle
+
+A public share is for something meant to be found, such as a status board:
+it is read only and served at an address that reads well and survives a
+re-mint, `${PUBLIC_SHARE_URL}${public_path}`, where `public_path` is
+`/p/<handle>/<slug>`. The address is not a secret. The mint answer still
+carries a `token` for a public share, and `/s/<token>` reaches it too, but
+the page shows the address and never the token.
+
+The handle is the owner's, one for all their public shares: 3 to 30
+characters of lowercase letters, digits and single hyphens, neither first
+nor last (`^[a-z0-9]+(-[a-z0-9]+)*$`), and none of `api`, `s`, `p`,
+`health`, `admin`, `static`, `assets`, `www`, `petrify`, `petritype`,
+`share`, `shares`, `public`, `login`, `logout`, `docs`, `help`, `about`. It
+can change until the owner's first public share is minted under it; that
+mint fixes it. `PUT /api/public-handle` refuses, each with one sentence in
+`detail` that `setPublicHandle` throws as it stands: a malformed or reserved
+handle with 422; a handle another owner holds with 409 `That handle is
+taken`; and any change once fixed with 422 `Your public handle is fixed
+because a public share was minted under it`.
+
+A slug keeps the handle's pattern and is 1 to 60 characters. It is unique
+among the owner's unrevoked public shares, expired ones included. The mint
+of a public share refuses, with 422 and one sentence: an owner with no
+handle (`Choose a public handle first`), a slug another unrevoked public
+share holds (`Your public share <label> is already at /p/<handle>/<slug>;
+revoke it first`), a malformed slug, and scope `play`; it refuses a `slug`
+on a share of another audience too. Revoking the holder frees the slug, and
+a new share minted at it takes the address over, which is how a board moves
+to a new notebook without its address changing.
+
+On the `/shares` page the audience fieldset offers `public` beside `link`
+and `named`. Choosing it sets the scope to read and disables play, moves an
+expiry still at 30 days to 365 (the field's placeholder and note follow the
+audience), and shows a slug field with the address previewed beneath it.
+The slug is suggested from the label (`slugFromLabel` in `shares.ts`:
+lowercased, each run of characters outside a to z and 0 to 9 one hyphen,
+hyphens trimmed from both ends, cut to 60 characters and trimmed again)
+until the owner edits it, and is sent as typed. The page reads the handle on
+load; while there is none, an inline `Choose your public handle` field saves
+it through `PUT` and the mint button waits for it. A handle not yet fixed
+shows with Change; a fixed one says so. The created panel shows a public
+share's address with Copy. The list shows each public share's address in
+full with Copy beside it, where other shares show their prefix, and offers
+Revoke on an expired public share as well as an active one, since an expired
+share still holds its slug until it is revoked. Without a usable
+`PUBLIC_SHARE_URL` the page shows `public_path` alone.
 
 ### Bundles
 
