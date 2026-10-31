@@ -9,6 +9,12 @@ and the one-time token, is shown once. Revoked and expired shares stay in the
 list, muted and without a Revoke button. A share names its nets, or its
 notebook, by the names it carries itself.
 
+A public share is read only and served at `/p/<handle>/<slug>`: the owner
+chooses a handle in the form before the first one, the slug follows the
+label until edited, and the address is shown after the mint and again in
+the list, never the token. An expired public share keeps a Revoke button,
+since it holds its address until revoked.
+
 A bundle is a zip the public tier serves beside a world share. The page
 uploads one as the raw request body, shows the server's sentence when the
 upload is refused, refuses a zip over the server's cap in the server's words
@@ -473,3 +479,169 @@ def test_mint_a_world_share_with_a_bundle(
     row = _rows(page).first
     expect(row.get_by_test_id("share-resource")).to_have_text("world: light")
     expect(row.get_by_test_id("share-bundle")).to_have_text("bundle chess board")
+
+
+def _public_share(share_id: str, *, label: str, slug: str, **overrides) -> dict:
+    """A public notebook share as the server lists it, under the handle oleg."""
+    return fake_cp.share_row(share_id, label=label, resource_kind="notebook", notebook_id=NOTEBOOK,
+                             notebook_name="daily plots", audience="public", slug=slug,
+                             public_path=f"/p/oleg/{slug}", **overrides)
+
+
+def _pick_the_notebook(page: Page) -> None:
+    page.get_by_role("radio", name="notebook:").check()
+    picker = page.get_by_test_id("share-notebook-picker")
+    expect(picker).to_contain_text("daily plots", timeout=30_000)
+    picker.get_by_role("radio").check()
+
+
+def test_choose_a_handle_and_mint_a_public_share_at_its_address(
+        page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane,
+        expected_console_errors: list[str]) -> None:
+    # The browser logs the refused handle itself.
+    expected_console_errors.append("status of 409")
+    cp = fresh_control_plane
+    cp.wiring = _wiring()
+    cp.taken_handles = {"taken"}
+
+    page.goto(f"{frontend_url}/shares")
+    expect(page.get_by_text("You have no shares.")).to_be_visible(timeout=30_000)
+    _pick_the_notebook(page)
+    page.locator('input[name="share-label"]').fill("Reachability boards")
+    page.get_by_role("radio", name="play:").check()
+    page.get_by_role("radio", name="public:").check()
+
+    # Public is read only, and lasts a year unless the owner says otherwise.
+    expect(page.get_by_role("radio", name="read:")).to_be_checked()
+    expect(page.get_by_role("radio", name="play:")).to_be_disabled()
+    expect(page.get_by_test_id("share-public-read-only")).to_have_text("A public share is read only.")
+    expires = page.locator('input[name="share-expires-in-days"]')
+    expect(expires).to_have_value("365")
+    expect(expires).to_have_attribute("placeholder", "365")
+
+    # No handle yet: the slug follows the label, and the mint waits for a handle.
+    slug = page.locator('input[name="share-slug"]')
+    expect(slug).to_have_value("reachability-boards")
+    preview = page.get_by_test_id("share-public-preview")
+    expect(preview).to_have_text(f"{SHARE_URL}/p/<your handle>/reachability-boards")
+    create = page.get_by_role("button", name="Create share")
+    expect(create).to_be_disabled()
+    expect(page.get_by_test_id("share-needs-handle")).to_be_visible()
+
+    handle_box = page.get_by_test_id("public-handle")
+    handle = page.get_by_label("Choose your public handle")
+    handle.fill("taken")
+    handle_box.get_by_role("button", name="Save").click()
+    expect(page.get_by_test_id("public-handle-error")).to_have_text("That handle is taken")
+    expect(create).to_be_disabled()
+    handle.fill("oleg")
+    handle_box.get_by_role("button", name="Save").click()
+    expect(page.get_by_test_id("public-handle-state")).to_contain_text("Your public handle is oleg.")
+    expect(preview).to_have_text(f"{SHARE_URL}/p/oleg/reachability-boards")
+    expect(create).to_be_enabled()
+    assert cp.handle_bodies == [{"handle": "taken"}, {"handle": "oleg"}]
+
+    # Until a public share fixes it, the handle can change.
+    handle_box.get_by_role("button", name="Change").click()
+    expect(page.get_by_label("Change your public handle")).to_have_value("oleg")
+    handle_box.get_by_role("button", name="Cancel").click()
+    expect(page.get_by_test_id("public-handle-state")).to_contain_text("Your public handle is oleg.")
+
+    # Edited, the slug stays as typed when the label changes.
+    slug.fill("reachability")
+    page.locator('input[name="share-label"]').fill("nb reachability")
+    expect(slug).to_have_value("reachability")
+    address = f"{SHARE_URL}/p/oleg/reachability"
+    expect(preview).to_have_text(address)
+    create.click()
+
+    created = page.get_by_test_id("share-created")
+    expect(created).to_contain_text('Share "nb reachability" created at its public address')
+    expect(page.get_by_test_id("share-created-text")).to_have_text(address)
+    expect(created).not_to_contain_text("petri_share_")
+    page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+    created.get_by_role("button", name="Copy").click()
+    expect(created.get_by_role("button", name="Copied")).to_be_visible()
+    assert page.evaluate("navigator.clipboard.readText()") == address
+
+    print("mint body:", json.dumps(cp.share_bodies))
+    assert cp.share_bodies == [{
+        "label": "nb reachability",
+        "resource_kind": "notebook",
+        "notebook_id": NOTEBOOK,
+        "scope": "read",
+        "audience": "public",
+        "slug": "reachability",
+        "expires_in_days": 365,
+        "publish_payloads": False,
+        "max_viewers": 20,
+        "inputs_per_minute": 60,
+    }]
+
+    # The first public share fixes the handle it was minted under.
+    expect(page.get_by_test_id("public-handle-state")).to_contain_text("Your public handle is oleg, fixed")
+    expect(handle_box.get_by_role("button", name="Change")).to_have_count(0)
+
+    # The list shows the address in full with a Copy beside it, and no token prefix.
+    row = _rows(page).first
+    expect(row.get_by_text("public", exact=True)).to_be_visible()
+    expect(row.get_by_test_id("share-public-address")).to_have_text(address)
+    expect(row).not_to_contain_text("petri_share_")
+
+    # The address is not a secret: a fresh visit lists it again, with its Copy.
+    page.reload()
+    expect(_rows(page)).to_have_count(1, timeout=30_000)
+    expect(page.get_by_test_id("share-created")).to_have_count(0)
+    row = _rows(page).first
+    expect(row.get_by_test_id("share-public-address")).to_have_text(address)
+    page.evaluate("navigator.clipboard.writeText('')")
+    row.get_by_role("button", name="Copy").click()
+    expect(row.get_by_role("button", name="Copied")).to_be_visible()
+    assert page.evaluate("navigator.clipboard.readText()") == address
+
+
+def test_a_held_slug_is_refused_until_its_share_is_revoked(
+        page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane,
+        expected_console_errors: list[str]) -> None:
+    expected_console_errors.append("status of 422")
+    cp = fresh_control_plane
+    cp.wiring = _wiring()
+    cp.public_handle = "oleg"
+    cp.public_handle_fixed = True
+    cp.shares = [
+        _public_share("share-boards", label="boards", slug="reachability"),
+        _public_share("share-old", label="old boards", slug="old", expires_at="2026-01-01T00:00:00+00:00"),
+    ]
+
+    page.goto(f"{frontend_url}/shares")
+    rows = _rows(page)
+    expect(rows).to_have_count(2, timeout=30_000)
+    held = rows.nth(0)
+    expect(held.get_by_test_id("share-public-address")).to_have_text(f"{SHARE_URL}/p/oleg/reachability")
+    # Expired, a public share still holds its address, so it can be revoked to free it.
+    expect(rows.nth(1)).to_have_attribute("data-status", "expired")
+    expect(rows.nth(1).get_by_role("button", name="Revoke", exact=True)).to_be_visible()
+
+    _pick_the_notebook(page)
+    page.locator('input[name="share-label"]').fill("Reachability")
+    page.get_by_role("radio", name="public:").check()
+    expect(page.get_by_test_id("public-handle-state")).to_contain_text("Your public handle is oleg, fixed")
+    expect(page.get_by_label("Choose your public handle")).to_have_count(0)
+    expect(page.locator('input[name="share-slug"]')).to_have_value("reachability")
+    page.get_by_role("button", name="Create share").click()
+
+    held_sentence = "Your public share boards is already at /p/oleg/reachability; revoke it first"
+    expect(page.get_by_test_id("share-mint-error")).to_have_text(held_sentence)
+    expect(page.get_by_test_id("share-created")).to_have_count(0)
+    expect(rows).to_have_count(2)
+
+    # Revoked, the old share frees the address, and the same mint takes it.
+    held.get_by_role("button", name="Revoke", exact=True).click()
+    expect(held).to_contain_text("Its address stops answering")
+    held.get_by_role("button", name="Yes, revoke").click()
+    expect(held).to_have_attribute("data-status", "revoked")
+    page.get_by_role("button", name="Create share").click()
+    expect(page.get_by_test_id("share-created-text")).to_have_text(f"{SHARE_URL}/p/oleg/reachability")
+    expect(page.get_by_test_id("share-mint-error")).to_have_count(0)
+    expect(rows).to_have_count(3)
+    assert [body["slug"] for body in cp.share_bodies] == ["reachability", "reachability"]
