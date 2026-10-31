@@ -116,6 +116,10 @@ def fresh_control_plane(control_plane: fake_cp.FakeControlPlane) -> Iterator[fak
     control_plane.shares = []
     control_plane.share_bodies.clear()
     control_plane.share_refusals.clear()
+    control_plane.public_handle = None
+    control_plane.public_handle_fixed = False
+    control_plane.taken_handles = set()
+    control_plane.handle_bodies.clear()
     control_plane.bundles = []
     control_plane.bundle_uploads.clear()
     control_plane.bundle_refusals.clear()
