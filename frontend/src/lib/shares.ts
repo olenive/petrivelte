@@ -1,22 +1,24 @@
 /**
  * Pure helpers for the Sharing page: a share's state, its link or public
- * address, the net picker that keeps a world on one worker, the slug a public
- * share's label suggests, the mint request built from the form, a bundle's
- * size as the bundles section shows it, and whether a zip is small enough to
- * upload.
+ * address, the owner's public handles (which one the form offers first, the
+ * count against the limit, whether one is in use, what releasing one risks),
+ * the net picker that keeps a world on one worker, the slug a public share's
+ * label suggests, the mint request built from the form, a bundle's size as
+ * the bundles section shows it, and whether a zip is small enough to upload.
  *
  * The form refuses nothing the server does not refuse. It builds the request
  * from what the owner typed and leaves every judgement of it to the server,
  * whose sentence the page shows. What it does decide is what to leave out: a
  * seat and the per-net lists belong only on a play share, an email only on a
- * named one, a slug only on a public one and a bundle only on a world, and
- * the server refuses each anywhere else. Choosing the public audience also
+ * named one, a handle and a slug only on a public one and a bundle only on a
+ * world, and the server refuses each anywhere else. Choosing the public audience also
  * sets the scope to read, since a public share is read only. The one check
  * made before sending is a bundle zip's size, against the server's own cap
  * and with its own sentence (`bundleFileRefusal`).
  */
 
 import type {
+	PublicHandle,
 	Share,
 	ShareAudience,
 	ShareCreated,
@@ -154,9 +156,76 @@ export function slugFromLabel(label: string): string {
 }
 
 /** The path a public share would be at, for the form's preview; the handle
- *  reads `<your handle>` until one is chosen. */
+ *  reads `<your handle>` until one is reserved and chosen. */
 export function previewPublicPath(handle: string | null, slug: string): string {
 	return `/p/${handle ?? '<your handle>'}/${slug}`;
+}
+
+// -- public handles --
+
+/**
+ * The handle the form offers first: the one a public share was last minted
+ * under, by `last_used_at`, else the first of the list, which the server
+ * gives oldest first; null when the owner holds none. The instants are
+ * compared, never their text, and a tie goes to the older handle.
+ */
+export function defaultHandle(handles: readonly Pick<PublicHandle, 'handle' | 'last_used_at'>[]): string | null {
+	const used = handles
+		.map((h) => ({ handle: h.handle, at: h.last_used_at === null ? NaN : Date.parse(h.last_used_at) }))
+		.filter((h) => !Number.isNaN(h.at));
+	if (used.length === 0) return handles[0]?.handle ?? null;
+	return used.reduce((latest, h) => (h.at > latest.at ? h : latest)).handle;
+}
+
+/** The form's handle against the owner's handles as they are now: the one
+ *  chosen while the owner still holds it, else the default. */
+export function keepHandle(
+	chosen: string | null,
+	handles: readonly Pick<PublicHandle, 'handle' | 'last_used_at'>[],
+): string | null {
+	return chosen !== null && handles.some((h) => h.handle === chosen) ? chosen : defaultHandle(handles);
+}
+
+/** A count with its noun, plural unless the count is one. */
+function counted(count: number, noun: string): string {
+	return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
+/** The box's count against the account's limit, such as "2 of 3 handles reserved". */
+export function handlesReservedText(count: number, limit: number): string {
+	return `${count} of ${counted(limit, 'handle')} reserved`;
+}
+
+/** Whether the account may reserve another handle. */
+export function hasRoomForHandle(count: number, limit: number): boolean {
+	return count < limit;
+}
+
+/** Whether a handle is in use: an unrevoked public share is minted under it,
+ *  expired or not. Renaming one in use would move every live address under
+ *  it, and releasing it would let another account publish at them, so the
+ *  server refuses both. */
+export function handleInUse(handle: Pick<PublicHandle, 'live_shares'>): boolean {
+	return handle.live_shares > 0;
+}
+
+/** A handle's live shares as its row counts them. */
+export function describeLiveShares(handle: Pick<PublicHandle, 'live_shares'>): string {
+	return handle.live_shares === 0 ? 'no live shares' : counted(handle.live_shares, 'live share');
+}
+
+/** What a handle in use shows in place of Rename and Release. */
+export function handleInUseNote(handle: Pick<PublicHandle, 'live_shares'>): string {
+	return `revoke its ${counted(handle.live_shares, 'public share')} first`;
+}
+
+/** The question Release asks first. A released handle is free for anyone,
+ *  and a new holder could publish at the addresses this owner used under it. */
+export function releaseWarning(handle: string): string {
+	return (
+		`Release ${handle}? It will no longer be reserved for you: anyone may take it, ` +
+		'and a new holder could publish at addresses you once used.'
+	);
 }
 
 // -- a share's nets --
@@ -264,6 +333,9 @@ export interface ShareForm {
 	seat: string;
 	audience: ShareAudience;
 	memberEmail: string;
+	/** The handle a public share is minted under, one of the owner's; null
+	 *  while none is chosen. The page keeps it with `keepHandle`. */
+	handle: string | null;
 	/** A public share's slug as the owner typed it; read through `formSlug`. */
 	slug: string;
 	/** Whether the owner has edited the slug. Until then it follows the label. */
@@ -289,6 +361,7 @@ export function emptyShareForm(): ShareForm {
 		seat: '',
 		audience: 'link',
 		memberEmail: '',
+		handle: null,
 		slug: '',
 		slugEdited: false,
 		expiresInDays: DEFAULT_EXPIRES_IN_DAYS,
@@ -360,7 +433,7 @@ export function shareRequest(form: ShareForm): ShareRequest {
 		...(play ? { seat: form.seat } : {}),
 		audience: form.audience,
 		...(form.audience === 'named' ? { member_email: form.memberEmail } : {}),
-		...(form.audience === 'public' ? { slug: formSlug(form) } : {}),
+		...(form.audience === 'public' ? { handle: form.handle, slug: formSlug(form) } : {}),
 		...optionalNumber('expires_in_days', form.expiresInDays),
 		publish_payloads: form.publishPayloads,
 		...optionalNumber('max_viewers', form.maxViewers),

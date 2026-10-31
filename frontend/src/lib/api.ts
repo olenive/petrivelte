@@ -2094,7 +2094,7 @@ export async function getWiring(): Promise<WiringResponse> {
 //
 // A share opens a world of the owner's nets, or one notebook, to people
 // outside the account through the public tier. The owner mints, lists and
-// revokes shares here, and chooses the handle public shares are served
+// revokes shares here, and keeps the handles public shares are served
 // under; the routes need a browser session and refuse a personal API token
 // with 403. The shapes mirror `petritype_server/shares/` (`models.py` for the
 // answers, `rules.py` for the request and its bounds).
@@ -2124,7 +2124,8 @@ export interface ShareNet {
 /** A share as its owner lists it: never the secret. `prefix` is the 8
  *  characters after `petri_share_`. Revoked and expired shares are listed
  *  too. A world share's `nets` loses a net when that net is deleted. A
- *  public share also carries its address, which is not a secret. */
+ *  public share also carries its handle, slug and address, none of them a
+ *  secret. */
 export interface Share {
 	id: string;
 	label: string;
@@ -2138,10 +2139,14 @@ export interface Share {
 	member_email: string | null;
 	/** Set exactly on a play share: the name stamped on its player's inputs. */
 	seat: string | null;
+	/** Set exactly on a public share: the handle it was minted under, kept as
+	 *  minted even after the owner renames or releases that handle. */
+	handle: string | null;
 	/** Set exactly on a public share: the last part of its address. */
 	slug: string | null;
-	/** Set exactly on a public share: `/p/<handle>/<slug>`, its address on
-	 *  the public tier, which the page puts after the tier's base URL. */
+	/** Set exactly on a public share: `/p/<handle>/<slug>` from its own
+	 *  handle and slug, its address on the public tier, which the page puts
+	 *  after the tier's base URL. */
 	public_path: string | null;
 	prefix: string;
 	/** False strips token payloads and log lines from what viewers see. */
@@ -2177,9 +2182,9 @@ export interface ShareNetRequest {
  *  default: scope read, audience link, 30 days (365 for a public share),
  *  payloads hidden, 20 viewers, 60 inputs a minute. A world names `nets`; a
  *  notebook names `notebook_id`. `seat` belongs only on a play share,
- *  `member_email` only on a named one, `slug` only on a public one and
- *  `bundle_id` only on a world: the server refuses a setting the share would
- *  never read, and an unknown field. */
+ *  `member_email` only on a named one, `handle` and `slug` only on a public
+ *  one and `bundle_id` only on a world: the server refuses a setting the
+ *  share would never read, and an unknown field. */
 export interface ShareRequest {
 	label: string;
 	resource_kind: ShareResourceKind;
@@ -2189,6 +2194,9 @@ export interface ShareRequest {
 	audience?: ShareAudience;
 	member_email?: string;
 	seat?: string;
+	/** The handle a public share is minted under, one the owner has
+	 *  reserved; null when none is chosen, which the server refuses. */
+	handle?: string | null;
 	/** A public share's slug, the last part of its address. */
 	slug?: string;
 	expires_in_days?: number;
@@ -2258,20 +2266,30 @@ export async function revokeShare(id: string): Promise<{ status: string }> {
 	return res.json();
 }
 
-// -- the public handle --
+// -- public handles --
 //
-// A public share is served at `/p/<handle>/<slug>`, under the owner's one
-// public handle. The owner chooses it on the Sharing page before the first
-// public share and can change it until that share is minted; from then on it
-// is fixed, since a released handle taken by another owner would put their
-// shares behind addresses that were once this owner's. Session only, as the
+// A public share is served at `/p/<handle>/<slug>`, under one of the owner's
+// public handles. An account reserves several, up to its limit, ahead of
+// any share, and each public share names the one it is minted under. A
+// handle is in use while an unrevoked public share is minted under it,
+// expired or not; only a handle not in use can be renamed or released,
+// since either would move or free a live address. Session only, as the
 // share routes are.
 
-/** The owner's public handle, null until one is chosen, and whether a public
- *  share has fixed it. */
+/** One of the owner's public handles. `live_shares` counts the unrevoked
+ *  public shares under it, expired ones included; `last_used_at` is set by
+ *  each public mint under it. */
 export interface PublicHandle {
-	handle: string | null;
-	fixed: boolean;
+	handle: string;
+	reserved_at: string;
+	last_used_at: string | null;
+	live_shares: number;
+}
+
+/** The owner's handles, oldest first, and how many the account may hold. */
+export interface PublicHandles {
+	handles: PublicHandle[];
+	limit: number;
 }
 
 const HANDLE_LIMITED = 'Too many handle changes in the last minute';
@@ -2280,24 +2298,50 @@ function handleErrorMessage(status: number, data: unknown, fallback: string): st
 	return sentenceErrorMessage(status, data, fallback, HANDLE_LIMITED);
 }
 
-/** The owner's public handle and whether it is fixed. */
-export async function getPublicHandle(): Promise<PublicHandle> {
-	const res = await get('/api/public-handle');
+function handlePath(handle: string): string {
+	return `/api/public-handles/${encodeURIComponent(handle)}`;
+}
+
+/** The owner's public handles, oldest first, and the account's limit. */
+export async function listPublicHandles(): Promise<PublicHandles> {
+	const res = await get('/api/public-handles');
 	if (!res.ok) {
-		throw new Error(handleErrorMessage(res.status, await res.json().catch(() => null), 'Failed to load your public handle'));
+		throw new Error(handleErrorMessage(res.status, await res.json().catch(() => null), 'Failed to load your public handles'));
 	}
 	return res.json();
 }
 
-/** Choose or change the owner's public handle. A refusal throws the server's
- *  sentence: a malformed or reserved handle (422), one another owner holds
- *  (409), or a handle a public share has fixed (422). */
-export async function setPublicHandle(handle: string): Promise<PublicHandle> {
-	const res = await put('/api/public-handle', { handle });
+/** Reserve a public handle. A refusal throws the server's sentence: a
+ *  malformed or reserved word (422), one taken by anyone (409), or an
+ *  account already at its limit (422). */
+export async function reservePublicHandle(handle: string): Promise<PublicHandle> {
+	const res = await post('/api/public-handles', { handle });
 	if (!res.ok) {
-		throw new Error(handleErrorMessage(res.status, await res.json().catch(() => null), 'Failed to save your public handle'));
+		throw new Error(handleErrorMessage(res.status, await res.json().catch(() => null), 'Failed to reserve the handle'));
 	}
 	return res.json();
+}
+
+/** Rename one of the owner's handles. A refusal throws the server's
+ *  sentence: a handle that is not the owner's (404), one in use (409), or a
+ *  new name refused as a reservation would be. The same name changes
+ *  nothing. */
+export async function renamePublicHandle(handle: string, newHandle: string): Promise<PublicHandle> {
+	const res = await put(handlePath(handle), { handle: newHandle });
+	if (!res.ok) {
+		throw new Error(handleErrorMessage(res.status, await res.json().catch(() => null), 'Failed to rename the handle'));
+	}
+	return res.json();
+}
+
+/** Release one of the owner's handles, so that anyone may take it. A
+ *  refusal throws the server's sentence: a handle that is not the owner's
+ *  (404) or one in use (409). The answer is 204, with no body. */
+export async function releasePublicHandle(handle: string): Promise<void> {
+	const res = await del(handlePath(handle));
+	if (!res.ok) {
+		throw new Error(handleErrorMessage(res.status, await res.json().catch(() => null), 'Failed to release the handle'));
+	}
 }
 
 // -- bundles --
