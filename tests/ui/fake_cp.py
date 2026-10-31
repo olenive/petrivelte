@@ -1164,6 +1164,11 @@ def _held(cp: FakeControlPlane, handle: Any) -> dict[str, Any] | None:
     return next((held for held in cp.public_handles if held["handle"] == handle), None)
 
 
+def _plural(count: int, noun: str) -> str:
+    """The noun as the server counts it: one share, two shares, zero shares."""
+    return noun if count == 1 else noun + "s"
+
+
 def _live_shares(cp: FakeControlPlane, handle: str) -> int:
     """The unrevoked public shares under a handle, expired ones included."""
     return sum(1 for share in cp.shares
@@ -1193,13 +1198,13 @@ def _taken_refusal(cp: FakeControlPlane, handle: str) -> tuple[int, str] | None:
 
 def _in_use_refusal(cp: FakeControlPlane, handle: str) -> tuple[int, str] | None:
     live = _live_shares(cp, handle)
-    return (409, f"Revoke the {live} public shares under {handle} first") if live > 0 else None
+    return (409, f"Revoke the {live} public {_plural(live, 'share')} under {handle} first") if live > 0 else None
 
 
 def _reserve(cp: FakeControlPlane, body: Any) -> tuple[int, Any]:
     cp.handle_bodies.append(body)
     handle = body.get("handle") if isinstance(body, dict) else None
-    at_limit = ((422, f"You already hold {cp.handle_limit} handles; release one first")
+    at_limit = ((422, f"You already hold {cp.handle_limit} {_plural(cp.handle_limit, 'handle')}; release one first")
                 if len(cp.public_handles) >= cp.handle_limit else None)
     refusal = _name_refusal(handle) or at_limit or _taken_refusal(cp, handle)
     if refusal is not None:

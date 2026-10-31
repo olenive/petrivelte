@@ -687,7 +687,7 @@ def test_a_handle_in_use_refuses_rename_and_release(
     with cp.lock:
         cp.shares.insert(0, _public_share("share-t", label="t", handle="tailarm", slug="new"))
     tailarm.get_by_role("button", name="Save").click()
-    expect(tailarm.get_by_test_id("handle-row-error")).to_have_text("Revoke the 1 public shares under tailarm first")
+    expect(tailarm.get_by_test_id("handle-row-error")).to_have_text("Revoke the 1 public share under tailarm first")
     expect(tailarm.get_by_test_id("handle-in-use")).to_have_text("revoke its 1 public share first")
     expect(page.get_by_label("New name for tailarm")).to_have_count(0)
 
