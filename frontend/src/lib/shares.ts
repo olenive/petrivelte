@@ -1,16 +1,19 @@
 /**
- * Pure helpers for the shares page: a share's state and link, the net picker
- * that keeps a world on one worker, the mint request built from the form, a
- * bundle's size as the bundles section shows it, and whether a zip is small
- * enough to upload.
+ * Pure helpers for the shares page: a share's state, its link or public
+ * address, the net picker that keeps a world on one worker, the slug a public
+ * share's label suggests, the mint request built from the form, a bundle's
+ * size as the bundles section shows it, and whether a zip is small enough to
+ * upload.
  *
  * The form refuses nothing the server does not refuse. It builds the request
  * from what the owner typed and leaves every judgement of it to the server,
  * whose sentence the page shows. What it does decide is what to leave out: a
  * seat and the per-net lists belong only on a play share, an email only on a
- * named one and a bundle only on a world, and the server refuses each anywhere
- * else. The one check made before sending is a bundle zip's size, against the
- * server's own cap and with its own sentence (`bundleFileRefusal`).
+ * named one, a slug only on a public one and a bundle only on a world, and
+ * the server refuses each anywhere else. Choosing the public audience also
+ * sets the scope to read, since a public share is read only. The one check
+ * made before sending is a bundle zip's size, against the server's own cap
+ * and with its own sentence (`bundleFileRefusal`).
  */
 
 import type {
@@ -29,10 +32,18 @@ import { workerLabel } from '$lib/netInstances';
 
 export type ShareStatus = 'active' | 'expired' | 'revoked';
 
-/** The defaults the server applies, shown in the form. */
+/** The defaults the server applies, shown in the form. A public share lasts
+ *  a year by default, since its address is meant to last. */
 export const DEFAULT_EXPIRES_IN_DAYS = 30;
+export const DEFAULT_PUBLIC_EXPIRES_IN_DAYS = 365;
 export const DEFAULT_MAX_VIEWERS = 20;
 export const DEFAULT_INPUTS_PER_MINUTE = 60;
+
+/** The days the server gives a share of this audience when the mint leaves
+ *  `expires_in_days` out. */
+export function defaultExpiresInDays(audience: ShareAudience): number {
+	return audience === 'public' ? DEFAULT_PUBLIC_EXPIRES_IN_DAYS : DEFAULT_EXPIRES_IN_DAYS;
+}
 
 export function shareStatus(share: Pick<Share, 'revoked_at' | 'expires_at'>, nowMs: number): ShareStatus {
 	if (share.revoked_at) return 'revoked';
@@ -41,6 +52,23 @@ export function shareStatus(share: Pick<Share, 'revoked_at' | 'expires_at'>, now
 
 export function shareTokenLabel(prefix: string): string {
 	return `petri_share_${prefix}…`;
+}
+
+/** Whether the list offers Revoke: on an active share, and on an expired
+ *  public share too, which holds its address until it is revoked, so that
+ *  revoking it is how the address is freed for a new share. */
+export function canRevoke(share: Pick<Share, 'audience'>, status: ShareStatus): boolean {
+	return status === 'active' || (status === 'expired' && share.audience === 'public');
+}
+
+/** The question Revoke asks first. */
+export function revokePrompt(share: Pick<Share, 'audience'>, status: ShareStatus): string {
+	if (share.audience !== 'public') {
+		return 'Revoke it? Anyone holding its link loses access, and it cannot be restored.';
+	}
+	return status === 'active'
+		? 'Revoke it? Its address stops answering, and it cannot be restored; a new share can then take the address.'
+		: 'Revoke it? That frees its address for a new share, and it cannot be restored.';
 }
 
 // -- the link --
@@ -75,6 +103,60 @@ export function shareLinkBase(raw: string | undefined, production: boolean): Sha
 /** The link a viewer opens: the public tier's landing page for the share. */
 export function shareLink(base: string, token: string): string {
 	return `${base}/s/${encodeURIComponent(token)}`;
+}
+
+/** A public share's address: the public tier's base followed by the share's
+ *  `public_path`, which the server gives as `/p/<handle>/<slug>`. */
+export function publicLink(base: string, publicPath: string): string {
+	return `${base}${publicPath}`;
+}
+
+/** A public share's address as the page shows it: the full address, or the
+ *  path alone when the public tier's address is not configured. */
+export function publicAddress(base: string | null, publicPath: string): string {
+	return base === null ? publicPath : publicLink(base, publicPath);
+}
+
+/**
+ * What the created panel shows and copies. A public share shows its address
+ * and never its token: the address is how it is reached, and is not a
+ * secret. Any other share shows its link, which holds the token. Without a
+ * configured public tier, the path or the bare token stands alone and the
+ * panel says why.
+ */
+export function createdShareText(
+	created: Pick<ShareCreated, 'token' | 'public_path'>,
+	base: string | null,
+): string {
+	if (created.public_path !== null) return publicAddress(base, created.public_path);
+	return base === null ? created.token : shareLink(base, created.token);
+}
+
+// -- a public share's address --
+
+/** The longest slug the server takes. */
+export const MAX_SLUG_LENGTH = 60;
+
+function trimHyphens(text: string): string {
+	return text.replace(/^-+|-+$/g, '');
+}
+
+/**
+ * The slug a label suggests: lowercased, every run of characters other than
+ * a to z and 0 to 9 one hyphen, hyphens trimmed from both ends, cut to 60
+ * characters and trimmed again, since the cut can end on a hyphen. A label
+ * with no letter or digit suggests an empty slug, which the server refuses
+ * in its own words.
+ */
+export function slugFromLabel(label: string): string {
+	const hyphenated = trimHyphens(label.toLowerCase().replace(/[^a-z0-9]+/g, '-'));
+	return trimHyphens(hyphenated.slice(0, MAX_SLUG_LENGTH));
+}
+
+/** The path a public share would be at, for the form's preview; the handle
+ *  reads `<your handle>` until one is chosen. */
+export function previewPublicPath(handle: string | null, slug: string): string {
+	return `/p/${handle ?? '<your handle>'}/${slug}`;
 }
 
 // -- a share's nets --
@@ -182,6 +264,10 @@ export interface ShareForm {
 	seat: string;
 	audience: ShareAudience;
 	memberEmail: string;
+	/** A public share's slug as the owner typed it; read through `formSlug`. */
+	slug: string;
+	/** Whether the owner has edited the slug. Until then it follows the label. */
+	slugEdited: boolean;
 	/** Null when the field is empty: the server's default applies. */
 	expiresInDays: number | null;
 	publishPayloads: boolean;
@@ -203,12 +289,33 @@ export function emptyShareForm(): ShareForm {
 		seat: '',
 		audience: 'link',
 		memberEmail: '',
+		slug: '',
+		slugEdited: false,
 		expiresInDays: DEFAULT_EXPIRES_IN_DAYS,
 		publishPayloads: false,
 		maxViewers: DEFAULT_MAX_VIEWERS,
 		inputsPerMinute: DEFAULT_INPUTS_PER_MINUTE,
 		bundleId: null,
 	};
+}
+
+/** The slug the form holds: the label's suggestion until the owner edits the
+ *  slug, and what the owner typed from then on. */
+export function formSlug(form: Pick<ShareForm, 'label' | 'slug' | 'slugEdited'>): string {
+	return form.slugEdited ? form.slug : slugFromLabel(form.label);
+}
+
+/**
+ * The form with another audience chosen. A public share is read only, so
+ * choosing public sets the scope to read. An expiry still at the old
+ * audience's default moves to the new one's, so a public share left alone
+ * lasts the year the server would give it; a number the owner typed stays,
+ * and so does an emptied field, which the server fills with its own default.
+ */
+export function withAudience(form: ShareForm, audience: ShareAudience): ShareForm {
+	const expiresInDays =
+		form.expiresInDays === defaultExpiresInDays(form.audience) ? defaultExpiresInDays(audience) : form.expiresInDays;
+	return { ...form, audience, expiresInDays, scope: audience === 'public' ? 'read' : form.scope };
 }
 
 /** A comma-separated list of names, each trimmed, the empty ones dropped. */
@@ -253,6 +360,7 @@ export function shareRequest(form: ShareForm): ShareRequest {
 		...(play ? { seat: form.seat } : {}),
 		audience: form.audience,
 		...(form.audience === 'named' ? { member_email: form.memberEmail } : {}),
+		...(form.audience === 'public' ? { slug: formSlug(form) } : {}),
 		...optionalNumber('expires_in_days', form.expiresInDays),
 		publish_payloads: form.publishPayloads,
 		...optionalNumber('max_viewers', form.maxViewers),
