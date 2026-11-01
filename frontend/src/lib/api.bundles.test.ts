@@ -5,7 +5,7 @@ vi.mock('$lib/config/network', () => ({ API_URL: 'http://cp.test' }));
 import { deleteBundle, listBundles, uploadBundle, type Bundle } from './api';
 
 /**
- * Bundles are uploaded, listed and deleted from the shares page. These tests
+ * Bundles are uploaded, listed and deleted from the Sharing page. These tests
  * pin the request each function sends, above all that an upload is the zip
  * itself as the body with `Content-Type: application/zip` and the label in
  * the query string, and that each of the server's refusals reaches the page

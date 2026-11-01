@@ -1,4 +1,4 @@
-"""The shares page lists the owner's shares, mints one and revokes one, and keeps their bundles.
+"""The Sharing page lists the owner's shares, mints one and revokes one, and keeps their bundles.
 
 A world is one or more nets on one worker, so the net picker groups the
 owner's nets by worker and, once one is picked, leaves only that worker's
@@ -9,11 +9,16 @@ and the one-time token, is shown once. Revoked and expired shares stay in the
 list, muted and without a Revoke button. A share names its nets, or its
 notebook, by the names it carries itself.
 
-A public share is read only and served at `/p/<handle>/<slug>`: the owner
-chooses a handle in the form before the first one, the slug follows the
+A public share is read only and served at `/p/<handle>/<slug>`, under one
+of the handles the owner reserves ahead, up to the account's limit, in the
+Public handles box or on the spot in the form. A handle no public share is
+live under can be renamed inline or released after a warning; one in use
+says to revoke its shares first instead, and the server's refusals show as
+they arrive. The form offers the handle used last, the slug follows the
 label until edited, and the address is shown after the mint and again in
-the list, never the token. An expired public share keeps a Revoke button,
-since it holds its address until revoked.
+the list, never the token. An address is held per handle, and an expired
+public share keeps a Revoke button, since it holds its address until
+revoked.
 
 A bundle is a zip the public tier serves beside a world share. The page
 uploads one as the raw request body, shows the server's sentence when the
@@ -103,9 +108,10 @@ def test_mint_a_named_play_world_and_see_its_link_once(
     cp = fresh_control_plane
     cp.wiring = _wiring()
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     expect(page.get_by_text("You have no shares.")).to_be_visible(timeout=30_000)
-    expect(page.locator('nav a[href="/shares"]')).to_have_text("Shares")
+    expect(page.locator('nav a[href="/sharing"]')).to_have_text("Sharing")
+    expect(page).to_have_title("Sharing · Petri")
 
     groups = page.get_by_test_id("share-worker-group")
     expect(groups).to_have_count(3)
@@ -193,7 +199,7 @@ def test_a_refused_mint_shows_the_servers_sentence(
     refusal = "A play share needs a seat: the name stamped on its player's inputs"
     cp.share_refusals = [refusal]
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     expect(_net_box(page, NET_LIGHT)).to_be_enabled(timeout=30_000)
     page.locator('input[name="share-label"]').fill("no seat")
     _net_box(page, NET_LIGHT).check()
@@ -214,7 +220,7 @@ def test_mint_a_notebook_share(
     cp = fresh_control_plane
     cp.wiring = _wiring()
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     page.get_by_role("radio", name="notebook:").check()
     picker = page.get_by_test_id("share-notebook-picker")
     expect(picker).to_contain_text("daily plots", timeout=30_000)
@@ -247,7 +253,7 @@ def test_the_list_names_a_notebook_share_from_the_share_itself(
     cp.shares = [fake_cp.share_row("share-plots", label="plots", resource_kind="notebook",
                                    notebook_id=NOTEBOOK, notebook_name="daily plots")]
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     expect(_rows(page)).to_have_count(1, timeout=30_000)
     expect(_rows(page).first.get_by_test_id("share-resource")).to_have_text("notebook: daily plots")
 
@@ -263,7 +269,7 @@ def test_revoke_asks_first_and_keeps_the_row_muted(
         fake_cp.share_row("share-gone", label="gone one", nets=[light], revoked_at="2026-10-01T00:00:00+00:00"),
     ]
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     rows = _rows(page)
     expect(rows).to_have_count(3, timeout=30_000)
     expect(rows.nth(0)).to_have_attribute("data-status", "active")
@@ -303,7 +309,7 @@ def test_upload_a_bundle_and_see_it_listed_and_offered(
         "game_bg.wasm": b"\x00asm" + b"\x00" * 1_499_996,
     })
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     bundles = page.get_by_test_id("bundles")
     expect(bundles.get_by_text("You have no bundles.")).to_be_visible(timeout=30_000)
     expect(bundles).to_contain_text(
@@ -350,7 +356,7 @@ def test_a_refused_upload_shows_the_servers_sentence(
     cp.bundle_refusals = [(422, NO_INDEX)]
     folder = _zip(tmp_path / "chess.zip", {"chess/index.html": b"<!doctype html>"})
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     bundles = page.get_by_test_id("bundles")
     expect(bundles.get_by_text("You have no bundles.")).to_be_visible(timeout=30_000)
     page.locator('input[name="bundle-label"]').fill("chess board")
@@ -377,7 +383,7 @@ def test_a_zip_over_the_cap_is_refused_before_it_is_sent(
         sparse.truncate(64 * 1024 * 1024 + 1)
     chess = _zip(tmp_path / "chess.zip", {"index.html": b"<!doctype html><title>chess</title>"})
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     bundles = page.get_by_test_id("bundles")
     expect(bundles.get_by_text("You have no bundles.")).to_be_visible(timeout=30_000)
     page.locator('input[name="bundle-label"]').fill("chess board")
@@ -410,7 +416,7 @@ def test_delete_a_bundle_asks_first_and_its_share_carries_on_without_it(
                                          _shared_net(NET_SHOP, W_ALPHA, "shop")],
                                    bundle_id=BUNDLE_CHESS, bundle_label="chess board")]
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     rows = _bundle_rows(page)
     expect(rows).to_have_count(2, timeout=30_000)
     expect(rows.nth(0)).to_contain_text("28.6 MB uncompressed · 42 files")
@@ -445,7 +451,7 @@ def test_mint_a_world_share_with_a_bundle(
     cp.bundles = [fake_cp.bundle_row(BUNDLE_CHESS, label="chess board"),
                   fake_cp.bundle_row(BUNDLE_VIEWER, label="viewer")]
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     expect(_bundle_options(page)).to_have_text(["none", "chess board", "viewer"], timeout=30_000)
     select = page.locator('select[name="share-bundle"]')
     expect(select.locator("option:checked")).to_have_text("none")
@@ -481,11 +487,16 @@ def test_mint_a_world_share_with_a_bundle(
     expect(row.get_by_test_id("share-bundle")).to_have_text("bundle chess board")
 
 
-def _public_share(share_id: str, *, label: str, slug: str, **overrides) -> dict:
-    """A public notebook share as the server lists it, under the handle oleg."""
+TAKEN = "That handle is taken; choose another"
+RELEASE_WARNING = ("Release {}? It will no longer be reserved for you: anyone may take it, "
+                   "and a new holder could publish at addresses you once used.")
+
+
+def _public_share(share_id: str, *, label: str, handle: str = "oleg", slug: str, **overrides) -> dict:
+    """A public notebook share as the server lists it."""
     return fake_cp.share_row(share_id, label=label, resource_kind="notebook", notebook_id=NOTEBOOK,
-                             notebook_name="daily plots", audience="public", slug=slug,
-                             public_path=f"/p/oleg/{slug}", **overrides)
+                             notebook_name="daily plots", audience="public", handle=handle, slug=slug,
+                             public_path=f"/p/{handle}/{slug}", **overrides)
 
 
 def _pick_the_notebook(page: Page) -> None:
@@ -495,16 +506,232 @@ def _pick_the_notebook(page: Page) -> None:
     picker.get_by_role("radio").check()
 
 
-def test_choose_a_handle_and_mint_a_public_share_at_its_address(
+def _handles_box(page: Page):
+    return page.get_by_test_id("public-handles")
+
+
+def _handle_rows(page: Page):
+    return page.get_by_test_id("handle-row")
+
+
+def _handle_row(page: Page, handle: str):
+    return page.locator(f'[data-testid="handle-row"][data-handle="{handle}"]')
+
+
+def _reserve_in_box(page: Page, handle: str) -> None:
+    box = _handles_box(page)
+    box.locator('input[name="reserve-handle"]').fill(handle)
+    box.get_by_role("button", name="Reserve", exact=True).click()
+
+
+def _handle_options(page: Page):
+    return page.locator('select[name="share-handle"] option')
+
+
+def _requests(cp: fake_cp.FakeControlPlane, start: str) -> list[str]:
+    return [line for line in cp.requests if line.startswith(start)]
+
+
+def test_reserve_handles_up_to_the_limit_and_see_the_refusal(
         page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane,
         expected_console_errors: list[str]) -> None:
-    # The browser logs the refused handle itself.
+    # The browser logs each refused request itself.
+    expected_console_errors.extend(["status of 409", "status of 422"])
+    cp = fresh_control_plane
+    cp.handle_limit = 2
+    cp.taken_handles = {"taken"}
+
+    page.goto(f"{frontend_url}/sharing")
+    box = _handles_box(page)
+    expect(box.get_by_text("You have no handles yet.")).to_be_visible(timeout=30_000)
+    expect(page.get_by_test_id("handles-count")).to_have_text("0 of 2 handles reserved")
+    # The box sits above the share form.
+    assert page.evaluate("""() => {
+        const box = document.querySelector('[data-testid="public-handles"]');
+        const form = document.querySelector('[data-testid="share-form"]');
+        return Boolean(box.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING);
+    }""")
+
+    # Each refusal shows the server's sentence, and nothing is reserved.
+    _reserve_in_box(page, "taken")
+    expect(page.get_by_test_id("reserve-handle-error")).to_have_text(TAKEN)
+    _reserve_in_box(page, "sharing")
+    expect(page.get_by_test_id("reserve-handle-error")).to_have_text("The handle sharing is reserved; choose another")
+    expect(_handle_rows(page)).to_have_count(0)
+
+    _reserve_in_box(page, "oleg")
+    expect(_handle_rows(page)).to_have_count(1)
+    expect(_handle_row(page, "oleg")).to_contain_text("no live shares")
+    expect(page.get_by_test_id("reserve-handle-error")).to_have_count(0)
+    expect(box.locator('input[name="reserve-handle"]')).to_have_value("")
+    expect(page.get_by_test_id("handles-count")).to_have_text("1 of 2 handles reserved")
+
+    _reserve_in_box(page, "tailarm")
+    expect(_handle_rows(page)).to_have_count(2)
+    expect(page.get_by_test_id("handles-count")).to_have_text("2 of 2 handles reserved")
+    # At the limit the field and its button wait, and say why.
+    expect(box.locator('input[name="reserve-handle"]')).to_be_disabled()
+    expect(box.get_by_role("button", name="Reserve", exact=True)).to_be_disabled()
+    expect(page.get_by_test_id("handles-at-limit")).to_have_text(
+        "You hold as many handles as your account allows; release one to reserve another.")
+    assert cp.handle_bodies == [{"handle": "taken"}, {"handle": "sharing"}, {"handle": "oleg"},
+                                {"handle": "tailarm"}]
+    assert [held["handle"] for held in cp.public_handles] == ["oleg", "tailarm"]
+
+    # A page whose count is stale, because another tab reserved meanwhile,
+    # gets the server's refusal and then shows the limit.
+    with cp.lock:
+        cp.public_handles.pop()
+    page.reload()
+    expect(page.get_by_test_id("handles-count")).to_have_text("1 of 2 handles reserved", timeout=30_000)
+    with cp.lock:
+        cp.public_handles.append(fake_cp.handle_row("elsewhere"))
+    _reserve_in_box(page, "games")
+    expect(page.get_by_test_id("reserve-handle-error")).to_have_text(
+        "You already hold 2 handles; release one first")
+    expect(page.get_by_test_id("handles-count")).to_have_text("2 of 2 handles reserved")
+    expect(_handle_row(page, "elsewhere")).to_be_visible()
+    expect(page.get_by_test_id("handles-at-limit")).to_be_visible()
+
+
+def test_rename_and_release_a_free_handle_with_the_warning(
+        page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane,
+        expected_console_errors: list[str]) -> None:
+    expected_console_errors.append("status of 409")
+    cp = fresh_control_plane
+    cp.public_handles = [fake_cp.handle_row("oleg"), fake_cp.handle_row("tailarm")]
+    cp.taken_handles = {"taken"}
+
+    page.goto(f"{frontend_url}/sharing")
+    expect(_handle_rows(page)).to_have_count(2, timeout=30_000)
+    expect(page.get_by_test_id("handles-count")).to_have_text("2 of 3 handles reserved")
+    row = _handle_row(page, "tailarm")
+    expect(row).to_contain_text("no live shares")
+
+    # Rename opens an inline edit; Cancel sends nothing.
+    row.get_by_role("button", name="Rename").click()
+    rename = page.get_by_label("New name for tailarm")
+    expect(rename).to_have_value("tailarm")
+    row.get_by_role("button", name="Cancel").click()
+    expect(page.get_by_label("New name for tailarm")).to_have_count(0)
+    assert not _requests(cp, "PUT")
+
+    # A taken name is refused in the row, and the edit stays open to fix it.
+    row.get_by_role("button", name="Rename").click()
+    page.get_by_label("New name for tailarm").fill("taken")
+    row.get_by_role("button", name="Save").click()
+    expect(row.get_by_test_id("handle-row-error")).to_have_text(TAKEN)
+    page.get_by_label("New name for tailarm").fill("boards")
+    row.get_by_role("button", name="Save").click()
+    renamed = _handle_row(page, "boards")
+    expect(renamed).to_contain_text("no live shares")
+    expect(_handle_row(page, "tailarm")).to_have_count(0)
+    expect(renamed.get_by_test_id("handle-row-error")).to_have_count(0)
+    assert _requests(cp, "PUT") == ["PUT /api/public-handles/tailarm", "PUT /api/public-handles/tailarm"]
+    assert cp.handle_bodies == [{"handle": "taken"}, {"handle": "boards"}]
+    assert [held["handle"] for held in cp.public_handles] == ["oleg", "boards"]
+
+    # Release warns first; Cancel sends nothing.
+    renamed.get_by_role("button", name="Release").click()
+    expect(renamed.get_by_test_id("handle-release-warning")).to_have_text(RELEASE_WARNING.format("boards"))
+    renamed.get_by_role("button", name="Cancel").click()
+    expect(renamed.get_by_test_id("handle-release-warning")).to_have_count(0)
+    assert not _requests(cp, "DELETE")
+
+    renamed.get_by_role("button", name="Release").click()
+    renamed.get_by_role("button", name="Yes, release").click()
+    expect(_handle_rows(page)).to_have_count(1)
+    expect(_handle_row(page, "boards")).to_have_count(0)
+    expect(page.get_by_test_id("handles-count")).to_have_text("1 of 3 handles reserved")
+    assert _requests(cp, "DELETE") == ["DELETE /api/public-handles/boards"]
+    assert [held["handle"] for held in cp.public_handles] == ["oleg"]
+
+    # What the page shows is what the server holds.
+    page.reload()
+    expect(_handle_rows(page)).to_have_count(1, timeout=30_000)
+    expect(_handle_row(page, "oleg")).to_be_visible()
+
+
+def test_a_handle_in_use_refuses_rename_and_release(
+        page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane,
+        expected_console_errors: list[str]) -> None:
+    expected_console_errors.append("status of 409")
+    cp = fresh_control_plane
+    cp.wiring = _wiring()
+    cp.public_handles = [fake_cp.handle_row("oleg"), fake_cp.handle_row("tailarm"), fake_cp.handle_row("games")]
+    cp.shares = [
+        _public_share("share-boards", label="boards", slug="reachability"),
+        _public_share("share-old", label="old boards", slug="old", expires_at="2026-01-01T00:00:00+00:00"),
+        _public_share("share-gone", label="gone", handle="tailarm", slug="gone",
+                      revoked_at="2026-10-01T00:00:00+00:00"),
+    ]
+
+    page.goto(f"{frontend_url}/sharing")
+    expect(_handle_rows(page)).to_have_count(3, timeout=30_000)
+    # Two unrevoked public shares, one of them expired, keep oleg in use.
+    oleg = _handle_row(page, "oleg")
+    expect(oleg).to_contain_text("2 live shares")
+    expect(oleg.get_by_test_id("handle-in-use")).to_have_text("revoke its 2 public shares first")
+    expect(oleg.get_by_role("button", name="Rename")).to_have_count(0)
+    expect(oleg.get_by_role("button", name="Release")).to_have_count(0)
+    # A revoked share holds nothing, so tailarm is free.
+    tailarm = _handle_row(page, "tailarm")
+    expect(tailarm).to_contain_text("no live shares")
+    expect(tailarm.get_by_test_id("handle-in-use")).to_have_count(0)
+
+    # A share minted elsewhere since the page read the list puts tailarm in
+    # use: the server refuses the rename, the sentence shows in its row, and
+    # the row catches up.
+    tailarm.get_by_role("button", name="Rename").click()
+    page.get_by_label("New name for tailarm").fill("boards")
+    with cp.lock:
+        cp.shares.insert(0, _public_share("share-t", label="t", handle="tailarm", slug="new"))
+    tailarm.get_by_role("button", name="Save").click()
+    expect(tailarm.get_by_test_id("handle-row-error")).to_have_text("Revoke the 1 public share under tailarm first")
+    expect(tailarm.get_by_test_id("handle-in-use")).to_have_text("revoke its 1 public share first")
+    expect(page.get_by_label("New name for tailarm")).to_have_count(0)
+
+    # And the same for a release of games, with two shares minted elsewhere.
+    games = _handle_row(page, "games")
+    expect(games).to_contain_text("no live shares")
+    games.get_by_role("button", name="Release").click()
+    with cp.lock:
+        cp.shares[:0] = [_public_share("share-g1", label="g1", handle="games", slug="one"),
+                         _public_share("share-g2", label="g2", handle="games", slug="two")]
+    games.get_by_role("button", name="Yes, release").click()
+    expect(games.get_by_test_id("handle-row-error")).to_have_text("Revoke the 2 public shares under games first")
+    expect(games.get_by_test_id("handle-in-use")).to_have_text("revoke its 2 public shares first")
+    expect(games.get_by_role("button", name="Release")).to_have_count(0)
+    assert [held["handle"] for held in cp.public_handles] == ["oleg", "tailarm", "games"]
+    assert _requests(cp, "PUT") == ["PUT /api/public-handles/tailarm"]
+    assert _requests(cp, "DELETE") == ["DELETE /api/public-handles/games"]
+
+    # Revoking both of oleg's shares, the expired one too, frees it.
+    rows = _rows(page)
+    for label in ("boards", "old boards"):
+        share = rows.filter(has_text=label).first
+        share.get_by_role("button", name="Revoke", exact=True).click()
+        share.get_by_role("button", name="Yes, revoke").click()
+        expect(share).to_have_attribute("data-status", "revoked")
+    expect(oleg).to_contain_text("no live shares")
+    expect(oleg.get_by_test_id("handle-in-use")).to_have_count(0)
+    expect(oleg.get_by_role("button", name="Rename")).to_be_visible()
+    expect(oleg.get_by_role("button", name="Release")).to_be_visible()
+
+
+def test_mint_a_public_share_choosing_a_handle_from_the_select(
+        page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane,
+        expected_console_errors: list[str]) -> None:
     expected_console_errors.append("status of 409")
     cp = fresh_control_plane
     cp.wiring = _wiring()
     cp.taken_handles = {"taken"}
+    cp.public_handles = [
+        fake_cp.handle_row("oleg", last_used_at="2026-10-29T10:00:00+00:00"),
+        fake_cp.handle_row("tailarm", last_used_at="2026-10-30T10:00:00+00:00"),
+    ]
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     expect(page.get_by_text("You have no shares.")).to_be_visible(timeout=30_000)
     _pick_the_notebook(page)
     page.locator('input[name="share-label"]').fill("Reachability boards")
@@ -519,34 +746,38 @@ def test_choose_a_handle_and_mint_a_public_share_at_its_address(
     expect(expires).to_have_value("365")
     expect(expires).to_have_attribute("placeholder", "365")
 
-    # No handle yet: the slug follows the label, and the mint waits for a handle.
+    # The select offers every handle and a new one, the one used last first.
+    select = page.locator('select[name="share-handle"]')
+    expect(_handle_options(page)).to_have_text(["oleg", "tailarm", "new handle…"])
+    expect(select).to_have_value("tailarm")
     slug = page.locator('input[name="share-slug"]')
     expect(slug).to_have_value("reachability-boards")
     preview = page.get_by_test_id("share-public-preview")
-    expect(preview).to_have_text(f"{SHARE_URL}/p/<your handle>/reachability-boards")
+    expect(preview).to_have_text(f"{SHARE_URL}/p/tailarm/reachability-boards")
     create = page.get_by_role("button", name="Create share")
+    expect(create).to_be_enabled()
+
+    # "new handle…" reveals a field, and the mint waits for a handle.
+    select.select_option(label="new handle…")
+    form = page.get_by_test_id("share-form")
+    new_handle = form.locator('input[name="share-new-handle"]')
+    expect(new_handle).to_be_visible()
     expect(create).to_be_disabled()
     expect(page.get_by_test_id("share-needs-handle")).to_be_visible()
+    new_handle.fill("taken")
+    form.get_by_role("button", name="Reserve", exact=True).click()
+    expect(page.get_by_test_id("share-new-handle-error")).to_have_text(TAKEN)
+    new_handle.fill("games")
+    form.get_by_role("button", name="Reserve", exact=True).click()
+    # Reserved on the spot, the new handle is chosen, and the account is at its limit.
+    expect(new_handle).to_have_count(0)
+    expect(_handle_options(page)).to_have_text(["oleg", "tailarm", "games"])
+    expect(select).to_have_value("games")
+    expect(_handle_row(page, "games")).to_be_visible()
+    expect(page.get_by_test_id("handles-count")).to_have_text("3 of 3 handles reserved")
 
-    handle_box = page.get_by_test_id("public-handle")
-    handle = page.get_by_label("Choose your public handle")
-    handle.fill("taken")
-    handle_box.get_by_role("button", name="Save").click()
-    expect(page.get_by_test_id("public-handle-error")).to_have_text("That handle is taken")
-    expect(create).to_be_disabled()
-    handle.fill("oleg")
-    handle_box.get_by_role("button", name="Save").click()
-    expect(page.get_by_test_id("public-handle-state")).to_contain_text("Your public handle is oleg.")
+    select.select_option("oleg")
     expect(preview).to_have_text(f"{SHARE_URL}/p/oleg/reachability-boards")
-    expect(create).to_be_enabled()
-    assert cp.handle_bodies == [{"handle": "taken"}, {"handle": "oleg"}]
-
-    # Until a public share fixes it, the handle can change.
-    handle_box.get_by_role("button", name="Change").click()
-    expect(page.get_by_label("Change your public handle")).to_have_value("oleg")
-    handle_box.get_by_role("button", name="Cancel").click()
-    expect(page.get_by_test_id("public-handle-state")).to_contain_text("Your public handle is oleg.")
-
     # Edited, the slug stays as typed when the label changes.
     slug.fill("reachability")
     page.locator('input[name="share-label"]').fill("nb reachability")
@@ -571,16 +802,18 @@ def test_choose_a_handle_and_mint_a_public_share_at_its_address(
         "notebook_id": NOTEBOOK,
         "scope": "read",
         "audience": "public",
+        "handle": "oleg",
         "slug": "reachability",
         "expires_in_days": 365,
         "publish_payloads": False,
         "max_viewers": 20,
         "inputs_per_minute": 60,
     }]
+    assert cp.handle_bodies == [{"handle": "taken"}, {"handle": "games"}]
 
-    # The first public share fixes the handle it was minted under.
-    expect(page.get_by_test_id("public-handle-state")).to_contain_text("Your public handle is oleg, fixed")
-    expect(handle_box.get_by_role("button", name="Change")).to_have_count(0)
+    # The handle now has a live share, so it can be neither renamed nor released.
+    expect(_handle_row(page, "oleg").get_by_test_id("handle-in-use")).to_have_text(
+        "revoke its 1 public share first")
 
     # The list shows the address in full with a Copy beside it, and no token prefix.
     row = _rows(page).first
@@ -588,7 +821,8 @@ def test_choose_a_handle_and_mint_a_public_share_at_its_address(
     expect(row.get_by_test_id("share-public-address")).to_have_text(address)
     expect(row).not_to_contain_text("petri_share_")
 
-    # The address is not a secret: a fresh visit lists it again, with its Copy.
+    # The address is not a secret: a fresh visit lists it again, with its
+    # Copy, and the form now offers oleg first, the handle used last.
     page.reload()
     expect(_rows(page)).to_have_count(1, timeout=30_000)
     expect(page.get_by_test_id("share-created")).to_have_count(0)
@@ -598,22 +832,69 @@ def test_choose_a_handle_and_mint_a_public_share_at_its_address(
     row.get_by_role("button", name="Copy").click()
     expect(row.get_by_role("button", name="Copied")).to_be_visible()
     assert page.evaluate("navigator.clipboard.readText()") == address
+    page.get_by_role("radio", name="public:").check()
+    expect(_handle_options(page)).to_have_text(["oleg", "tailarm", "games"])
+    expect(select).to_have_value("oleg")
 
 
-def test_a_held_slug_is_refused_until_its_share_is_revoked(
+def test_with_no_handle_the_form_reserves_one_before_a_public_mint(
+        page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane) -> None:
+    cp = fresh_control_plane
+    cp.wiring = _wiring()
+
+    page.goto(f"{frontend_url}/sharing")
+    expect(_handles_box(page).get_by_text("You have no handles yet.")).to_be_visible(timeout=30_000)
+    _pick_the_notebook(page)
+    page.locator('input[name="share-label"]').fill("Reachability")
+    page.get_by_role("radio", name="public:").check()
+
+    # No handle yet: the form shows the field itself, and the mint waits.
+    expect(page.locator('select[name="share-handle"]')).to_have_count(0)
+    new_handle = page.get_by_label("Reserve a handle for your public shares")
+    expect(new_handle).to_be_visible()
+    expect(page.get_by_test_id("share-public-preview")).to_have_text(f"{SHARE_URL}/p/<your handle>/reachability")
+    create = page.get_by_role("button", name="Create share")
+    expect(create).to_be_disabled()
+    expect(page.get_by_test_id("share-needs-handle")).to_have_text("Reserve a handle to create a public share.")
+
+    new_handle.fill("oleg")
+    page.get_by_test_id("share-form").get_by_role("button", name="Reserve", exact=True).click()
+    # One handle: no select, the handle named, and room for another.
+    one = page.get_by_test_id("share-one-handle")
+    expect(one).to_contain_text("Handle oleg")
+    expect(one.get_by_role("button", name="new handle…")).to_be_visible()
+    expect(page.locator('select[name="share-handle"]')).to_have_count(0)
+    expect(page.get_by_test_id("share-public-preview")).to_have_text(f"{SHARE_URL}/p/oleg/reachability")
+    expect(create).to_be_enabled()
+    expect(_handle_row(page, "oleg")).to_be_visible()
+    expect(page.get_by_test_id("handles-count")).to_have_text("1 of 3 handles reserved")
+
+    # "new handle…" opens the field again, and Cancel puts it away.
+    one.get_by_role("button", name="new handle…").click()
+    expect(create).to_be_disabled()
+    page.get_by_test_id("share-form").get_by_role("button", name="Cancel").click()
+    expect(page.get_by_label("New handle")).to_have_count(0)
+    expect(create).to_be_enabled()
+
+    create.click()
+    expect(page.get_by_test_id("share-created-text")).to_have_text(f"{SHARE_URL}/p/oleg/reachability")
+    assert [(body["handle"], body["slug"]) for body in cp.share_bodies] == [("oleg", "reachability")]
+
+
+def test_a_held_address_is_refused_until_its_share_is_revoked(
         page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane,
         expected_console_errors: list[str]) -> None:
     expected_console_errors.append("status of 422")
     cp = fresh_control_plane
     cp.wiring = _wiring()
-    cp.public_handle = "oleg"
-    cp.public_handle_fixed = True
+    cp.public_handles = [fake_cp.handle_row("oleg", last_used_at="2026-10-30T10:00:00+00:00"),
+                         fake_cp.handle_row("tailarm")]
     cp.shares = [
         _public_share("share-boards", label="boards", slug="reachability"),
         _public_share("share-old", label="old boards", slug="old", expires_at="2026-01-01T00:00:00+00:00"),
     ]
 
-    page.goto(f"{frontend_url}/shares")
+    page.goto(f"{frontend_url}/sharing")
     rows = _rows(page)
     expect(rows).to_have_count(2, timeout=30_000)
     held = rows.nth(0)
@@ -625,23 +906,34 @@ def test_a_held_slug_is_refused_until_its_share_is_revoked(
     _pick_the_notebook(page)
     page.locator('input[name="share-label"]').fill("Reachability")
     page.get_by_role("radio", name="public:").check()
-    expect(page.get_by_test_id("public-handle-state")).to_contain_text("Your public handle is oleg, fixed")
-    expect(page.get_by_label("Choose your public handle")).to_have_count(0)
+    select = page.locator('select[name="share-handle"]')
+    expect(select).to_have_value("oleg")
     expect(page.locator('input[name="share-slug"]')).to_have_value("reachability")
-    page.get_by_role("button", name="Create share").click()
+    create = page.get_by_role("button", name="Create share")
+    create.click()
 
     held_sentence = "Your public share boards is already at /p/oleg/reachability; revoke it first"
     expect(page.get_by_test_id("share-mint-error")).to_have_text(held_sentence)
     expect(page.get_by_test_id("share-created")).to_have_count(0)
     expect(rows).to_have_count(2)
 
-    # Revoked, the old share frees the address, and the same mint takes it.
+    # An address is held per handle: the same slug under tailarm is free.
+    select.select_option("tailarm")
+    create.click()
+    expect(page.get_by_test_id("share-created-text")).to_have_text(f"{SHARE_URL}/p/tailarm/reachability")
+    expect(page.get_by_test_id("share-mint-error")).to_have_count(0)
+    expect(rows).to_have_count(3)
+
+    # Revoked, the old share frees the address under oleg, and the same mint takes it.
+    held = rows.filter(has_text="boards").filter(has=page.get_by_text("/p/oleg/reachability")).first
     held.get_by_role("button", name="Revoke", exact=True).click()
     expect(held).to_contain_text("Its address stops answering")
     held.get_by_role("button", name="Yes, revoke").click()
     expect(held).to_have_attribute("data-status", "revoked")
-    page.get_by_role("button", name="Create share").click()
+    select.select_option("oleg")
+    create.click()
     expect(page.get_by_test_id("share-created-text")).to_have_text(f"{SHARE_URL}/p/oleg/reachability")
     expect(page.get_by_test_id("share-mint-error")).to_have_count(0)
-    expect(rows).to_have_count(3)
-    assert [body["slug"] for body in cp.share_bodies] == ["reachability", "reachability"]
+    expect(rows).to_have_count(4)
+    assert [(body["handle"], body["slug"]) for body in cp.share_bodies] == [
+        ("oleg", "reachability"), ("tailarm", "reachability"), ("oleg", "reachability")]

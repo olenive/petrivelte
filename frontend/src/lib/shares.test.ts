@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Share, ShareCreated, ShareNet, WiringNet } from './api';
+import type { PublicHandle, Share, ShareCreated, ShareNet, WiringNet } from './api';
 import {
 	BUNDLE_TOO_LARGE,
 	DEFAULT_EXPIRES_IN_DAYS,
@@ -14,10 +14,17 @@ import {
 	canRevoke,
 	createdShareText,
 	defaultExpiresInDays,
+	defaultHandle,
 	describeInputs,
+	describeLiveShares,
 	emptyShareForm,
 	formSlug,
 	formatBundleSize,
+	handleInUse,
+	handleInUseNote,
+	handlesReservedText,
+	hasRoomForHandle,
+	keepHandle,
 	netsByWorker,
 	parseNames,
 	pickRefusal,
@@ -25,6 +32,7 @@ import {
 	previewPublicPath,
 	publicAddress,
 	publicLink,
+	releaseWarning,
 	revokePrompt,
 	shareLink,
 	shareLinkBase,
@@ -63,6 +71,7 @@ function share(overrides: Partial<Share> = {}): Share {
 		audience: 'link',
 		member_email: null,
 		seat: null,
+		handle: null,
 		slug: null,
 		public_path: null,
 		prefix: 'abcdefgh',
@@ -279,6 +288,112 @@ describe('previewPublicPath', () => {
 	});
 });
 
+function handle(name: string, overrides: Partial<PublicHandle> = {}): PublicHandle {
+	return { handle: name, reserved_at: iso(NOW - 10 * DAY), last_used_at: null, live_shares: 0, ...overrides };
+}
+
+describe('defaultHandle', () => {
+	it('is the handle a public share was last minted under', () => {
+		const handles = [
+			handle('oleg', { last_used_at: iso(NOW - 3 * DAY) }),
+			handle('tailarm', { last_used_at: iso(NOW - DAY) }),
+			handle('games'),
+		];
+		expect(defaultHandle(handles)).toBe('tailarm');
+	});
+
+	it('compares instants, not text, so an offset that sorts first as text can still be the latest', () => {
+		// 11:00 at +02:00 is 09:00 UTC, before 10:00Z, though it sorts after it as text.
+		const handles = [
+			handle('oleg', { last_used_at: '2026-10-31T11:00:00+02:00' }),
+			handle('tailarm', { last_used_at: '2026-10-31T10:00:00Z' }),
+		];
+		expect(defaultHandle(handles)).toBe('tailarm');
+	});
+
+	it('falls back to the first, the oldest, when none has been used', () => {
+		expect(defaultHandle([handle('oleg'), handle('tailarm')])).toBe('oleg');
+	});
+
+	it('gives a tie to the older handle', () => {
+		const at = iso(NOW - DAY);
+		expect(defaultHandle([handle('oleg', { last_used_at: at }), handle('tailarm', { last_used_at: at })])).toBe('oleg');
+	});
+
+	it('is null when the owner holds none', () => {
+		expect(defaultHandle([])).toBeNull();
+	});
+});
+
+describe('keepHandle', () => {
+	const handles = [handle('oleg'), handle('tailarm', { last_used_at: iso(NOW - DAY) })];
+
+	it('keeps the chosen handle while the owner still holds it', () => {
+		expect(keepHandle('oleg', handles)).toBe('oleg');
+	});
+
+	it('falls to the default when the chosen handle is gone, renamed or released', () => {
+		expect(keepHandle('games', handles)).toBe('tailarm');
+	});
+
+	it('takes the default when none was chosen, and null when there is none', () => {
+		expect(keepHandle(null, handles)).toBe('tailarm');
+		expect(keepHandle(null, [])).toBeNull();
+		expect(keepHandle('oleg', [])).toBeNull();
+	});
+});
+
+describe('handlesReservedText', () => {
+	it('counts the handles held against the limit', () => {
+		expect(handlesReservedText(2, 3)).toBe('2 of 3 handles reserved');
+		expect(handlesReservedText(0, 3)).toBe('0 of 3 handles reserved');
+	});
+
+	it('speaks of one handle when the limit is one', () => {
+		expect(handlesReservedText(1, 1)).toBe('1 of 1 handle reserved');
+	});
+});
+
+describe('hasRoomForHandle', () => {
+	it('is true below the limit and false at or past it', () => {
+		expect(hasRoomForHandle(2, 3)).toBe(true);
+		expect(hasRoomForHandle(3, 3)).toBe(false);
+		expect(hasRoomForHandle(4, 3)).toBe(false);
+		expect(hasRoomForHandle(0, 0)).toBe(false);
+	});
+});
+
+describe('handleInUse', () => {
+	it('is in use while any unrevoked public share is minted under it', () => {
+		expect(handleInUse(handle('oleg', { live_shares: 1 }))).toBe(true);
+		expect(handleInUse(handle('oleg', { live_shares: 0 }))).toBe(false);
+	});
+});
+
+describe('describeLiveShares', () => {
+	it('counts a handle\'s live shares', () => {
+		expect(describeLiveShares(handle('oleg', { live_shares: 0 }))).toBe('no live shares');
+		expect(describeLiveShares(handle('oleg', { live_shares: 1 }))).toBe('1 live share');
+		expect(describeLiveShares(handle('oleg', { live_shares: 2 }))).toBe('2 live shares');
+	});
+});
+
+describe('handleInUseNote', () => {
+	it('says how many public shares to revoke first', () => {
+		expect(handleInUseNote(handle('oleg', { live_shares: 2 }))).toBe('revoke its 2 public shares first');
+		expect(handleInUseNote(handle('oleg', { live_shares: 1 }))).toBe('revoke its 1 public share first');
+	});
+});
+
+describe('releaseWarning', () => {
+	it('names the handle and says anyone may take it and publish at the old addresses', () => {
+		expect(releaseWarning('tailarm')).toBe(
+			'Release tailarm? It will no longer be reserved for you: anyone may take it, ' +
+				'and a new holder could publish at addresses you once used.',
+		);
+	});
+});
+
 describe('defaultExpiresInDays', () => {
 	it('is a year for a public share and 30 days for any other', () => {
 		expect(defaultExpiresInDays('public')).toBe(DEFAULT_PUBLIC_EXPIRES_IN_DAYS);
@@ -468,6 +583,7 @@ describe('emptyShareForm', () => {
 			maxViewers: 20,
 			inputsPerMinute: 60,
 			bundleId: null,
+			handle: null,
 			slug: '',
 			slugEdited: false,
 		});
@@ -563,9 +679,16 @@ describe('shareRequest', () => {
 		});
 	});
 
-	it('sends a public share\'s slug, suggested by the label', () => {
+	it('sends a public share\'s handle and its slug, suggested by the label', () => {
 		const request = shareRequest(
-			form({ label: 'Reachability boards', resourceKind: 'notebook', notebookId: 'nb-1', audience: 'public', expiresInDays: 365 }),
+			form({
+				label: 'Reachability boards',
+				resourceKind: 'notebook',
+				notebookId: 'nb-1',
+				audience: 'public',
+				handle: 'tailarm',
+				expiresInDays: 365,
+			}),
 		);
 		expect(request).toEqual({
 			label: 'Reachability boards',
@@ -573,6 +696,7 @@ describe('shareRequest', () => {
 			notebook_id: 'nb-1',
 			scope: 'read',
 			audience: 'public',
+			handle: 'tailarm',
 			slug: 'reachability-boards',
 			expires_in_days: 365,
 			publish_payloads: false,
@@ -586,9 +710,16 @@ describe('shareRequest', () => {
 		expect(request.slug).toBe(' Boards ');
 	});
 
-	it('leaves the slug off any share but a public one, which alone takes it', () => {
-		expect(shareRequest(form({ slug: 'boards', slugEdited: true }))).not.toHaveProperty('slug');
-		expect(shareRequest(form({ audience: 'named', slug: 'boards', slugEdited: true }))).not.toHaveProperty('slug');
+	it('sends a public share with no handle chosen as it stands, for the server to refuse', () => {
+		expect(shareRequest(form({ audience: 'public' }))).toMatchObject({ handle: null });
+	});
+
+	it('leaves the handle and slug off any share but a public one, which alone takes them', () => {
+		for (const audience of ['link', 'named'] as const) {
+			const request = shareRequest(form({ audience, handle: 'oleg', slug: 'boards', slugEdited: true }));
+			expect(request).not.toHaveProperty('handle');
+			expect(request).not.toHaveProperty('slug');
+		}
 	});
 
 	it('leaves an emptied number out, so the server\'s default applies', () => {

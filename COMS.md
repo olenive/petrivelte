@@ -200,20 +200,22 @@ A share opens a world of the owner's nets, or one notebook, to people outside
 the account. Viewers reach it through the public tier, a separate Fly app
 with its own origin; the owner mints, lists and revokes shares over three CP
 routes (`listShares`, `createShare` and `revokeShare` in `api.ts`), and
-chooses the handle public shares are served under over two more
-(`getPublicHandle` and `setPublicHandle`, "Public shares and the handle"
-below). The design is `dev-docs/SHARING.md` in the petritype-server
-repository.
+keeps the handles public shares are served under over four more
+(`listPublicHandles`, `reservePublicHandle`, `renamePublicHandle` and
+`releasePublicHandle`, "Public shares and their handles" below). The design
+is `dev-docs/SHARING.md` in the petritype-server repository.
 
 | Call | Answer |
 |---|---|
 | `GET /api/shares?net_id=` | The owner's shares, newest first, revoked and expired ones included, each with its `nets`. `net_id` (optional) narrows the list to the world shares holding that net; a malformed one is 422. |
 | `POST /api/shares` | 201 with the share and its `token`, the only time the secret is shown. |
 | `DELETE /api/shares/{id}` | `{status: "revoked"}`. The row stays listed with `revoked_at` set; revoking twice is fine; another owner's share is 404 `Share not found`. |
-| `GET /api/public-handle` | `{handle, fixed}`: the owner's public handle, null until one is chosen, and whether a public share has fixed it. |
-| `PUT /api/public-handle` | Body `{handle}`. 200 with `{handle, fixed}` as `GET` answers it, or a refusal below. |
+| `GET /api/public-handles` | `{handles, limit}`: the owner's handles, oldest first, and how many the account may hold. |
+| `POST /api/public-handles` | Body `{handle}`. 201 with the reserved handle, or a refusal below. |
+| `PUT /api/public-handles/{handle}` | Body `{handle}`, the new name. 200 with the renamed handle, or a refusal below. |
+| `DELETE /api/public-handles/{handle}` | 204 with no body, or a refusal below. |
 
-All five need the browser session: a request carrying a personal API token
+All seven need the browser session: a request carrying a personal API token
 is refused with 403 `This action needs a browser session, not an API token`,
 so a leaked script token cannot open the owner's nets to anyone.
 
@@ -234,10 +236,13 @@ The mint body (`ShareRequest`); a field left out takes the default shown:
   its nets.
 - `audience`: `link` (default), anyone holding the link; `named`, which
   needs a `member_email`; or `public`, anyone, at `/p/<handle>/<slug>`,
-  which needs a `slug` and scope `read`. Only a named share takes a
-  `member_email`.
+  which needs a `handle`, a `slug` and scope `read`. Only a named share
+  takes a `member_email`.
+- `handle`: the handle a public share is minted under, one the owner has
+  reserved, and only on a public share ("Public shares and their handles"
+  below).
 - `slug`: a public share's slug, the last part of its address, and only on a
-  public share ("Public shares and the handle" below).
+  public share.
 - `expires_in_days`: 1 to 365, counted from the mint; default 30, and 365 on
   a public share, since its address is meant to last.
 - `publish_payloads`: default false, which strips token values and log lines
@@ -257,8 +262,8 @@ field, a value of the wrong type) is FastAPI's own 422, a list of complaints;
 `createShare` throws the first, prefixed with the field it names. The server
 refuses a setting the share would never read rather than storing it, so a
 caller sends `seat` and the per-net lists only on a play share,
-`member_email` only on a named one, `slug` only on a public one and
-`bundle_id` only on a world. An owner holds at most 100 active shares
+`member_email` only on a named one, `handle` and `slug` only on a public
+one and `bundle_id` only on a world. An owner holds at most 100 active shares
 (the next is refused with `You already have 100 active shares; revoke one
 first`) and mints at most 10 a minute (429, which `createShare` words as
 such).
@@ -267,9 +272,11 @@ The share answer: `id`, `label`, `resource_kind` (`world` or `notebook`),
 `notebook_id` and `notebook_name` (its notebook's id and name, both set
 exactly on a notebook share and null on a world), `scope` (`read` or
 `play`), `audience` (`link`, `named` or `public`), `member_email` (set
-exactly on a named share), `seat` (set exactly on a play share), `slug` and
-`public_path` (set exactly on a public share, the path `/p/<handle>/<slug>`;
-both null otherwise), `prefix` (the 8 characters after `petri_share_`),
+exactly on a named share), `seat` (set exactly on a play share), `handle`,
+`slug` and `public_path` (set exactly on a public share and null otherwise:
+the handle it was minted under, which it keeps after that handle is renamed
+or released, its slug, and the path `/p/<handle>/<slug>` built from the
+two), `prefix` (the 8 characters after `petri_share_`),
 `publish_payloads`, `max_viewers`,
 `inputs_per_minute`, `created_at`, `expires_at`, `revoked_at`,
 `last_used_at` (written by the public tier at most once a minute),
@@ -282,7 +289,7 @@ reassignment split shows nets on more than one worker. A deleted net leaves
 its worlds; a deleted notebook deletes its shares. The `token` is
 `petri_share_` followed by 43 url-safe characters.
 
-The `/shares` page lists every share and mints and revokes them. It names a
+The Sharing page (`/sharing`) lists every share and mints and revokes them. It names a
 world share's nets by their own `instance_name`, a notebook share's notebook
 by its `notebook_name`, and shows the `bundle_label` of a share that serves a
 bundle, all from the share itself. Only the mint form's pickers read `GET
@@ -299,7 +306,7 @@ after the mint. When the value is empty, or is not an http(s) URL (https in
 production), it shows the token itself with a note that the public tier's
 address is not configured.
 
-### Public shares and the handle
+### Public shares and their handles
 
 A public share is for something meant to be found, such as a status board:
 it is read only and served at an address that reads well and survives a
@@ -308,44 +315,83 @@ re-mint, `${PUBLIC_SHARE_URL}${public_path}`, where `public_path` is
 carries a `token` for a public share, and `/s/<token>` reaches it too, but
 the page shows the address and never the token.
 
-The handle is the owner's, one for all their public shares: 3 to 30
-characters of lowercase letters, digits and single hyphens, neither first
-nor last (`^[a-z0-9]+(-[a-z0-9]+)*$`), and none of `api`, `s`, `p`,
-`health`, `admin`, `static`, `assets`, `www`, `petrify`, `petritype`,
-`share`, `shares`, `public`, `login`, `logout`, `docs`, `help`, `about`. It
-can change until the owner's first public share is minted under it; that
-mint fixes it. `PUT /api/public-handle` refuses, each with one sentence in
-`detail` that `setPublicHandle` throws as it stands: a malformed or reserved
-handle with 422; a handle another owner holds with 409 `That handle is
-taken`; and any change once fixed with 422 `Your public handle is fixed
-because a public share was minted under it`.
+A handle is a publishing space: an account reserves several ahead of any
+share, up to its limit, and mints each public share under one of them. A
+handle is 3 to 30 characters of lowercase letters, digits and single
+hyphens, neither first nor last (`^[a-z0-9]+(-[a-z0-9]+)*$`), none of `api`,
+`s`, `p`, `health`, `admin`, `static`, `assets`, `www`, `petrify`,
+`petritype`, `share`, `shares`, `sharing`, `public`, `login`, `logout`,
+`docs`, `help`, `about`, and unique across every account. The handle answer
+is `{handle, reserved_at, last_used_at, live_shares}`: `last_used_at` is set
+by each public mint under it, null until the first, and `live_shares`
+counts the unrevoked public shares under it, expired ones included. A
+handle is in use while `live_shares` is above 0. A reservation never
+expires; the limit, 3 unless the account has an override, is what keeps it
+small.
 
-A slug keeps the handle's pattern and is 1 to 60 characters. It is unique
-among the owner's unrevoked public shares, expired ones included. The mint
-of a public share refuses, with 422 and one sentence: an owner with no
-handle (`Choose a public handle first`), a slug another unrevoked public
-share holds (`Your public share <label> is already at /p/<handle>/<slug>;
-revoke it first`), a malformed slug, and scope `play`; it refuses a `slug`
-on a share of another audience too. Revoking the holder frees the slug, and
-a new share minted at it takes the address over, which is how a board moves
-to a new notebook without its address changing.
+Each refusal is one sentence in `detail`, which the handle calls throw as
+it stands:
 
-On the `/shares` page the audience fieldset offers `public` beside `link`
-and `named`. Choosing it sets the scope to read and disables play, moves an
-expiry still at 30 days to 365 (the field's placeholder and note follow the
-audience), and shows a slug field with the address previewed beneath it.
-The slug is suggested from the label (`slugFromLabel` in `shares.ts`:
-lowercased, each run of characters outside a to z and 0 to 9 one hyphen,
-hyphens trimmed from both ends, cut to 60 characters and trimmed again)
-until the owner edits it, and is sent as typed. The page reads the handle on
-load; while there is none, an inline `Choose your public handle` field saves
-it through `PUT` and the mint button waits for it. A handle not yet fixed
-shows with Change; a fixed one says so. The created panel shows a public
-share's address with Copy. The list shows each public share's address in
-full with Copy beside it, where other shares show their prefix, and offers
-Revoke on an expired public share as well as an active one, since an expired
-share still holds its slug until it is revoked. Without a usable
-`PUBLIC_SHARE_URL` the page shows `public_path` alone.
+- Reserving (`reservePublicHandle`): a malformed handle or a reserved word
+  with 422; one any account holds with 409 `That handle is taken; choose
+  another`; and an account at its limit with 422 `You already hold N
+  handles; release one first`.
+- Renaming (`renamePublicHandle`): a handle that is not the owner's with
+  404; one in use with 409 `Revoke the N public shares under <handle>
+  first`, since renaming would move every live address under it; and a new
+  name refused as reserving refuses it, save the limit. Renaming to the same
+  name answers 200 and changes nothing.
+- Releasing (`releasePublicHandle`): a handle that is not the owner's with
+  404, and one in use with the same 409, since another account could then
+  publish at its live addresses. A released handle is free for anyone, and
+  a new holder could publish at addresses the owner once used under it.
+
+Reserving and renaming are limited to 10 a minute, as minting is (429,
+which the calls word as such).
+
+A slug keeps the handle's pattern and is 1 to 60 characters. An address is
+held per handle: a slug is unique among the unrevoked public shares under
+that handle, expired ones included, so `oleg/boards` and `tailarm/boards`
+can both be live. The mint of a public share refuses, with 422 and one
+sentence: a handle the owner has not reserved (`Reserve the handle first`),
+an address an unrevoked public share holds (`Your public share <label> is
+already at /p/<handle>/<slug>; revoke it first`), a malformed slug, and
+scope `play`; it refuses a `handle` or `slug` on a share of another
+audience too. Revoking the holder frees the address, and a new share minted
+at it takes the address over, which is how a board moves to a new notebook
+without its address changing.
+
+On the Sharing page a Public handles box above the share form lists the
+owner's handles with each one's live shares and `2 of 3 handles reserved`
+from the list's `limit`, and reserves another from a field whose Reserve
+waits, with a note, once the account is at its limit. A handle not in use
+offers Rename, an inline edit with Save and Cancel, and Release, which asks
+first with the warning above (`releaseWarning` in `shares.ts`); a handle in
+use shows `revoke its N public shares first` in their place. A refusal shows
+in the row or under the field it came from, and the page reads the list
+again, so a count made stale by another tab catches up. Minting or revoking
+a public share reads the list again too.
+
+The audience fieldset offers `public` beside `link` and `named`. Choosing it
+sets the scope to read and disables play, moves an expiry still at 30 days
+to 365 (the field's placeholder and note follow the audience), and shows the
+handle, a slug field and the address previewed beneath them. With two
+handles or more the handle is a select, defaulting to the one with the
+latest `last_used_at`, compared as instants, else the oldest
+(`defaultHandle` in `shares.ts`); with one it is named without a select. A
+`new handle…` entry, in the select or beside the one handle, shows a field
+that reserves a handle on the spot and chooses it, while the account has
+room; with no handle the form shows that field at once. The mint button
+waits until a handle is reserved and chosen. The slug is suggested from the
+label (`slugFromLabel` in `shares.ts`: lowercased, each run of characters
+outside a to z and 0 to 9 one hyphen, hyphens trimmed from both ends, cut to
+60 characters and trimmed again) until the owner edits it, and is sent as
+typed. The created panel shows a public share's address with Copy. The list
+shows each public share's address in full with Copy beside it, where other
+shares show their prefix, and offers Revoke on an expired public share as
+well as an active one, since an expired share still holds its address until
+it is revoked. Without a usable `PUBLIC_SHARE_URL` the page shows
+`public_path` alone.
 
 ### Bundles
 
@@ -395,7 +441,7 @@ only the frontend's origin. Each refusal is one plain-English sentence in
 - 422 `You already have 20 bundles; delete one first`.
 - 429 past 5 uploads a minute, which `uploadBundle` words as such.
 
-The `/shares` page's Bundles section lists the owner's bundles (label, size
+The Sharing page's Bundles section lists the owner's bundles (label, size
 uncompressed in MB to one decimal, file count, upload date) with Delete
 behind an inline confirm, and uploads a zip under a label: the Upload button
 waits for a file, a file over 64 MiB is refused in the page with the

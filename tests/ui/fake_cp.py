@@ -94,25 +94,38 @@ holds a sentence answers 422 with that sentence as `detail` instead, and so
 does a mint naming a bundle `bundles` does not hold, with the server's
 sentence. A revoke sets `revoked_at` and keeps the row; an unknown id is 404
 `Share not found`. `wiring`, when a test sets it, is what `GET /api/wiring`
-answers. Every share carries `slug` and `public_path`, both null except on a
-public share.
+answers. Every share carries `handle`, `slug` and `public_path`, all three
+null except on a public share.
 
-Public shares and the handle (`GET` and `PUT /api/public-handle`):
-`public_handle` is the owner's handle, None until one is chosen, and
-`public_handle_fixed` whether a public share has fixed it. A PUT keeps its
-body in `handle_bodies` and is refused as the server refuses it: every PUT
-once the handle is fixed, with "Your public handle is fixed because a public
-share was minted under it"; a handle that breaks the pattern or the 3 to 30
-characters, or is reserved, with a sentence of this fake's own; and a handle
-in `taken_handles`, which other owners hold, with 409 "That handle is
-taken". A public mint is refused, each with one sentence, when it asks for
-play, when the owner has no handle ("Choose a public handle first"), when
-its slug breaks the slug's pattern or its 1 to 60 characters, and when an
-unrevoked public share of the owner's already holds the slug, expired or not
+Public shares and their handles (`GET` and `POST /api/public-handles`, `PUT`
+and `DELETE /api/public-handles/{handle}`): `public_handles` is the owner's
+handles, oldest first, each `{handle, reserved_at, last_used_at}` as
+`handle_row` makes it; every answer adds `live_shares`, the owner's
+unrevoked public shares under it, expired or not, and a handle is in use
+while that is above 0. `handle_limit` is how many the account may hold, 3 by
+default, which a test sets to try another limit; `taken_handles` are the
+handles other owners hold. Every body a reserve or rename sends is kept in
+`handle_bodies`. A reserve answers 201 with the handle, or is refused as the
+server refuses it: a handle that breaks the pattern or the 3 to 30
+characters, or is a reserved word, with 422 and a sentence of this fake's
+own; an account at its limit with 422 "You already hold N handles; release
+one first"; and a handle anyone holds, this owner included, with 409 "That
+handle is taken; choose another". A rename or release of a handle that is
+not the owner's is 404; a rename to the same name answers 200 and changes
+nothing; either on a handle in use is 409 "Revoke the N public shares under
+<handle> first"; a rename's new name meets the reserve's refusals except the
+limit, and a release answers 204 with no body. A renamed handle keeps its
+dates, and the shares minted under the old name keep it, as history.
+
+A public mint is refused, each with one sentence, when it asks for play,
+when its handle is not one the owner holds ("Reserve the handle first"),
+when its slug breaks the slug's pattern or its 1 to 60 characters, and when
+an unrevoked public share already holds that handle and slug, expired or not
 ("Your public share <label> is already at /p/<handle>/<slug>; revoke it
-first"); a slug on another audience's share is refused too. A public mint
-that succeeds lasts 365 days unless the body says otherwise, carries
-`public_path` `/p/<handle>/<slug>`, and fixes the handle.
+first"); a handle or slug on another audience's share is refused too. A
+public mint that succeeds lasts 365 days unless the body says otherwise,
+carries its `handle` and `public_path` `/p/<handle>/<slug>`, and sets the
+handle's `last_used_at`.
 
 Bundles (`GET`, `POST` and `DELETE /api/bundles`, as `bundles/routes.py`
 answers them): `bundles` is the owner's list, newest first. An upload's body
@@ -145,7 +158,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 STAMP = "2026-09-29T10:00:00+00:00"
-# The public tier's address the dev server is given, so the shares page makes links.
+# The public tier's address the dev server is given, so the Sharing page makes links.
 PUBLIC_SHARE_URL = "https://share.test"
 
 # A public handle and a public share's slug: lowercase letters and digits in
@@ -153,11 +166,12 @@ PUBLIC_SHARE_URL = "https://share.test"
 NAME_PATTERN = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 RESERVED_HANDLES = frozenset({
     "api", "s", "p", "health", "admin", "static", "assets", "www", "petrify", "petritype",
-    "share", "shares", "public", "login", "logout", "docs", "help", "about",
+    "share", "shares", "sharing", "public", "login", "logout", "docs", "help", "about",
 })
-HANDLE_FIXED = "Your public handle is fixed because a public share was minted under it"
-HANDLE_TAKEN = "That handle is taken"
-NO_HANDLE = "Choose a public handle first"
+# How many handles an account holds when nothing overrides it.
+DEFAULT_HANDLE_LIMIT = 3
+HANDLE_TAKEN = "That handle is taken; choose another"
+RESERVE_FIRST = "Reserve the handle first"
 
 
 @dataclass
@@ -221,10 +235,10 @@ class FakeControlPlane:
     shares: list[dict[str, Any]] = field(default_factory=list)
     share_bodies: list[Any] = field(default_factory=list)
     share_refusals: list[str] = field(default_factory=list)
-    # The owner's public handle, None until chosen; whether a public share
-    # has fixed it; the handles other owners hold; every PUT body.
-    public_handle: str | None = None
-    public_handle_fixed: bool = False
+    # The owner's public handles, oldest first; how many the account may
+    # hold; the handles other owners hold; every reserve and rename body.
+    public_handles: list[dict[str, Any]] = field(default_factory=list)
+    handle_limit: int = DEFAULT_HANDLE_LIMIT
     taken_handles: set[str] = field(default_factory=set)
     handle_bodies: list[Any] = field(default_factory=list)
     # The owner's bundles, newest first; every upload as it arrived; the
@@ -1061,12 +1075,17 @@ def share_row(share_id: str, *, label: str, **overrides: Any) -> dict[str, Any]:
     """A share as the owner's list carries it: a read link world, 30 days."""
     return {
         "id": share_id, "label": label, "resource_kind": "world", "notebook_id": None, "notebook_name": None,
-        "scope": "read", "audience": "link", "member_email": None, "seat": None, "slug": None,
-        "public_path": None, "prefix": share_id[:8].ljust(8, "x"), "publish_payloads": False, "max_viewers": 20,
+        "scope": "read", "audience": "link", "member_email": None, "seat": None, "handle": None,
+        "slug": None, "public_path": None, "prefix": share_id[:8].ljust(8, "x"), "publish_payloads": False, "max_viewers": 20,
         "inputs_per_minute": 60, "created_at": STAMP, "expires_at": "2099-01-01T00:00:00+00:00",
         "revoked_at": None, "last_used_at": None, "bundle_id": None, "bundle_label": None,
         "nets": [], **overrides,
     }
+
+
+def handle_row(handle: str, **overrides: Any) -> dict[str, Any]:
+    """One of the owner's public handles as the fake keeps it: never used."""
+    return {"handle": handle, "reserved_at": STAMP, "last_used_at": None, **overrides}
 
 
 def bundle_row(bundle_id: str, *, label: str, **overrides: Any) -> dict[str, Any]:
@@ -1098,6 +1117,7 @@ def _mint(cp: FakeControlPlane, body: dict[str, Any]) -> dict[str, Any]:
     """
     n = len(cp.share_bodies) - 1
     now = time.time()
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now))
     public = body.get("audience") == "public"
     days = body.get("expires_in_days", 365 if public else 30)
     bundle = next((b for b in cp.bundles if b["id"] == body.get("bundle_id")), None)
@@ -1111,12 +1131,13 @@ def _mint(cp: FakeControlPlane, body: dict[str, Any]) -> dict[str, Any]:
         audience=body.get("audience", "link"),
         member_email=body.get("member_email"),
         seat=body.get("seat"),
+        handle=body.get("handle"),
         slug=body.get("slug"),
-        public_path=f"/p/{cp.public_handle}/{body['slug']}" if public else None,
+        public_path=f"/p/{body['handle']}/{body['slug']}" if public else None,
         publish_payloads=body.get("publish_payloads", False),
         max_viewers=body.get("max_viewers", 20),
         inputs_per_minute=body.get("inputs_per_minute", 60),
-        created_at=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)),
+        created_at=stamp,
         expires_at=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now + days * 86400)),
         bundle_id=bundle and bundle["id"],
         bundle_label=bundle and bundle["label"],
@@ -1128,7 +1149,7 @@ def _mint(cp: FakeControlPlane, body: dict[str, Any]) -> dict[str, Any]:
     )
     cp.shares.insert(0, share)
     if public:
-        cp.public_handle_fixed = True
+        _held(cp, body["handle"])["last_used_at"] = stamp
     return {**share, "token": f"petri_share_{n:04d}" + "A" * 39}
 
 
@@ -1138,53 +1159,120 @@ def _named(text: Any, longest: int, shortest: int) -> bool:
             and NAME_PATTERN.fullmatch(text) is not None)
 
 
-def _handle_refusal(cp: FakeControlPlane, handle: Any) -> tuple[int, str] | None:
-    """Why a PUT of this handle is refused, as (status, sentence), or None."""
-    if cp.public_handle_fixed:
-        return 422, HANDLE_FIXED
+def _held(cp: FakeControlPlane, handle: Any) -> dict[str, Any] | None:
+    """The owner's handle by that name, or None."""
+    return next((held for held in cp.public_handles if held["handle"] == handle), None)
+
+
+def _plural(count: int, noun: str) -> str:
+    """The noun as the server counts it: one share, two shares, zero shares."""
+    return noun if count == 1 else noun + "s"
+
+
+def _live_shares(cp: FakeControlPlane, handle: str) -> int:
+    """The unrevoked public shares under a handle, expired ones included."""
+    return sum(1 for share in cp.shares
+               if share["audience"] == "public" and share["handle"] == handle and share["revoked_at"] is None)
+
+
+def _handle_answer(cp: FakeControlPlane, held: dict[str, Any]) -> dict[str, Any]:
+    return {**held, "live_shares": _live_shares(cp, held["handle"])}
+
+
+def _name_refusal(handle: Any) -> tuple[int, str] | None:
+    """Why this name can be no handle at all, as (status, sentence), or None."""
     if not _named(handle, 30, 3):
         return 422, ("A public handle is 3 to 30 lowercase letters, digits and single hyphens, "
                      "with a letter or digit first and last")
     if handle in RESERVED_HANDLES:
         return 422, f"The handle {handle} is reserved; choose another"
-    if handle in cp.taken_handles:
+    return None
+
+
+def _taken_refusal(cp: FakeControlPlane, handle: str) -> tuple[int, str] | None:
+    """A handle another owner holds, or this one, is taken."""
+    if handle in cp.taken_handles or _held(cp, handle) is not None:
         return 409, HANDLE_TAKEN
     return None
 
 
+def _in_use_refusal(cp: FakeControlPlane, handle: str) -> tuple[int, str] | None:
+    live = _live_shares(cp, handle)
+    return (409, f"Revoke the {live} public {_plural(live, 'share')} under {handle} first") if live > 0 else None
+
+
+def _reserve(cp: FakeControlPlane, body: Any) -> tuple[int, Any]:
+    cp.handle_bodies.append(body)
+    handle = body.get("handle") if isinstance(body, dict) else None
+    at_limit = ((422, f"You already hold {cp.handle_limit} {_plural(cp.handle_limit, 'handle')}; release one first")
+                if len(cp.public_handles) >= cp.handle_limit else None)
+    refusal = _name_refusal(handle) or at_limit or _taken_refusal(cp, handle)
+    if refusal is not None:
+        return refusal[0], {"detail": refusal[1]}
+    held = handle_row(handle, reserved_at=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()))
+    cp.public_handles.append(held)
+    return 201, _handle_answer(cp, held)
+
+
+def _rename_or_release(cp: FakeControlPlane, method: str, handle: str, body: Any) -> tuple[int, Any]:
+    held = _held(cp, handle)
+    if held is None:
+        return 404, {"detail": "Public handle not found"}
+    renamed = None
+    if method == "PUT":
+        cp.handle_bodies.append(body)
+        renamed = body.get("handle") if isinstance(body, dict) else None
+        if renamed == handle:
+            return 200, _handle_answer(cp, held)
+    refusal = _in_use_refusal(cp, handle)
+    if refusal is None and method == "PUT":
+        refusal = _name_refusal(renamed) or _taken_refusal(cp, renamed)
+    if refusal is not None:
+        return refusal[0], {"detail": refusal[1]}
+    if method == "DELETE":
+        cp.public_handles.remove(held)
+        return 204, None
+    held["handle"] = renamed
+    return 200, _handle_answer(cp, held)
+
+
 def _public_refusal(cp: FakeControlPlane, body: dict[str, Any]) -> str | None:
-    """Why a mint is refused over its audience and slug, or None."""
+    """Why a mint is refused over its audience, handle and slug, or None."""
     if body.get("audience") != "public":
+        if "handle" in body:
+            return "Only a public share takes a handle"
         return "Only a public share takes a slug" if "slug" in body else None
     if body.get("scope", "read") != "read":
         return "A public share is read only"
-    if cp.public_handle is None:
-        return NO_HANDLE
+    handle = body.get("handle")
+    if _held(cp, handle) is None:
+        return RESERVE_FIRST
     slug = body.get("slug")
     if not _named(slug, 60, 1):
         return ("A public share's slug is 1 to 60 lowercase letters, digits and single hyphens, "
                 "with a letter or digit first and last")
-    holder = next((share for share in cp.shares if share["audience"] == "public"
+    holder = next((share for share in cp.shares if share["audience"] == "public" and share["handle"] == handle
                    and share["slug"] == slug and share["revoked_at"] is None), None)
     if holder is not None:
-        return (f"Your public share {holder['label']} is already at /p/{cp.public_handle}/{slug}; "
+        return (f"Your public share {holder['label']} is already at /p/{handle}/{slug}; "
                 "revoke it first")
     return None
 
 
 def _share_answer(cp: FakeControlPlane, method: str, path: str, body: Any) -> tuple[int, Any] | None:
-    """The share and handle routes' status and answer, or None for a path that is not one."""
+    """The share and handle routes' status and answer, or None for a path that is not one.
+
+    A 204 answers None, sent with no body.
+    """
     with cp.lock:
-        if path == "/api/public-handle" and method == "GET":
-            return 200, {"handle": cp.public_handle, "fixed": cp.public_handle_fixed}
-        if path == "/api/public-handle" and method == "PUT":
-            cp.handle_bodies.append(body)
-            handle = body.get("handle") if isinstance(body, dict) else None
-            refusal = _handle_refusal(cp, handle)
-            if refusal is not None:
-                return refusal[0], {"detail": refusal[1]}
-            cp.public_handle = handle
-            return 200, {"handle": cp.public_handle, "fixed": cp.public_handle_fixed}
+        if path == "/api/public-handles" and method == "GET":
+            return 200, {"handles": [_handle_answer(cp, held) for held in cp.public_handles],
+                         "limit": cp.handle_limit}
+        if path == "/api/public-handles" and method == "POST":
+            return _reserve(cp, body)
+        match = re.fullmatch(r"/api/public-handles/([^/]+)", path)
+        if match and method in ("PUT", "DELETE"):
+            return _rename_or_release(cp, method, unquote(match.group(1)), body)
         if path == "/api/shares" and method == "GET":
             return 200, cp.shares
         if path == "/api/shares" and method == "POST":
@@ -1449,6 +1537,12 @@ def _handler_for(cp: FakeControlPlane) -> type[BaseHTTPRequestHandler]:
             self._send_json(answer)
 
         def _send_json(self, payload: Any, status: int = 200) -> None:
+            if status == 204:
+                # No content: no body, and so no length either.
+                self.send_response(204)
+                self._cors()
+                self.end_headers()
+                return
             body = json.dumps(payload).encode()
             self.send_response(status)
             self._cors()
