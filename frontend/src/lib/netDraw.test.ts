@@ -449,6 +449,210 @@ describe('drawNet: fit', () => {
 	});
 });
 
+describe('drawNet: fit floor', () => {
+	/** One transition feeding forty-five places in a single rank, the shape
+	 *  of the reachability monitor: fitted whole into 800 by 500 it would be
+	 *  drawn at under a tenth of its size. */
+	const wide = (): NetState => {
+		const state = fixture();
+		const probes = Array.from({ length: 45 }, (_, i) => `Probe${String(i + 1).padStart(2, '0')}`);
+		state.topology = {
+			places: [{ name: 'Targets', serializable: true }, ...probes.map((name) => ({ name, serializable: true }))],
+			transitions: [{ name: 'Measure' }],
+			edges: [
+				{ place: 'Targets', transition: 'Measure', direction: 'in', kind: 'take' },
+				...probes.map((name) => ({ place: name, transition: 'Measure', direction: 'out' as const })),
+			],
+		};
+		state.transitions = { Measure: { enabled: true, fireable: false, in_flight: false } };
+		state.marking = { places: { Targets: { count: 1, tokens: [{ id: '1', label: 'target' }] } } };
+		return state;
+	};
+
+	const doubleClick = (target: Element = svg): MouseEvent => {
+		const event = new MouseEvent('dblclick', { bubbles: true, cancelable: true, detail: 2 });
+		target.dispatchEvent(event);
+		return event;
+	};
+
+	/** Where the extent's centre lands, through the root transform. */
+	const extentCentreDrawn = (extent: Extent) => {
+		const t = transformOf(svg);
+		return { x: t.x + t.k * (extent.minX + extent.maxX) / 2, y: t.y + t.k * (extent.minY + extent.maxY) / 2 };
+	};
+
+	/** The frame's centre in user units: the view box's middle. */
+	const frameCentre = () => {
+		const [x, y, width, height] = (svg.getAttribute('viewBox') ?? '').split(' ').map(Number);
+		return { x: x + width / 2, y: y + height / 2 };
+	};
+
+	/** The transform the same state, options and frame get from `fit` alone, drawn on an svg of its own. */
+	const fitAlone = (state: NetState, options: DrawOptions = {}): string | null => {
+		const other = newSvg();
+		drawNet(other, state, { ...options, fit: true, fitFloor: undefined });
+		return rootTransform(other);
+	};
+
+	/** A marking-only change of the wide net: one more token on a probe. */
+	const marked = (): NetState => {
+		const next = wide();
+		next.marking_version = 8;
+		next.marking.places.Probe07 = { count: 1, tokens: [{ id: '2', label: 'loss' }] };
+		return next;
+	};
+
+	/** The wide net with a forty-sixth probe: a changed topology, so a re-layout. */
+	const grown = (): NetState => {
+		const next = wide();
+		next.topology.places.push({ name: 'Probe46', serializable: true });
+		next.topology.edges.push({ place: 'Probe46', transition: 'Measure', direction: 'out' });
+		return next;
+	};
+
+	it('holds a net that would fit below the floor at the floor\'s scale, its middle at the frame\'s middle', () => {
+		draw(wide(), { fit: true, fitFloor: 0.5 });
+		const extent = lastExtent();
+		expect(fittedScale(extent, 800, 500)).toBeLessThan(0.1);
+		expect(transformOf(svg).k).toBe(0.5);
+		const drawn = extentCentreDrawn(extent);
+		const centre = frameCentre();
+		expect(drawn.x).toBeCloseTo(centre.x, 9);
+		expect(drawn.y).toBeCloseTo(centre.y, 9);
+	});
+
+	it('changes nothing when the fit is already at or above the floor, or the floor is at or below 0', () => {
+		draw(fixture(), { fit: true, fitFloor: 0.5 });
+		expect(fittedScale(lastExtent(), 800, 500)).toBeGreaterThan(0.5);
+		expect(rootTransform(svg)).toBe(fitAlone(fixture()));
+
+		for (const fitFloor of [0, -1, Number.NaN]) {
+			releaseNet(svg);
+			draw(wide(), { fit: true, fitFloor });
+			expect(rootTransform(svg), String(fitFloor)).toBe(fitAlone(wide()));
+		}
+	});
+
+	it('counts a floor above 1 as 1: the net at its own size, centred, never scaled up', () => {
+		draw(wide(), { fit: true, fitFloor: 3 });
+		expect(transformOf(svg).k).toBe(1);
+		const drawn = extentCentreDrawn(lastExtent());
+		expect(drawn.x).toBeCloseTo(frameCentre().x, 9);
+		expect(drawn.y).toBeCloseTo(frameCentre().y, 9);
+	});
+
+	it('leaves the floor alone without fit', () => {
+		draw(wide(), { fitFloor: 0.5 });
+		expect(rootTransform(svg)).toBe('translate(0 0) scale(1)');
+	});
+
+	it('toggles by double-click to the whole net and back, cancelling the browser\'s own response', () => {
+		draw(wide(), { fit: true, fitFloor: 0.5 });
+		const floored = rootTransform(svg);
+		const whole = fitAlone(wide());
+		expect(whole).not.toBe(floored);
+
+		const first = doubleClick();
+		expect(first.defaultPrevented).toBe(true);
+		expect(rootTransform(svg)).toBe(whole);
+		expect(transformOf(svg).k).toBeCloseTo(fittedScale(lastExtent(), 800, 500), 12);
+		doubleClick();
+		expect(rootTransform(svg)).toBe(floored);
+		doubleClick();
+		expect(rootTransform(svg)).toBe(whole);
+	});
+
+	it('toggles to the other view from wherever the viewer panned or zoomed to', () => {
+		draw(wide(), { fit: true, fitFloor: 0.5 });
+		const floored = rootTransform(svg);
+		svg.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, cancelable: true }));
+		doubleClick();
+		expect(rootTransform(svg)).toBe(fitAlone(wide()));
+		svg.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, cancelable: true }));
+		doubleClick();
+		expect(rootTransform(svg)).toBe(floored);
+	});
+
+	it('keeps the toggled view across a marking-only redraw, and the next double-click goes back', () => {
+		draw(wide(), { fit: true, fitFloor: 0.5 });
+		const floored = rootTransform(svg);
+		doubleClick();
+		const whole = rootTransform(svg);
+		expect(draw(marked(), { fit: true, fitFloor: 0.5 }).relaidOut).toBe(false);
+		expect(rootTransform(svg)).toBe(whole);
+		doubleClick();
+		expect(rootTransform(svg)).toBe(floored);
+	});
+
+	it('returns to the floored view after a re-layout, and the next double-click shows the whole net', () => {
+		draw(wide(), { fit: true, fitFloor: 0.5 });
+		doubleClick();
+		expect(transformOf(svg).k).toBeLessThan(0.5);
+		expect(draw(grown(), { fit: true, fitFloor: 0.5 }).relaidOut).toBe(true);
+		expect(transformOf(svg).k).toBe(0.5);
+		const drawn = extentCentreDrawn(lastExtent());
+		expect(drawn.x).toBeCloseTo(frameCentre().x, 9);
+		expect(drawn.y).toBeCloseTo(frameCentre().y, 9);
+		doubleClick();
+		expect(rootTransform(svg)).toBe(fitAlone(grown()));
+	});
+
+	it('returns a net that already fits to its fitted view by double-click, after a wheel or a drag', () => {
+		draw(fixture(), { fit: true, fitFloor: 0.5 });
+		const fitted = rootTransform(svg);
+		svg.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, cancelable: true }));
+		expect(rootTransform(svg)).not.toBe(fitted);
+		expect(doubleClick().defaultPrevented).toBe(true);
+		expect(rootTransform(svg)).toBe(fitted);
+
+		svg.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: 0, clientY: 0, bubbles: true }));
+		document.dispatchEvent(new PointerEvent('pointermove', { clientX: 25, clientY: -15, bubbles: true }));
+		document.dispatchEvent(new PointerEvent('pointerup', { button: 0, bubbles: true }));
+		expect(rootTransform(svg)).not.toBe(fitted);
+		doubleClick();
+		expect(rootTransform(svg)).toBe(fitted);
+	});
+
+	it('cancels the second press of a double-click on a fitted drawing, where the browser would select a word', () => {
+		const press = (detail: number) => {
+			const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true, detail });
+			one(svg, `${transition('Measure')} text`).dispatchEvent(event);
+			return event.defaultPrevented;
+		};
+		draw(wide(), { fit: true, fitFloor: 0.5 });
+		expect([press(1), press(2), press(3)]).toEqual([false, true, true]);
+		draw(wide());
+		expect(press(2)).toBe(false);
+	});
+
+	it('hears a double-click on a node inside the drawing', () => {
+		draw(wide(), { fit: true, fitFloor: 0.5 });
+		doubleClick(one(svg, `${transition('Measure')} rect`));
+		expect(rootTransform(svg)).toBe(fitAlone(wide()));
+	});
+
+	it('does nothing on a double-click without fit, or when not interactive', () => {
+		draw(wide());
+		const event = doubleClick();
+		expect(event.defaultPrevented).toBe(false);
+		expect(rootTransform(svg)).toBe('translate(0 0) scale(1)');
+
+		releaseNet(svg);
+		draw(wide(), { fit: true, fitFloor: 0.5, interactive: false });
+		const floored = rootTransform(svg);
+		expect(doubleClick().defaultPrevented).toBe(false);
+		expect(rootTransform(svg)).toBe(floored);
+	});
+
+	it('stops hearing the double-click once released', () => {
+		draw(wide(), { fit: true, fitFloor: 0.5 });
+		const floored = rootTransform(svg);
+		releaseNet(svg);
+		expect(doubleClick().defaultPrevented).toBe(false);
+		expect(rootTransform(svg)).toBe(floored);
+	});
+});
+
 describe('releaseNet', () => {
 	it('forgets the element: its listeners go, and the next draw starts over with one drawing', () => {
 		draw(fixture());

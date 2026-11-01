@@ -121,7 +121,16 @@ The options:
 - `fit`: start with the whole net in view, scaled down (never up) to fit
   the frame with the layout's margin and centred, after the first draw and
   each re-layout; a redraw keeps the viewer's pan and zoom. Off by default,
-  which shows the net at the app's size from its first rank.
+  which shows the net at the app's size from its first rank. With
+  `interactive`, a double-click returns to where the drawing started from
+  wherever the viewer panned or zoomed to, or with `fitFloor` in force
+  toggles between that start and the whole net. A redraw of the marking
+  keeps whichever view the viewer is in; a re-layout starts over.
+- `fitFloor`: with `fit`, the smallest scale the fit may choose. A net that
+  would need less, such as the reachability monitor with one rank of about
+  forty-five places, starts at this scale centred on its middle, for the
+  viewer to pan. 0 by default, which is no floor; a value above 1 counts as
+  1.
 
 The module writes SVG presentation attributes and classes (`net-place`,
 `net-transition`, `net-transition-fireable`, `net-arc`, `net-token`,
