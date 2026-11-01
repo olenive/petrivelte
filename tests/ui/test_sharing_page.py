@@ -4,8 +4,10 @@ A world is one or more nets on one worker, so the net picker groups the
 owner's nets by worker and, once one is picked, leaves only that worker's
 nets selectable; a net on no worker never is. Past that the form judges
 nothing: it sends what the owner typed and shows the server's sentence when
-the mint is refused. A minted share's link, the public tier's address, `/s/`
-and the one-time token, is shown once. Revoked and expired shares stay in the
+the mint is refused. Ticking "Publish payloads" on a link or public share
+warns, under the checkbox, who will see token values; a named share adds no
+warning. A minted share's link, the public tier's address, `/s/` and the
+one-time token, is shown once. Revoked and expired shares stay in the
 list, muted and without a Revoke button. A share names its nets, or its
 notebook, by the names it carries itself.
 
@@ -243,6 +245,42 @@ def test_mint_a_notebook_share(
         "inputs_per_minute": 60,
     }]
     expect(_rows(page).first.get_by_test_id("share-resource")).to_have_text("notebook: daily plots")
+
+
+def test_publishing_payloads_warns_who_will_see_token_values(
+        page: Page, frontend_url: str, fresh_control_plane: fake_cp.FakeControlPlane) -> None:
+    cp = fresh_control_plane
+    cp.wiring = _wiring()
+    dialogs: list[str] = []
+    page.on("dialog", lambda dialog: (dialogs.append(dialog.message), dialog.dismiss()))
+
+    page.goto(f"{frontend_url}/sharing")
+    expect(page.get_by_text("You have no shares.")).to_be_visible(timeout=30_000)
+    publish = page.locator('input[name="share-publish-payloads"]')
+    warning = page.get_by_test_id("share-payload-warning")
+    expect(page.get_by_role("radio", name="link:")).to_be_checked()
+    expect(warning).to_have_count(0)
+
+    publish.check()
+    expect(warning).to_have_text("Token values will be visible to anyone who has the link.")
+    # The line sits in a polite live region, so a screen reader hears it appear and change.
+    expect(warning.locator("xpath=..")).to_have_attribute("aria-live", "polite")
+
+    page.get_by_role("radio", name="public:").check()
+    expect(warning).to_have_text("Token values will be visible to anyone, at a public address.")
+
+    # A named share's one viewer is chosen by the owner, so it adds no warning.
+    page.get_by_role("radio", name="named:").check()
+    expect(warning).to_have_count(0)
+
+    page.get_by_role("radio", name="public:").check()
+    expect(warning).to_be_visible()
+    publish.uncheck()
+    expect(warning).to_have_count(0)
+
+    # A warning, not a question: no dialog, and nothing sent.
+    assert dialogs == []
+    assert cp.share_bodies == []
 
 
 def test_the_list_names_a_notebook_share_from_the_share_itself(

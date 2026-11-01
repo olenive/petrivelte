@@ -27,6 +27,7 @@ import {
 	keepHandle,
 	netsByWorker,
 	parseNames,
+	payloadWarning,
 	pickRefusal,
 	pickedWorkers,
 	previewPublicPath,
@@ -440,6 +441,30 @@ describe('withAudience', () => {
 	it('keeps the rest of the form as it was', () => {
 		const before = form({ label: 'boards', slug: 'b', slugEdited: true, memberEmail: 'ann@example.com' });
 		expect(withAudience(before, 'public')).toEqual({ ...before, audience: 'public', expiresInDays: 365 });
+	});
+});
+
+describe('payloadWarning', () => {
+	it('warns a public share that anyone at its address sees token values', () => {
+		expect(payloadWarning(form({ audience: 'public', publishPayloads: true }))).toBe(
+			'Token values will be visible to anyone, at a public address.',
+		);
+	});
+
+	it('warns a link share that anyone who has the link sees token values', () => {
+		expect(payloadWarning(form({ audience: 'link', publishPayloads: true }))).toBe(
+			'Token values will be visible to anyone who has the link.',
+		);
+	});
+
+	it('says nothing more for a named share, whose one viewer the owner chooses', () => {
+		expect(payloadWarning(form({ audience: 'named', publishPayloads: true }))).toBeNull();
+	});
+
+	it('says nothing while payloads are not published, whatever the audience', () => {
+		expect(payloadWarning(form({ audience: 'public', publishPayloads: false }))).toBeNull();
+		expect(payloadWarning(form({ audience: 'link', publishPayloads: false }))).toBeNull();
+		expect(payloadWarning(form({ audience: 'named', publishPayloads: false }))).toBeNull();
 	});
 });
 
