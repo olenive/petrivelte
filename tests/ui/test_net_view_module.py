@@ -6,14 +6,18 @@ a classic `<script nonce src>`. This test builds the IIFE from
 `frontend/vite.lib.config.ts` into a temporary directory, serves it beside a
 bare page from a small local server that sends that policy with a fresh
 nonce, and has the page draw the fixture net (`frontend/src/lib/netDraw.fixture.json`)
-three times: as a share that publishes payloads sends it, as one that does
-not, and fitted whole into a frame shorter than the net. The drawing must
-appear, redraw a changed count in place, fit, zoom by wheel and pan by drag,
-and the page must record no console error and no policy violation. A last test proves the policy is in force: the page refuses an
+four times: as a share that publishes payloads sends it, as one that does
+not, fitted whole into a frame shorter than the net, and fitted into that
+frame with a floor on the scale above what the whole net needs. The drawing
+must appear, redraw a changed count in place, fit, hold the floor, toggle
+by double-click between the floored view and the whole net, zoom by wheel
+and pan by drag, and the page must record no console error and no policy
+violation. A last test proves the policy is in force: the page refuses an
 inline style.
 """
 
 import json
+import re
 import secrets
 import shutil
 import subprocess
@@ -75,12 +79,14 @@ def page_html(nonce: str, full: dict, bare: dict) -> str:
 <svg id="full" width="800" height="500"></svg>
 <svg id="bare" width="800" height="500"></svg>
 <svg id="fit" width="600" height="300"></svg>
+<svg id="floor" width="600" height="300"></svg>
 <script nonce="{nonce}" src="/{SCRIPT}"></script>
 <script nonce="{nonce}">
   window.summaries = {{
     full: petriNetView.drawNet(document.getElementById('full'), {_as_script(full)}),
     bare: petriNetView.drawNet(document.getElementById('bare'), {_as_script(bare)}),
     fit: petriNetView.drawNet(document.getElementById('fit'), {_as_script(full)}, {{ fit: true }}),
+    floor: petriNetView.drawNet(document.getElementById('floor'), {_as_script(full)}, {{ fit: true, fitFloor: 0.5 }}),
   }};
 </script>
 </body>
@@ -172,6 +178,12 @@ def bare_page(browser: Browser, site: str) -> Iterator[tuple[Page, list[str]]]:
 
 def _transform(page: Page, svg: str) -> str:
     return page.get_attribute(f"#{svg} g.net-root", "transform") or ""
+
+
+def _scale(page: Page, svg: str) -> float:
+    match = re.search(r" scale\(([^)]+)\)$", _transform(page, svg))
+    assert match is not None, _transform(page, svg)
+    return float(match.group(1))
 
 
 def _count(page: Page, svg: str, place: str) -> str | None:
@@ -267,6 +279,50 @@ def test_a_fitted_net_starts_whole_in_its_frame_and_still_zooms(bare_page: tuple
     page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
     page.mouse.wheel(0, -120)
     page.wait_for_function(f"() => document.querySelector('#fit g.net-root').getAttribute('transform') !== {json.dumps(fitted)}")
+    assert page.evaluate("() => window.violations") == []
+    assert problems == []
+
+
+def test_a_floored_fit_starts_at_half_size_and_a_double_click_toggles_the_whole_net(
+        bare_page: tuple[Page, list[str]]) -> None:
+    """The fixture fits whole into 600 by 300 only at a third of its size. With
+    the floor at a half it starts at half size; a double-click shows the whole
+    net, as the drawing fitted without a floor beside it does, and a second
+    one goes back to half size, selecting nothing on the way."""
+    page, problems = bare_page
+    assert page.evaluate("() => window.summaries.floor") == \
+        {"places": 5, "transitions": 4, "edges": 11, "relaidOut": True}
+    floored = _transform(page, "floor")
+    assert _scale(page, "floor") == 0.5
+    whole = _transform(page, "fit")
+    assert _scale(page, "fit") < 0.5
+
+    # The first double-click lands on a token label in view, where the
+    # browser would otherwise select a word.
+    floor = page.locator("#floor")
+    floor.scroll_into_view_if_needed()
+    label = page.evaluate("""() => {
+        const svg = document.getElementById('floor');
+        const frame = svg.getBoundingClientRect();
+        for (const text of svg.querySelectorAll('.net-token-label:not(.net-outline)')) {
+            const r = text.getBoundingClientRect();
+            if (r.width > 10 && r.left > frame.left && r.right < frame.right && r.top > frame.top && r.bottom < frame.bottom)
+                return {x: r.left + r.width / 2, y: r.top + r.height / 2};
+        }
+        return null;
+    }""")
+    assert label is not None
+    page.mouse.dblclick(label["x"], label["y"])
+    page.wait_for_function(f"() => document.querySelector('#floor g.net-root').getAttribute('transform') !== {json.dumps(floored)}")
+    assert _transform(page, "floor") == whole
+    assert _scale(page, "floor") < 0.5
+    assert page.evaluate("() => window.getSelection().toString()") == ""
+
+    floor.dblclick()
+    page.wait_for_function(f"() => document.querySelector('#floor g.net-root').getAttribute('transform') !== {json.dumps(whole)}")
+    assert _transform(page, "floor") == floored
+    assert _scale(page, "floor") == 0.5
+    assert page.evaluate("() => window.getSelection().toString()") == ""
     assert page.evaluate("() => window.violations") == []
     assert problems == []
 

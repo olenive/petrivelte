@@ -72,6 +72,12 @@ export function zoomAt(t: ViewTransform, p: Point, factor: number): ViewTransfor
 	return { x: p.x - (p.x - t.x) * factor, y: p.y - (p.y - t.y) * factor, k: t.k * factor };
 }
 
+/** The extent at scale `k`, its centre at the view's centre. */
+function centredTransform(extent: Extent, view: ViewBox, k: number): ViewTransform {
+	const centre = { x: (extent.minX + extent.maxX) / 2, y: (extent.minY + extent.maxY) / 2 };
+	return { x: view.x + view.width / 2 - k * centre.x, y: view.y + view.height / 2 - k * centre.y, k };
+}
+
 /**
  * The transform that shows the whole extent in the view, centred: scaled
  * down, never up, so the extent fits with `margin` on every side, as
@@ -87,9 +93,27 @@ export function fitTransform(extent: Extent | null, view: ViewBox, margin = FRAM
 			(view.height - 2 * inset) / Math.max(extent.maxY - extent.minY, 1),
 		);
 	const withMargin = scale(margin);
-	const k = withMargin > 0 ? withMargin : scale(0);
-	const centre = { x: (extent.minX + extent.maxX) / 2, y: (extent.minY + extent.maxY) / 2 };
-	return { x: view.x + view.width / 2 - k * centre.x, y: view.y + view.height / 2 - k * centre.y, k };
+	return centredTransform(extent, view, withMargin > 0 ? withMargin : scale(0));
+}
+
+/** The floor a `fitFloor` option sets on the fit's scale: 0, no floor, for
+ *  none, a value at or below 0 or one that is not a number, and at most 1,
+ *  since the fit never scales a net up. */
+function floorOf(fitFloor: number | undefined): number {
+	return fitFloor !== undefined && fitFloor > 0 ? Math.min(fitFloor, 1) : 0;
+}
+
+/**
+ * Where a fitted drawing starts: the whole extent as `fitTransform` frames
+ * it, unless that needs a scale below the floor `fitFloor` sets; then the
+ * extent at the floor's scale, centred on its middle, for the viewer to pan.
+ * A net one rank of dozens of places wide stays readable this way, where
+ * the whole of it would be drawn too small to read.
+ */
+export function flooredTransform(extent: Extent | null, view: ViewBox, fitFloor: number | undefined, margin = FRAME_MARGIN): ViewTransform {
+	const whole = fitTransform(extent, view, margin);
+	const floor = floorOf(fitFloor);
+	return extent && whole.k < floor ? centredTransform(extent, view, floor) : whole;
 }
 
 export function panBy(t: ViewTransform, dx: number, dy: number): ViewTransform {

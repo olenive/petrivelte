@@ -23,6 +23,7 @@ import { ROOT_ATTRS, sceneIds, sceneOf, type SceneIds } from '$lib/netDraw/scene
 import {
 	IDENTITY,
 	fitTransform,
+	flooredTransform,
 	installPanZoom,
 	transformText,
 	viewBoxText,
@@ -38,8 +39,10 @@ export interface DrawOptions {
 	/** The frame the drawing is fitted into, in SVG user units; default: the svg's width and height attributes, else 800 by 500. */
 	width?: number;
 	height?: number;
-	/** Start with the whole net in view: scale the drawing down, never up, so its extent fits the frame, centred. Default false, which shows the net at the app's size from its first rank. */
+	/** Start with the whole net in view: scale the drawing down, never up, so its extent fits the frame, centred. With `interactive`, a double-click toggles between that start, held at `fitFloor`'s scale, and the whole net, which for a net that fits whole returns it to its fitted view. Default false, which shows the net at the app's size from its first rank. */
 	fit?: boolean;
+	/** With `fit`, the smallest scale the fit may choose; a net that would need less is shown at this scale, centred on its middle, for the viewer to pan. Default 0 (no floor). A value above 1 counts as 1. */
+	fitFloor?: number;
 }
 
 export interface DrawSummary {
@@ -52,6 +55,14 @@ export interface DrawSummary {
 /** The frame when neither the options nor the element give one. */
 const DEFAULT_FRAME = Object.freeze({ width: 800, height: 500 });
 
+/** The two views of a fitted drawing a double-click toggles between: where
+ *  a layout starts, held at the floor's scale, and the whole net. They are
+ *  the same view when the net fits at or above the floor. */
+interface FitViews {
+	floored: ViewTransform;
+	whole: ViewTransform;
+}
+
 /** What the module keeps for an element it has drawn into. */
 interface Held {
 	generation: number;
@@ -61,8 +72,13 @@ interface Held {
 	ids: SceneIds;
 	view: ViewBox;
 	transform: ViewTransform;
+	/** With `fit`, the views a double-click toggles between; null without. */
+	views: FitViews | null;
+	/** Whether the last double-click asked for the whole net; each layout
+	 *  starts on the floored view. */
+	wholeShown: boolean;
 	interactive: boolean;
-	/** Stops pan and zoom; a no-op while they are off. */
+	/** Stops pan, zoom and the double-click; a no-op while they are off. */
 	detach: () => void;
 }
 
@@ -113,20 +129,46 @@ function applyTransform(svg: SVGSVGElement, transform: ViewTransform): void {
 	held.root.setAttribute('transform', transformText(transform));
 }
 
+/** Pan and zoom, and on a fitted drawing a double-click that toggles
+ *  between the floored view and the whole net. The double-click is heard on
+ *  every interactive drawing and does nothing without `fit`, so a drawing
+ *  that turns `fit` on later needs no new listener. On a fitted one it
+ *  cancels the browser's own response: the `dblclick` itself, and the
+ *  second press before it, on which the browser selects the word under the
+ *  pointer. */
 function panZoomOn(svg: SVGSVGElement): () => void {
-	return installPanZoom({
+	const stopPanZoom = installPanZoom({
 		svg,
 		view: () => drawings.get(svg)?.view ?? { x: 0, y: 0, ...DEFAULT_FRAME },
 		transform: () => drawings.get(svg)?.transform ?? IDENTITY,
 		apply: (transform) => applyTransform(svg, transform),
 	});
+	const onPress = (event: MouseEvent) => {
+		if (event.detail > 1 && drawings.get(svg)?.views) event.preventDefault();
+	};
+	const onDoubleClick = (event: MouseEvent) => {
+		const held = drawings.get(svg);
+		if (!held?.views) return;
+		event.preventDefault();
+		const wholeShown = !held.wholeShown;
+		drawings.set(svg, { ...held, wholeShown });
+		applyTransform(svg, wholeShown ? held.views.whole : held.views.floored);
+	};
+	svg.addEventListener('mousedown', onPress);
+	svg.addEventListener('dblclick', onDoubleClick);
+	return () => {
+		svg.removeEventListener('mousedown', onPress);
+		svg.removeEventListener('dblclick', onDoubleClick);
+		stopPanZoom();
+	};
 }
 
 /**
  * Draws `state` into `svg`, or brings an earlier drawing up to date in
  * place. The layout is computed on the first call and again only for a new
  * generation or a changed topology, which also resets the pan and zoom to
- * where a fresh drawing starts: the app's view, or with `fit` the whole net.
+ * where a fresh drawing starts: the app's view, or with `fit` the whole net,
+ * held at `fitFloor`'s scale when the whole would need less.
  */
 export function drawNet(svg: SVGSVGElement, state: NetState, options: DrawOptions = {}): DrawSummary {
 	const previous = drawings.get(svg) ?? null;
@@ -140,10 +182,15 @@ export function drawNet(svg: SVGSVGElement, state: NetState, options: DrawOption
 	const height = dimension(options.height, svg.getAttribute('height'), DEFAULT_FRAME.height);
 	const corner = frameView(keyed.layout.extent, width, height);
 	const view: ViewBox = { x: corner.x, y: corner.y, width, height };
-	// A fresh layout starts from the app's view, or the whole net when
-	// fitted; a redraw keeps wherever the viewer has panned and zoomed.
-	const start = options.fit ? fitTransform(keyed.layout.extent, view) : IDENTITY;
-	const transform = previous && !relaidOut ? previous.transform : start;
+	const views: FitViews | null = options.fit
+		? { floored: flooredTransform(keyed.layout.extent, view, options.fitFloor), whole: fitTransform(keyed.layout.extent, view) }
+		: null;
+	// A fresh layout starts from the app's view, or the floored view when
+	// fitted; a redraw keeps wherever the viewer has panned, zoomed or
+	// double-clicked to.
+	const kept = previous !== null && !relaidOut;
+	const transform = kept ? previous.transform : (views?.floored ?? IDENTITY);
+	const wholeShown = kept ? previous.wholeShown : false;
 
 	const scene = sceneOf({
 		mirror,
@@ -169,6 +216,8 @@ export function drawNet(svg: SVGSVGElement, state: NetState, options: DrawOption
 		ids: parts.ids,
 		view,
 		transform,
+		views,
+		wholeShown,
 		interactive,
 		detach: interactive ? (wasInteractive && previous ? previous.detach : panZoomOn(svg)) : NO_OP,
 	});
