@@ -25,3 +25,8 @@ ui:
 [working-directory: 'frontend']
 build:
     npm run build
+
+# The net drawing module's library build into frontend/dist-lib/: net-view.js (ES) and net-view.iife.js
+[working-directory: 'frontend']
+build-lib:
+    npm run build:lib

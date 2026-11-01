@@ -399,13 +399,16 @@ export function backEdgeControl(a: Point, b: Point, config: LayoutConfig = DEFAU
 	return { x: (a.x + b.x) / 2 + side.x * bow, y: (a.y + b.y) / 2 + side.y * bow };
 }
 
+/** The room a view leaves between the drawing's extent and its edges. */
+export const FRAME_MARGIN = 60;
+
 /**
  * Where to put the top-left corner of a `width` by `height` view onto the
  * drawing: along each axis, centred on the extent if it fits with `margin`
  * on both sides, otherwise starting `margin` before it, so a large net is
  * seen from its first rank.
  */
-export function frameView(extent: Extent | null, width: number, height: number, margin = 60): Point {
+export function frameView(extent: Extent | null, width: number, height: number, margin = FRAME_MARGIN): Point {
 	if (!extent) return { x: -width / 2, y: -height / 2 };
 	const axis = (min: number, max: number, size: number) =>
 		max - min + 2 * margin <= size ? (min + max) / 2 - size / 2 : min - margin;

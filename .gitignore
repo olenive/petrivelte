@@ -17,6 +17,7 @@ build/
 frontend/node_modules/
 frontend/.svelte-kit/
 frontend/build/
+frontend/dist-lib/
 frontend/.env
 frontend/.env.*
 !frontend/.env.example

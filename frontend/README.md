@@ -70,6 +70,7 @@ Most modules are pure functions with a table of cases in a sibling test.
   inside), `tokenFilter.ts` (the view-side token filter by keys),
   `netView.ts` (what the panel draws), `firingPlayback.ts` (the firing
   animation), `layout.ts` and `graphLayout.ts` (the layered layout).
+- `netDraw.ts` with `netDraw/`: the net drawing module, below.
 - `netAnomalies.ts`: words for the server's anomaly tags; unknown tags show
   as themselves.
 - `netInstances.ts`: `groupByDefinition` and `workerLabel`, answering which
@@ -98,6 +99,55 @@ Most modules are pure functions with a table of cases in a sibling test.
 - `components/`: graph rendering (`GraphPanel`, `Place*`, `Transition`,
   `Edge`, `Token`, `AnimatingToken`), inspectors, `LogViewer`, `RunsPanel`,
   notebook banners and panels, `AppNav`, `ProvenanceChip`, toasts.
+
+## The net drawing module
+
+`src/lib/netDraw.ts` draws a net's state (`NetState`) into an `<svg>`
+element the way the graph panel does, with no framework.
+`drawNet(svg, state, options)` lays the net out once per topology and
+generation, kept per element, and draws or updates in place the places,
+token dots and labels, counts, the badges of tokens that hold nets,
+transitions in their four looks and arcs in their strokes and heads, with
+pan by drag and zoom by wheel; `releaseNet(svg)` forgets the element and
+removes its listeners. A state without tokens, as the public tier sends a
+share that does not publish payloads, draws each place with its count.
+The options:
+
+- `tokenLabels`: each token's label on its dot and the first under its
+  place; on by default when the state lists any tokens.
+- `interactive`: pan by drag and zoom by wheel; on by default.
+- `width`, `height`: the frame in user units; by default the svg's own
+  `width` and `height` attributes, else 800 by 500.
+- `fit`: start with the whole net in view, scaled down (never up) to fit
+  the frame with the layout's margin and centred, after the first draw and
+  each re-layout; a redraw keeps the viewer's pan and zoom. Off by default,
+  which shows the net at the app's size from its first rank.
+
+The module writes SVG presentation attributes and classes (`net-place`,
+`net-transition`, `net-transition-fireable`, `net-arc`, `net-token`,
+`net-count`, `net-badge` and others), never an inline style or script, so
+it runs under a policy that allows script and style only by nonce. Colours
+are the light theme's; a host page restyles by class and sets the svg's
+background (the panel's is `#f0f0f0`).
+
+`npm run build:lib`, or `just build-lib` at the repository root, builds it
+with `vite.lib.config.ts`, apart from the app's build and without Svelte,
+into `dist-lib/`:
+
+- `net-view.js`, an ES module exporting `drawNet` and `releaseNet`. The app
+  will adopt it in place of the panel's components, so that one drawing
+  serves both.
+- `net-view.iife.js`, a classic script that puts `petriNetView.drawNet` and
+  `petriNetView.releaseNet` on the global object, for a page that loads it
+  with `<script nonce src>`. The public tier vendors this file:
+  petritype-server's `scripts/update-net-view.sh` rebuilds it from a
+  checkout of this repository and copies it in.
+
+`netDraw.test.ts` draws the fixture `netDraw.fixture.json` under jsdom;
+`netDraw.bundle.test.ts` builds both files and holds that they name nothing
+from Svelte, import nothing and export the two functions; and
+`tests/ui/test_net_view_module.py` loads the IIFE in a bare page served
+with the public tier's policy and draws the same fixture.
 
 ## Logs
 

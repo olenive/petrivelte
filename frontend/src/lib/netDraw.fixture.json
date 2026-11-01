@@ -1,0 +1,313 @@
+{
+	"protocol_version": 1,
+	"runtime": "python",
+	"net": "fixture",
+	"generation": 1,
+	"marking_version": 7,
+	"running": true,
+	"topology": {
+		"places": [
+			{
+				"name": "Queue",
+				"type_name": "Job",
+				"serializable": true
+			},
+			{
+				"name": "Backlog",
+				"type_name": "Job",
+				"serializable": true
+			},
+			{
+				"name": "Light",
+				"type_name": "str",
+				"serializable": true,
+				"style": {
+					"fill": "token"
+				}
+			},
+			{
+				"name": "Fleet",
+				"type_name": "Bus",
+				"serializable": false,
+				"nested": true
+			},
+			{
+				"name": "Done",
+				"type_name": "Job",
+				"serializable": true
+			}
+		],
+		"transitions": [
+			{
+				"name": "Work",
+				"detail": {
+					"function_name": "do_work",
+					"signature": "(job: Job) -> Job"
+				}
+			},
+			{
+				"name": "Sweep"
+			},
+			{
+				"name": "Change"
+			},
+			{
+				"name": "Park"
+			}
+		],
+		"edges": [
+			{
+				"place": "Queue",
+				"transition": "Work",
+				"direction": "in",
+				"kind": "take"
+			},
+			{
+				"place": "Light",
+				"transition": "Work",
+				"direction": "in",
+				"kind": "snapshot"
+			},
+			{
+				"place": "Backlog",
+				"transition": "Work",
+				"direction": "in",
+				"kind": "mutate"
+			},
+			{
+				"place": "Done",
+				"transition": "Work",
+				"direction": "out"
+			},
+			{
+				"place": "Backlog",
+				"transition": "Sweep",
+				"direction": "in",
+				"kind": "drain"
+			},
+			{
+				"place": "Fleet",
+				"transition": "Sweep",
+				"direction": "in",
+				"kind": "survey"
+			},
+			{
+				"place": "Done",
+				"transition": "Sweep",
+				"direction": "out"
+			},
+			{
+				"place": "Light",
+				"transition": "Change",
+				"direction": "in",
+				"kind": "take"
+			},
+			{
+				"place": "Light",
+				"transition": "Change",
+				"direction": "out"
+			},
+			{
+				"place": "Done",
+				"transition": "Park",
+				"direction": "in",
+				"kind": "take"
+			},
+			{
+				"place": "Queue",
+				"transition": "Park",
+				"direction": "out"
+			}
+		]
+	},
+	"transitions": {
+		"Work": {
+			"enabled": true,
+			"fireable": true,
+			"in_flight": false
+		},
+		"Sweep": {
+			"enabled": true,
+			"fireable": false,
+			"in_flight": true
+		},
+		"Change": {
+			"enabled": true,
+			"fireable": false,
+			"in_flight": false
+		},
+		"Park": {
+			"enabled": false,
+			"fireable": false,
+			"in_flight": false
+		}
+	},
+	"marking": {
+		"places": {
+			"Queue": {
+				"count": 3,
+				"tokens": [
+					{
+						"id": "1",
+						"label": "Job(id=1, kind='render')",
+						"color": "#4f9dde"
+					},
+					{
+						"id": "2",
+						"label": "Job(id=2, kind='render')",
+						"color": "#22c55e"
+					},
+					{
+						"id": "3",
+						"label": "Job(id=3, kind='render')",
+						"color": "#f59e0b"
+					}
+				]
+			},
+			"Backlog": {
+				"count": 25,
+				"tokens": [
+					{
+						"id": "100",
+						"label": "Job(id=100)"
+					},
+					{
+						"id": "101",
+						"label": "Job(id=101)"
+					},
+					{
+						"id": "102",
+						"label": "Job(id=102)"
+					},
+					{
+						"id": "103",
+						"label": "Job(id=103)"
+					},
+					{
+						"id": "104",
+						"label": "Job(id=104)"
+					},
+					{
+						"id": "105",
+						"label": "Job(id=105)"
+					},
+					{
+						"id": "106",
+						"label": "Job(id=106)"
+					},
+					{
+						"id": "107",
+						"label": "Job(id=107)"
+					},
+					{
+						"id": "108",
+						"label": "Job(id=108)"
+					},
+					{
+						"id": "109",
+						"label": "Job(id=109)"
+					},
+					{
+						"id": "110",
+						"label": "Job(id=110)"
+					},
+					{
+						"id": "111",
+						"label": "Job(id=111)"
+					},
+					{
+						"id": "112",
+						"label": "Job(id=112)"
+					},
+					{
+						"id": "113",
+						"label": "Job(id=113)"
+					},
+					{
+						"id": "114",
+						"label": "Job(id=114)"
+					},
+					{
+						"id": "115",
+						"label": "Job(id=115)"
+					},
+					{
+						"id": "116",
+						"label": "Job(id=116)"
+					},
+					{
+						"id": "117",
+						"label": "Job(id=117)"
+					},
+					{
+						"id": "118",
+						"label": "Job(id=118)"
+					},
+					{
+						"id": "119",
+						"label": "Job(id=119)"
+					},
+					{
+						"id": "120",
+						"label": "Job(id=120)"
+					},
+					{
+						"id": "121",
+						"label": "Job(id=121)"
+					},
+					{
+						"id": "122",
+						"label": "Job(id=122)"
+					},
+					{
+						"id": "123",
+						"label": "Job(id=123)"
+					},
+					{
+						"id": "124",
+						"label": "Job(id=124)"
+					}
+				]
+			},
+			"Light": {
+				"count": 1,
+				"tokens": [
+					{
+						"id": "200",
+						"label": "red",
+						"color": "#ef4444"
+					}
+				]
+			},
+			"Fleet": {
+				"count": 1,
+				"tokens": [
+					{
+						"id": "300",
+						"label": "Bus(route=7)",
+						"nets": [
+							{
+								"name": "cabin",
+								"nested_id": "n-300",
+								"path": "fixture/Fleet/#300/cabin",
+								"count": 3
+							}
+						]
+					}
+				]
+			},
+			"Done": {
+				"count": 0,
+				"tokens": []
+			}
+		}
+	},
+	"progress": {
+		"step_count": 12,
+		"last_fired": "Work",
+		"fired_counts": {
+			"Work": 12
+		},
+		"last_progress_at": "2026-10-31T10:00:00Z"
+	}
+}
