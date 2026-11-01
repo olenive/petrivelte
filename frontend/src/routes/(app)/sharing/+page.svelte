@@ -39,6 +39,7 @@
 		hasRoomForHandle,
 		keepHandle,
 		netsByWorker,
+		payloadWarning,
 		pickRefusal,
 		pickedWorkers,
 		previewPublicPath,
@@ -141,6 +142,7 @@
 	const createdText = $derived(created ? createdShareText(created, linkBase.base) : '');
 	const createdIsPublic = $derived(created !== null && created.public_path !== null);
 	const slug = $derived(formSlug(form));
+	const payloadWarningText = $derived(payloadWarning(form));
 	const defaultExpiry = $derived(defaultExpiresInDays(form.audience));
 	const roomForHandle = $derived(hasRoomForHandle(handles.length, handleLimit));
 	const showNewHandleField = $derived(handles.length === 0 || addingHandle);
@@ -897,13 +899,22 @@
 				<span class="text-xs text-foreground-faint">1 to 365. Left empty, {defaultExpiry}.</span>
 			</label>
 
-			<label class="flex items-baseline gap-2 text-sm text-foreground-muted cursor-pointer">
-				<input type="checkbox" name="share-publish-payloads" bind:checked={form.publishPayloads} />
-				<span>
-					<span class="text-foreground">Publish payloads</span>
-					<span class="block text-xs text-foreground-faint">Off hides token values and log lines from viewers; they still see counts and firings.</span>
-				</span>
-			</label>
+			<div class="flex items-baseline gap-2 text-sm text-foreground-muted">
+				<input id="share-publish-payloads" type="checkbox" name="share-publish-payloads" bind:checked={form.publishPayloads} class="cursor-pointer" />
+				<div>
+					<label for="share-publish-payloads" class="cursor-pointer">
+						<span class="text-foreground">Publish payloads</span>
+						<span class="block text-xs text-foreground-faint">Off hides token values and log lines from viewers; they still see counts and firings.</span>
+					</label>
+					<!-- The live region stays in the page so that a screen reader hears the
+					     warning when it appears or changes with the audience. -->
+					<div aria-live="polite">
+						{#if payloadWarningText}
+							<p class="mt-1 text-xs text-status-warning" data-testid="share-payload-warning">{payloadWarningText}</p>
+						{/if}
+					</div>
+				</div>
+			</div>
 
 			<details class="text-sm text-foreground-muted">
 				<summary class="cursor-pointer select-none">Advanced</summary>

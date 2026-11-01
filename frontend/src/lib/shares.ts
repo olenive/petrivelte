@@ -3,8 +3,10 @@
  * address, the owner's public handles (which one the form offers first, the
  * count against the limit, whether one is in use, what releasing one risks),
  * the net picker that keeps a world on one worker, the slug a public share's
- * label suggests, the mint request built from the form, a bundle's size as
- * the bundles section shows it, and whether a zip is small enough to upload.
+ * label suggests, the warning that publishing payloads shows token values to
+ * whoever can reach the share, the mint request built from the form, a
+ * bundle's size as the bundles section shows it, and whether a zip is small
+ * enough to upload.
  *
  * The form refuses nothing the server does not refuse. It builds the request
  * from what the owner typed and leaves every judgement of it to the server,
@@ -389,6 +391,21 @@ export function withAudience(form: ShareForm, audience: ShareAudience): ShareFor
 	const expiresInDays =
 		form.expiresInDays === defaultExpiresInDays(form.audience) ? defaultExpiresInDays(audience) : form.expiresInDays;
 	return { ...form, audience, expiresInDays, scope: audience === 'public' ? 'read' : form.scope };
+}
+
+/**
+ * What the form says under "Publish payloads" while it is ticked, or null.
+ * Published payloads show every token's value to whoever can open the share,
+ * so a public share shows them to anyone at its address and a link share to
+ * anyone the link reaches. A named share says nothing more: the owner chooses
+ * its one viewer, and the checkbox's help text already says what publishing
+ * shows.
+ */
+export function payloadWarning(form: Pick<ShareForm, 'audience' | 'publishPayloads'>): string | null {
+	if (!form.publishPayloads) return null;
+	if (form.audience === 'public') return 'Token values will be visible to anyone, at a public address.';
+	if (form.audience === 'link') return 'Token values will be visible to anyone who has the link.';
+	return null;
 }
 
 /** A comma-separated list of names, each trimmed, the empty ones dropped. */
